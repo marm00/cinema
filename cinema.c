@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <windows.h>
+#include "cJSON.h"
 
 typedef struct {
   char filepath[512];
