@@ -34,6 +34,10 @@ typedef struct {
 } FFplayArgs;
 
 char *read_json(const char *filename) {
+  if (filename == NULL || filename[0] == '\0') {
+    fprintf(stderr, "Invalid filename provided (empty string)\n");
+    return NULL;
+  }
   FILE *file = fopen(filename, "rb");
   if (file == NULL) {
     fprintf(stderr, "Failed to open config file '%s': %s\n", filename, strerror(errno));
@@ -61,14 +65,13 @@ char *read_json(const char *filename) {
 cJSON *parse_json(const char *filename) {
   char *json_string = read_json(filename);
   if (json_string == NULL) {
-    fprintf(stderr, "Failed to read configuration file '%s': %s\n", filename, strerror(errno));
     return NULL;
   }
   cJSON *json = cJSON_Parse(json_string);
   if (json == NULL) {
     const char *error_ptr = cJSON_GetErrorPtr();
     if (error_ptr != NULL) {
-      fprintf(stderr, "Error before: %s\n", error_ptr);
+      fprintf(stderr, "JSON parsing error in file '%s' for contents: %s\n", filename, error_ptr);
     }
   }
   free(json_string);
@@ -83,16 +86,27 @@ int main() {
   char *config_filename = "config.json";
   cJSON *json = parse_json(config_filename);
   if (json == NULL) {
-    fprintf(stderr, "Failed to parse JSON file '%s'\n", config_filename);
     return 1;
   }
   char *string = cJSON_Print(json);
   if (string == NULL) {
     fprintf(stderr, "Failed to print cJSON items from config tree with cJSON_Print.\n");
   }
-  printf(string);
+  printf("%s\n", string);
 
-  FFplayArgs args = {"D:\\Test\\video.mp4", 100};
+  cJSON *path = cJSON_GetObjectItemCaseSensitive(json, "path");
+  char *name = NULL;
+  if (cJSON_IsString(path) && (path->valuestring != NULL)) {
+    name = path->valuestring;
+  } else {
+    return 1;
+  }
+
+  FFplayArgs args;
+  strncpy(args.filename, name, sizeof(args.filename) - 1);
+  args.filename[sizeof(args.filename) - 1] = '\0';
+  args.volume = 100;
+
   char command[512]; // figure out max buffer size
   snprintf(command, sizeof(command),
            "ffplay"
