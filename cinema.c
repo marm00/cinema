@@ -58,23 +58,40 @@ char *read_json(const char *filename) {
   return json_content;
 }
 
+cJSON *parse_json(const char *filename) {
+  char *json_string = read_json(filename);
+  if (json_string == NULL) {
+    fprintf(stderr, "Failed to read configuration file '%s': %s\n", filename, strerror(errno));
+    return NULL;
+  }
+  cJSON *json = cJSON_Parse(json_string);
+  if (json == NULL) {
+    const char *error_ptr = cJSON_GetErrorPtr();
+    if (error_ptr != NULL) {
+      fprintf(stderr, "Error before: %s\n", error_ptr);
+    }
+  }
+  free(json_string);
+  return json;
+}
+
 int main() {
 #ifndef _WIN32
   fprintf(stderr, "Error: Your operating system is not supported, Windows-only currently.\n");
-  return EXIT_FAILURE;
+  return 1;
 #endif
   char *config_filename = "config.json";
-  char *config_string = read_json(config_filename);
-  if (config_string == NULL) {
-    printf("Failed to read configuration file '%s'", config_filename);
+  cJSON *json = parse_json(config_filename);
+  if (json == NULL) {
+    fprintf(stderr, "Failed to parse JSON file '%s'\n", config_filename);
     return 1;
   }
-  cJSON *json = cJSON_Parse(config_string);
   char *string = cJSON_Print(json);
   if (string == NULL) {
     fprintf(stderr, "Failed to print cJSON items from config tree with cJSON_Print.\n");
   }
   printf(string);
+
   FFplayArgs args = {"D:\\Test\\video.mp4", 100};
   char command[512]; // figure out max buffer size
   snprintf(command, sizeof(command),
