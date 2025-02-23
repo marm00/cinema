@@ -33,9 +33,9 @@ typedef struct {
   int volume;
 } FFplayArgs;
 
-char *read_config(const char *filename) {
+char *read_json(const char *filename) {
   FILE *file = fopen(filename, "rb");
-  if (!file) {
+  if (file == NULL) {
     fprintf(stderr, "Failed to open config file '%s': %s\n", filename, strerror(errno));
     return NULL;
   }
@@ -45,7 +45,7 @@ char *read_config(const char *filename) {
   rewind(file);
   // Buffer for file + null terminator
   char *json_content = (char *)malloc(filesize + 1);
-  if (!json_content) {
+  if (json_content == NULL) {
     fprintf(stderr, "Failed to allocate memory for file '%s' with size '%ld': %s\n",
             filename, filesize + 1, strerror(errno));
     fclose(file);
@@ -64,11 +64,17 @@ int main() {
   return EXIT_FAILURE;
 #endif
   char *config_filename = "config.json";
-  char *config = read_config(config_filename);
-  if (!config) {
+  char *config_string = read_json(config_filename);
+  if (config_string == NULL) {
     printf("Failed to read configuration file '%s'", config_filename);
     return 1;
   }
+  cJSON *json = cJSON_Parse(config_string);
+  char *string = cJSON_Print(json);
+  if (string == NULL) {
+    fprintf(stderr, "Failed to print cJSON items from config tree with cJSON_Print.\n");
+  }
+  printf(string);
   FFplayArgs args = {"D:\\Test\\video.mp4", 100};
   char command[512]; // figure out max buffer size
   snprintf(command, sizeof(command),
