@@ -28,9 +28,14 @@
 
 #include "cJSON.h"
 
+#define MAX_FILENAME 260
+#define COMMAND_LINE_LIMIT 32768 // likely way smaller in practice
 typedef struct {
-  char filename[512];
+  char filename[MAX_FILENAME];
   int volume;
+  int loop;
+  int alwaysontop;
+  int noborder;
 } FFplayArgs;
 
 char *read_json(const char *filename) {
@@ -78,6 +83,39 @@ cJSON *parse_json(const char *filename) {
   return json;
 }
 
+int setup_ffplay(const cJSON *json_args, FFplayArgs *settings) {
+  if (json_args == NULL || settings == NULL) {
+    return 0;
+  }
+  cJSON *vol = cJSON_GetObjectItemCaseSensitive(json_args, "volume");
+  if (cJSON_IsNumber(vol)) {
+    settings->volume = vol->valueint;
+  } else {
+    settings->volume = 100;
+  }
+  cJSON *loop = cJSON_GetObjectItemCaseSensitive(json_args, "loop");
+  if (cJSON_IsNumber(loop)) {
+    settings->loop = loop->valueint;
+  } else {
+    settings->loop = 0;
+  }
+  cJSON *alwaysontop = cJSON_GetObjectItemCaseSensitive(json_args, "alwaysontop");
+  if (cJSON_IsBool(alwaysontop)) {
+    settings->alwaysontop = cJSON_IsTrue(alwaysontop) ? 1 : 0;
+  } else {
+    fprintf(stderr, "Expected boolean type for JSON key 'alwaysontop', defaulting to false\n");
+    settings->alwaysontop = 0;
+  }
+  cJSON *noborder = cJSON_GetObjectItemCaseSensitive(json_args, "noborder");
+  if (cJSON_IsBool(noborder)) {
+    settings->noborder = cJSON_IsTrue(noborder) ? 1 : 0;
+  } else {
+    fprintf(stderr, "Expected boolean type for JSON key 'noborder', defaulting to false\n");
+    settings->noborder = 0;
+  }
+  return 1;
+}
+
 int main() {
 #ifndef _WIN32
   fprintf(stderr, "Error: Your operating system is not supported, Windows-only currently.\n");
@@ -91,30 +129,42 @@ int main() {
   char *string = cJSON_Print(json);
   if (string == NULL) {
     fprintf(stderr, "Failed to print cJSON items from config tree with cJSON_Print.\n");
+  } else {
+    printf("%s\n", string);
   }
-  printf("%s\n", string);
 
   cJSON *path = cJSON_GetObjectItemCaseSensitive(json, "path");
   char *name = NULL;
   if (cJSON_IsString(path) && (path->valuestring != NULL)) {
     name = path->valuestring;
   } else {
+    fprintf(stderr, "No 'path' object found in config\n");
+    return 1;
+  }
+
+  cJSON *json_ffplay = cJSON_GetObjectItemCaseSensitive(json, "ffplay");
+  if (!cJSON_IsObject(json_ffplay)) {
+    fprintf(stderr, "No 'ffplay' object found in config\n");
     return 1;
   }
 
   FFplayArgs args;
   strncpy(args.filename, name, sizeof(args.filename) - 1);
   args.filename[sizeof(args.filename) - 1] = '\0';
-  args.volume = 100;
+  setup_ffplay(json_ffplay, &args);
 
-  char command[512]; // figure out max buffer size
+  char command[COMMAND_LINE_LIMIT];
   snprintf(command, sizeof(command),
            "ffplay"
-           " -loop 0"
-           " -alwaysontop"
            " -volume %d"
-           " %s", // File path
+           " -loop %d"
+           " %s"  // alwaysontop
+           " %s"  // noborder
+           " %s", // filename
            args.volume,
+           args.loop,
+           (args.alwaysontop ? "-alwaysontop" : ""),
+           (args.noborder ? "-noborder" : ""),
            args.filename);
   STARTUPINFO si = {0};
   si.cb = sizeof(si);

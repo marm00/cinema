@@ -1,3 +1,9 @@
 {
-    "path": "D:\\Test\\video.mp4"
+  "path": "D:\\Test\\video.mp4",
+  "ffplay": {
+    "volume": 100,
+    "loop": 0,
+    "alwaysontop": true,
+    "noborder": false
   }
+}
