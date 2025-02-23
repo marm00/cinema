@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <wchar.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -31,11 +32,12 @@
 #define MAX_FILENAME 260
 #define COMMAND_LINE_LIMIT 32768 // likely way smaller in practice
 typedef struct {
-  char filename[MAX_FILENAME];
+  wchar_t filename[MAX_FILENAME];
   int volume;
   int loop;
   int alwaysontop;
   int noborder;
+  int showmode;
 } FFplayArgs;
 
 char *read_json(const char *filename) {
@@ -113,7 +115,27 @@ int setup_ffplay(const cJSON *json_args, FFplayArgs *settings) {
     fprintf(stderr, "Expected boolean type for JSON key 'noborder', defaulting to false\n");
     settings->noborder = 0;
   }
+  cJSON *showmode = cJSON_GetObjectItemCaseSensitive(json_args, "showmode");
+  if (cJSON_IsNumber(showmode)) {
+    settings->showmode = showmode->valueint;
+  } else {
+    settings->showmode = 0;
+  }
   return 1;
+}
+
+wchar_t *utf8_to_utf16(const char *utf8_str) {
+  // https://learn.microsoft.com/en-us/windows/win32/api/stringapiset/nf-stringapiset-multibytetowidechar
+  int convert_result = MultiByteToWideChar(CP_UTF8, 0, utf8_str, -1, NULL, 0);
+  if (convert_result <= 0) {
+    return NULL;
+  }
+  wchar_t *wide_str = malloc(convert_result * sizeof(wchar_t));
+  if (!wide_str) {
+    return NULL;
+  }
+  MultiByteToWideChar(CP_UTF8, 0, utf8_str, -1, wide_str, convert_result);
+  return wide_str;
 }
 
 int main() {
@@ -134,9 +156,13 @@ int main() {
   }
 
   cJSON *path = cJSON_GetObjectItemCaseSensitive(json, "path");
-  char *name = NULL;
+  wchar_t *name = NULL;
   if (cJSON_IsString(path) && (path->valuestring != NULL)) {
-    name = path->valuestring;
+    name = utf8_to_utf16(path->valuestring);
+    if (name == NULL) {
+      fprintf(stderr, "Failed to convert filename to utf16: '%s'\n", path->valuestring);
+      return 1;
+    }
   } else {
     fprintf(stderr, "No 'path' object found in config\n");
     return 1;
@@ -149,41 +175,45 @@ int main() {
   }
 
   FFplayArgs args;
-  strncpy(args.filename, name, sizeof(args.filename) - 1);
-  args.filename[sizeof(args.filename) - 1] = '\0';
+  wcsncpy(args.filename, name, (sizeof(args.filename) / sizeof(wchar_t)) - 1);
+  free(name);
+  args.filename[(sizeof(args.filename) / sizeof(wchar_t)) - 1] = L'\0';
   setup_ffplay(json_ffplay, &args);
 
-  char command[COMMAND_LINE_LIMIT];
-  snprintf(command, sizeof(command),
-           "ffplay"
+  wchar_t command[COMMAND_LINE_LIMIT];
+  swprintf(command, sizeof(command),
+           L"ffplay"
            " -volume %d"
            " -loop %d"
-           " %s"  // alwaysontop
-           " %s"  // noborder
-           " %s", // filename
+           " -showmode %d"
+           "%s"       // alwaysontop
+           "%s"       // noborder
+           " \"%ls\"", // filename
            args.volume,
            args.loop,
-           (args.alwaysontop ? "-alwaysontop" : ""),
-           (args.noborder ? "-noborder" : ""),
+           args.showmode,
+           (args.alwaysontop ? " -alwaysontop" : ""),
+           (args.noborder ? " -noborder" : ""),
            args.filename);
-  STARTUPINFO si = {0};
+  wprintf(command);
+  STARTUPINFOW si = { 0 };
   si.cb = sizeof(si);
   PROCESS_INFORMATION pi = {0};
   // https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessa
-  if (!CreateProcess(NULL,    // No module name (use command line)
-                     command, // Command line
-                     NULL,    // Process handle not inheritable
-                     NULL,    // Thread handle not inheritable
-                     FALSE,   // Set handle inheritance to FALSE
-                     0,       // No creation flags
-                     NULL,    // Use parent's environment block
-                     NULL,    // Use parent's starting directory
-                     &si,     // Pointer to STARTUPINFO structure
-                     &pi)     // Pointer to PROCESS_INFORMATION structure
+  if (!CreateProcessW(NULL,    // No module name (use command line)
+                      command, // Command line
+                      NULL,    // Process handle not inheritable
+                      NULL,    // Thread handle not inheritable
+                      FALSE,   // Set handle inheritance to FALSE
+                      0,       // No creation flags
+                      NULL,    // Use parent's environment block
+                      NULL,    // Use parent's starting directory
+                      &si,     // Pointer to STARTUPINFO structure
+                      &pi)     // Pointer to PROCESS_INFORMATION structure
   ) {
-    printf("Failed to start ffplay.\n");
+    fwprintf(stderr, L"CreateProcessW failed: %lu\n", GetLastError());
   };
-  printf("Playing: %s (PID: %lu)\n", args.filename, pi.dwProcessId);
+  printf("Playing: %ls (PID: %lu)\n", args.filename, pi.dwProcessId);
   CloseHandle(pi.hProcess);
   CloseHandle(pi.hThread);
   return 0;
