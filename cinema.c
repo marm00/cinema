@@ -21,17 +21,55 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef _WIN32
 #include <windows.h>
+#endif
+
 #include "cJSON.h"
 
 typedef struct {
-  char filepath[512];
+  char filename[512];
   int volume;
 } FFplayArgs;
 
+char *read_config(const char *filename) {
+  FILE *file = fopen(filename, "rb");
+  if (!file) {
+    fprintf(stderr, "Failed to open config file '%s': %s\n", filename, strerror(errno));
+    return NULL;
+  }
+  // Move pointer to get size in bytes and back
+  fseek(file, 0, SEEK_END);
+  long filesize = ftell(file);
+  rewind(file);
+  // Buffer for file + null terminator
+  char *json_content = (char *)malloc(filesize + 1);
+  if (!json_content) {
+    fprintf(stderr, "Failed to allocate memory for file '%s' with size '%ld': %s\n",
+            filename, filesize + 1, strerror(errno));
+    fclose(file);
+    return NULL;
+  }
+  // Read into buffer with null terminator
+  fread(json_content, 1, filesize, file);
+  json_content[filesize] = '\0';
+  fclose(file);
+  return json_content;
+}
+
 int main() {
-  printf("Hello, World!\n");
-  FFplayArgs args = {"D:\\Test\\1_49mb.mp4", 100};
+#ifndef _WIN32
+  fprintf(stderr, "Error: Your operating system is not supported, Windows-only currently.\n");
+  return EXIT_FAILURE;
+#endif
+  char *config_filename = "config.json";
+  char *config = read_config(config_filename);
+  if (!config) {
+    printf("Failed to read configuration file '%s'", config_filename);
+    return 1;
+  }
+  FFplayArgs args = {"D:\\Test\\video.mp4", 100};
   char command[512]; // figure out max buffer size
   snprintf(command, sizeof(command),
            "ffplay"
@@ -40,7 +78,7 @@ int main() {
            " -volume %d"
            " %s", // File path
            args.volume,
-           args.filepath);
+           args.filename);
   STARTUPINFO si = {0};
   si.cb = sizeof(si);
   PROCESS_INFORMATION pi = {0};
@@ -58,7 +96,7 @@ int main() {
   ) {
     printf("Failed to start ffplay.\n");
   };
-  printf("Playing: %s (PID: %lu)\n", args.filepath, pi.dwProcessId);
+  printf("Playing: %s (PID: %lu)\n", args.filename, pi.dwProcessId);
   CloseHandle(pi.hProcess);
   CloseHandle(pi.hThread);
   return 0;
