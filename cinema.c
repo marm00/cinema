@@ -195,6 +195,9 @@ static int setup_bool(const cJSON *json, const char *key, int default_val) {
 }
 
 static wchar_t *setup_wstring(const cJSON *json, const char *key, const wchar_t *default_val) {
+  if (default_val == NULL) {
+    log_message(LOG_DEBUG, "json", "Passed NULL as default value for setup_wstring");
+  }
   cJSON *option = cJSON_GetObjectItemCaseSensitive(json, key);
   wchar_t *result = NULL;
   if (cJSON_IsString(option) && option->valuestring) {
