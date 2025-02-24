@@ -168,54 +168,41 @@ static cJSON *parse_json(const char *filename) {
   return json;
 }
 
-static const cJSON *setup_option(const cJSON *json_ffplay, const char *key) {
-  if (json_ffplay == NULL || key == NULL) {
-    return NULL;
+static int setup_int(const cJSON *json_ffplay, const char *key, int default_val) {
+  int result = default_val;
+  cJSON *option = cJSON_GetObjectItemCaseSensitive(json_ffplay, key);
+  if (cJSON_IsNumber(option)) {
+    result = option->valueint;
+  } else {
+    log_message(LOG_WARNING, "json", "Defaulting '%s' to '%d': did not find number in JSON", key, default_val);
   }
-  const cJSON *option = cJSON_GetObjectItemCaseSensitive(json_ffplay, key);
-  return option;
+  return result;
 }
 
-static int setup_int(const cJSON *option, int default_val, FFplayArgs *settings) {
-  return 1;
+static int setup_bool(const cJSON *json_ffplay, const char *key, int default_val) {
+  if (default_val != 0 && default_val != 1) {
+    log_message(LOG_WARNING, "json", "Default value '%d' invalid for '%s'; defaulting to '0'", default_val, key);
+    default_val = 0;
+  }
+  int result = default_val;
+  cJSON *option = cJSON_GetObjectItemCaseSensitive(json_ffplay, key);
+  if (cJSON_IsBool(option)) {
+    result = cJSON_IsTrue(option) ? 1 : 0;
+  } else {
+    log_message(LOG_WARNING, "json", "Defaulting '%s' to '%d': did not find boolean in JSON", key, default_val);
+  }
+  return result;
 }
 
 static int setup_ffplay(const cJSON *json_ffplay, FFplayArgs *settings) {
   if (json_ffplay == NULL || settings == NULL) {
     return 0;
   }
-  cJSON *vol = cJSON_GetObjectItemCaseSensitive(json_ffplay, "volume");
-  if (cJSON_IsNumber(vol)) {
-    settings->volume = vol->valueint;
-  } else {
-    settings->volume = 100;
-  }
-  cJSON *loop = cJSON_GetObjectItemCaseSensitive(json_ffplay, "loop");
-  if (cJSON_IsNumber(loop)) {
-    settings->loop = loop->valueint;
-  } else {
-    settings->loop = 0;
-  }
-  cJSON *alwaysontop = cJSON_GetObjectItemCaseSensitive(json_ffplay, "alwaysontop");
-  if (cJSON_IsBool(alwaysontop)) {
-    settings->alwaysontop = cJSON_IsTrue(alwaysontop) ? 1 : 0;
-  } else {
-    fprintf(stderr, "Expected boolean type for JSON key 'alwaysontop', defaulting to false\n");
-    settings->alwaysontop = 0;
-  }
-  cJSON *noborder = cJSON_GetObjectItemCaseSensitive(json_ffplay, "noborder");
-  if (cJSON_IsBool(noborder)) {
-    settings->noborder = cJSON_IsTrue(noborder) ? 1 : 0;
-  } else {
-    fprintf(stderr, "Expected boolean type for JSON key 'noborder', defaulting to false\n");
-    settings->noborder = 0;
-  }
-  cJSON *showmode = cJSON_GetObjectItemCaseSensitive(json_ffplay, "showmode");
-  if (cJSON_IsNumber(showmode)) {
-    settings->showmode = showmode->valueint;
-  } else {
-    settings->showmode = 0;
-  }
+  settings->volume = setup_int(json_ffplay, "volume", 100);
+  settings->loop = setup_int(json_ffplay, "loop", 0);
+  settings->alwaysontop = setup_bool(json_ffplay, "alwaysontop", 1);
+  settings->noborder = setup_bool(json_ffplay, "noborder", 0);
+  settings->showmode = setup_int(json_ffplay, "showmode", 0);
   return 1;
 }
 
@@ -260,7 +247,10 @@ int main() {
   wcsncpy(args.filename, name, (sizeof(args.filename) / sizeof(wchar_t)) - 1);
   free(name);
   args.filename[(sizeof(args.filename) / sizeof(wchar_t)) - 1] = L'\0';
-  setup_ffplay(json_ffplay, &args);
+  if (!setup_ffplay(json_ffplay, &args)) {
+    log_message(LOG_ERROR, "main", "Failed to setup ffplay with JSON config");
+    return 1;
+  }
 
   wchar_t command[COMMAND_LINE_LIMIT];
   swprintf(command, sizeof(command),
