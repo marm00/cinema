@@ -168,9 +168,9 @@ static cJSON *parse_json(const char *filename) {
   return json;
 }
 
-static int setup_int(const cJSON *json_ffplay, const char *key, int default_val) {
+static int setup_int(const cJSON *json, const char *key, int default_val) {
   int result = default_val;
-  cJSON *option = cJSON_GetObjectItemCaseSensitive(json_ffplay, key);
+  cJSON *option = cJSON_GetObjectItemCaseSensitive(json, key);
   if (cJSON_IsNumber(option)) {
     result = option->valueint;
   } else {
@@ -179,17 +179,39 @@ static int setup_int(const cJSON *json_ffplay, const char *key, int default_val)
   return result;
 }
 
-static int setup_bool(const cJSON *json_ffplay, const char *key, int default_val) {
+static int setup_bool(const cJSON *json, const char *key, int default_val) {
   if (default_val != 0 && default_val != 1) {
     log_message(LOG_WARNING, "json", "Default value '%d' invalid for '%s'; defaulting to '0'", default_val, key);
     default_val = 0;
   }
   int result = default_val;
-  cJSON *option = cJSON_GetObjectItemCaseSensitive(json_ffplay, key);
+  cJSON *option = cJSON_GetObjectItemCaseSensitive(json, key);
   if (cJSON_IsBool(option)) {
     result = cJSON_IsTrue(option) ? 1 : 0;
   } else {
     log_message(LOG_WARNING, "json", "Defaulting '%s' to '%d': did not find boolean in JSON", key, default_val);
+  }
+  return result;
+}
+
+static wchar_t *setup_wstring(const cJSON *json, const char *key, const wchar_t *default_val) {
+  cJSON *option = cJSON_GetObjectItemCaseSensitive(json, key);
+  wchar_t *result = NULL;
+  if (cJSON_IsString(option) && option->valuestring) {
+    result = utf8_to_utf16(option->valuestring);
+    if (result == NULL) {
+      log_wmessage(LOG_WARNING, "json", L"Failed to convert JSON string '%s' for key '%s' to UTF-16",
+                   option->valuestring, key);
+    }
+  }
+  if (result == NULL) {
+    if (default_val != NULL) {
+      log_wmessage(LOG_WARNING, "json", L"Defaulting '%s' to '%ls': did not find valid string in JSON",
+                   key, default_val);
+      result = _wcsdup(default_val);
+    } else {
+      log_message(LOG_WARNING, "json", "Returning NULL for '%s': did not find valid string in JSON or default", key);
+    }
   }
   return result;
 }
@@ -221,22 +243,14 @@ int main() {
   if (string == NULL) {
     log_message(LOG_ERROR, "main", "Failed to print cJSON items from config tree with cJSON_Print.");
   } else {
-    log_message(LOG_INFO, "%s\n", string);
+    log_message(LOG_INFO, "main", string);
   }
 
-  cJSON *path = cJSON_GetObjectItemCaseSensitive(json, "path");
-  wchar_t *name = NULL;
-  if (cJSON_IsString(path) && (path->valuestring != NULL)) {
-    name = utf8_to_utf16(path->valuestring);
-    if (name == NULL) {
-      log_message(LOG_ERROR, "main", "Failed to convert filename to utf16: '%s'", path->valuestring);
-      return 1;
-    }
-  } else {
-    log_message(LOG_ERROR, "main", "No 'path' object found in config");
+  wchar_t *name = setup_wstring(json, "path", NULL);
+  if (name == NULL) {
+    log_message(LOG_ERROR, "main", "No valid 'path' found in config");
     return 1;
   }
-
   cJSON *json_ffplay = cJSON_GetObjectItemCaseSensitive(json, "ffplay");
   if (!cJSON_IsObject(json_ffplay)) {
     log_message(LOG_ERROR, "main", "No 'ffplay' object found in config");
