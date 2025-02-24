@@ -5,6 +5,7 @@
     "loop": 0,
     "alwaysontop": true,
     "noborder": false,
-    "showmode": 0
+    "showmode": 0,
+    "fullscreen": true
   }
 }

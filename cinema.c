@@ -40,6 +40,7 @@ typedef struct {
   int alwaysontop;
   int noborder;
   int showmode;
+  int fullscreen;
 } FFplayArgs;
 
 typedef enum {
@@ -228,6 +229,7 @@ static int setup_ffplay(const cJSON *json_ffplay, FFplayArgs *settings) {
   settings->alwaysontop = setup_bool(json_ffplay, "alwaysontop", 1);
   settings->noborder = setup_bool(json_ffplay, "noborder", 0);
   settings->showmode = setup_int(json_ffplay, "showmode", 0);
+  settings->fullscreen = setup_bool(json_ffplay, "fullscreen", 0);
   return 1;
 }
 
@@ -277,12 +279,14 @@ int main() {
            " -showmode %d"
            "%s"        // alwaysontop
            "%s"        // noborder
+           "%s"        // fullscreen (fs)
            " \"%ls\"", // filename
            args.volume,
            args.loop,
            args.showmode,
            (args.alwaysontop ? " -alwaysontop" : ""),
            (args.noborder ? " -noborder" : ""),
+           (args.fullscreen ? " -fs" : ""),
            args.filename);
   log_wmessage(LOG_INFO, "main", command);
 
