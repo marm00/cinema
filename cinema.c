@@ -31,6 +31,8 @@
 
 #define MAX_FILENAME 260
 #define COMMAND_LINE_LIMIT 32768 // likely way smaller in practice
+#define MAX_LOG_MESSAGE 1024
+
 typedef struct {
   wchar_t filename[MAX_FILENAME];
   int volume;
@@ -40,14 +42,95 @@ typedef struct {
   int showmode;
 } FFplayArgs;
 
-char *read_json(const char *filename) {
+typedef enum {
+  LOG_ERROR,
+  LOG_WARNING,
+  LOG_INFO,
+  LOG_DEBUG,
+  LOG_TRACE
+} LogLevel;
+
+static const char *level_to_str(LogLevel level) {
+  switch (level) {
+  case LOG_ERROR:
+    return "ERROR";
+  case LOG_WARNING:
+    return "WARNING";
+  case LOG_INFO:
+    return "INFO";
+  case LOG_DEBUG:
+    return "DEBUG";
+  case LOG_TRACE:
+    return "TRACE";
+  default:
+    return "LOG";
+  }
+}
+
+static LogLevel GLOBAL_LOG_LEVEL = LOG_TRACE;
+
+static char *utf16_to_utf8(const wchar_t *wstr) {
+  // https://learn.microsoft.com/en-us/windows/win32/api/stringapiset/nf-stringapiset-widechartomultibyte
+  int convert_result = WideCharToMultiByte(CP_UTF8, 0, wstr, -1, NULL, 0, NULL, NULL);
+  if (convert_result <= 0) {
+    return NULL;
+  }
+  char *str = malloc(convert_result);
+  if (str == NULL) {
+    return NULL;
+  }
+  WideCharToMultiByte(CP_UTF8, 0, wstr, -1, str, convert_result, NULL, NULL);
+  return str;
+}
+
+static wchar_t *utf8_to_utf16(const char *utf8_str) {
+  // https://learn.microsoft.com/en-us/windows/win32/api/stringapiset/nf-stringapiset-multibytetowidechar
+  int convert_result = MultiByteToWideChar(CP_UTF8, 0, utf8_str, -1, NULL, 0);
+  if (convert_result <= 0) {
+    return NULL;
+  }
+  wchar_t *wide_str = malloc(convert_result * sizeof(wchar_t));
+  if (wide_str == NULL) {
+    return NULL;
+  }
+  MultiByteToWideChar(CP_UTF8, 0, utf8_str, -1, wide_str, convert_result);
+  return wide_str;
+}
+
+static void log_message(LogLevel level, const char *location, const char *message, ...) {
+  if (level > GLOBAL_LOG_LEVEL) {
+    return;
+  }
+  // Process variadic args
+  va_list args;
+  va_start(args, message);
+  fprintf(stderr, "[%s] [%s] ", level_to_str(level), location);
+  vfprintf(stderr, message, args);
+  fprintf(stderr, "\n");
+  va_end(args);
+}
+
+static void log_wmessage(LogLevel level, const char *location, const wchar_t *wmessage, ...) {
+  if (level > GLOBAL_LOG_LEVEL)
+    return;
+  va_list args;
+  va_start(args, wmessage);
+  wchar_t formatted_wmsg[MAX_LOG_MESSAGE];
+  vswprintf(formatted_wmsg, MAX_LOG_MESSAGE, wmessage, args);
+  char *message_utf8 = utf16_to_utf8(formatted_wmsg);
+  fprintf(stderr, "[%s] [%s] %s\n", level_to_str(level), location, message_utf8);
+  free(message_utf8);
+  va_end(args);
+}
+
+static char *read_json(const char *filename) {
   if (filename == NULL || filename[0] == '\0') {
-    fprintf(stderr, "Invalid filename provided (empty string)\n");
+    log_message(LOG_ERROR, "json", "Invalid filename provided (empty string)");
     return NULL;
   }
   FILE *file = fopen(filename, "rb");
   if (file == NULL) {
-    fprintf(stderr, "Failed to open config file '%s': %s\n", filename, strerror(errno));
+    log_message(LOG_ERROR, "json", "Failed to open config file '%s': %s", filename, strerror(errno));
     return NULL;
   }
   // Move pointer to get size in bytes and back
@@ -57,8 +140,8 @@ char *read_json(const char *filename) {
   // Buffer for file + null terminator
   char *json_content = (char *)malloc(filesize + 1);
   if (json_content == NULL) {
-    fprintf(stderr, "Failed to allocate memory for file '%s' with size '%ld': %s\n",
-            filename, filesize + 1, strerror(errno));
+    log_message(LOG_ERROR, "json", "Failed to allocate memory for file '%s' with size '%ld': %s",
+                filename, filesize + 1, strerror(errno));
     fclose(file);
     return NULL;
   }
@@ -69,7 +152,7 @@ char *read_json(const char *filename) {
   return json_content;
 }
 
-cJSON *parse_json(const char *filename) {
+static cJSON *parse_json(const char *filename) {
   char *json_string = read_json(filename);
   if (json_string == NULL) {
     return NULL;
@@ -78,44 +161,56 @@ cJSON *parse_json(const char *filename) {
   if (json == NULL) {
     const char *error_ptr = cJSON_GetErrorPtr();
     if (error_ptr != NULL) {
-      fprintf(stderr, "JSON parsing error in file '%s' for contents: %s\n", filename, error_ptr);
+      log_message(LOG_ERROR, "json", "JSON parsing error in file '%s' for contents: %s", filename, error_ptr);
     }
   }
   free(json_string);
   return json;
 }
 
-int setup_ffplay(const cJSON *json_args, FFplayArgs *settings) {
-  if (json_args == NULL || settings == NULL) {
+static const cJSON *setup_option(const cJSON *json_ffplay, const char *key) {
+  if (json_ffplay == NULL || key == NULL) {
+    return NULL;
+  }
+  const cJSON *option = cJSON_GetObjectItemCaseSensitive(json_ffplay, key);
+  return option;
+}
+
+static int setup_int(const cJSON *option, int default_val, FFplayArgs *settings) {
+  return 1;
+}
+
+static int setup_ffplay(const cJSON *json_ffplay, FFplayArgs *settings) {
+  if (json_ffplay == NULL || settings == NULL) {
     return 0;
   }
-  cJSON *vol = cJSON_GetObjectItemCaseSensitive(json_args, "volume");
+  cJSON *vol = cJSON_GetObjectItemCaseSensitive(json_ffplay, "volume");
   if (cJSON_IsNumber(vol)) {
     settings->volume = vol->valueint;
   } else {
     settings->volume = 100;
   }
-  cJSON *loop = cJSON_GetObjectItemCaseSensitive(json_args, "loop");
+  cJSON *loop = cJSON_GetObjectItemCaseSensitive(json_ffplay, "loop");
   if (cJSON_IsNumber(loop)) {
     settings->loop = loop->valueint;
   } else {
     settings->loop = 0;
   }
-  cJSON *alwaysontop = cJSON_GetObjectItemCaseSensitive(json_args, "alwaysontop");
+  cJSON *alwaysontop = cJSON_GetObjectItemCaseSensitive(json_ffplay, "alwaysontop");
   if (cJSON_IsBool(alwaysontop)) {
     settings->alwaysontop = cJSON_IsTrue(alwaysontop) ? 1 : 0;
   } else {
     fprintf(stderr, "Expected boolean type for JSON key 'alwaysontop', defaulting to false\n");
     settings->alwaysontop = 0;
   }
-  cJSON *noborder = cJSON_GetObjectItemCaseSensitive(json_args, "noborder");
+  cJSON *noborder = cJSON_GetObjectItemCaseSensitive(json_ffplay, "noborder");
   if (cJSON_IsBool(noborder)) {
     settings->noborder = cJSON_IsTrue(noborder) ? 1 : 0;
   } else {
     fprintf(stderr, "Expected boolean type for JSON key 'noborder', defaulting to false\n");
     settings->noborder = 0;
   }
-  cJSON *showmode = cJSON_GetObjectItemCaseSensitive(json_args, "showmode");
+  cJSON *showmode = cJSON_GetObjectItemCaseSensitive(json_ffplay, "showmode");
   if (cJSON_IsNumber(showmode)) {
     settings->showmode = showmode->valueint;
   } else {
@@ -124,25 +219,12 @@ int setup_ffplay(const cJSON *json_args, FFplayArgs *settings) {
   return 1;
 }
 
-wchar_t *utf8_to_utf16(const char *utf8_str) {
-  // https://learn.microsoft.com/en-us/windows/win32/api/stringapiset/nf-stringapiset-multibytetowidechar
-  int convert_result = MultiByteToWideChar(CP_UTF8, 0, utf8_str, -1, NULL, 0);
-  if (convert_result <= 0) {
-    return NULL;
-  }
-  wchar_t *wide_str = malloc(convert_result * sizeof(wchar_t));
-  if (!wide_str) {
-    return NULL;
-  }
-  MultiByteToWideChar(CP_UTF8, 0, utf8_str, -1, wide_str, convert_result);
-  return wide_str;
-}
-
 int main() {
 #ifndef _WIN32
-  fprintf(stderr, "Error: Your operating system is not supported, Windows-only currently.\n");
+  log_message(LOG_ERROR, "main", "Error: Your operating system is not supported, Windows-only currently.");
   return 1;
 #endif
+  SetConsoleOutputCP(CP_UTF8); // Enable UTF-8 console output for Windows
   char *config_filename = "config.json";
   cJSON *json = parse_json(config_filename);
   if (json == NULL) {
@@ -150,9 +232,9 @@ int main() {
   }
   char *string = cJSON_Print(json);
   if (string == NULL) {
-    fprintf(stderr, "Failed to print cJSON items from config tree with cJSON_Print.\n");
+    log_message(LOG_ERROR, "main", "Failed to print cJSON items from config tree with cJSON_Print.");
   } else {
-    printf("%s\n", string);
+    log_message(LOG_INFO, "%s\n", string);
   }
 
   cJSON *path = cJSON_GetObjectItemCaseSensitive(json, "path");
@@ -160,17 +242,17 @@ int main() {
   if (cJSON_IsString(path) && (path->valuestring != NULL)) {
     name = utf8_to_utf16(path->valuestring);
     if (name == NULL) {
-      fprintf(stderr, "Failed to convert filename to utf16: '%s'\n", path->valuestring);
+      log_message(LOG_ERROR, "main", "Failed to convert filename to utf16: '%s'", path->valuestring);
       return 1;
     }
   } else {
-    fprintf(stderr, "No 'path' object found in config\n");
+    log_message(LOG_ERROR, "main", "No 'path' object found in config");
     return 1;
   }
 
   cJSON *json_ffplay = cJSON_GetObjectItemCaseSensitive(json, "ffplay");
   if (!cJSON_IsObject(json_ffplay)) {
-    fprintf(stderr, "No 'ffplay' object found in config\n");
+    log_message(LOG_ERROR, "main", "No 'ffplay' object found in config");
     return 1;
   }
 
@@ -186,8 +268,8 @@ int main() {
            " -volume %d"
            " -loop %d"
            " -showmode %d"
-           "%s"       // alwaysontop
-           "%s"       // noborder
+           "%s"        // alwaysontop
+           "%s"        // noborder
            " \"%ls\"", // filename
            args.volume,
            args.loop,
@@ -195,8 +277,9 @@ int main() {
            (args.alwaysontop ? " -alwaysontop" : ""),
            (args.noborder ? " -noborder" : ""),
            args.filename);
-  wprintf(command);
-  STARTUPINFOW si = { 0 };
+  log_wmessage(LOG_INFO, "main", command);
+
+  STARTUPINFOW si = {0};
   si.cb = sizeof(si);
   PROCESS_INFORMATION pi = {0};
   // https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessa
@@ -211,9 +294,10 @@ int main() {
                       &si,     // Pointer to STARTUPINFO structure
                       &pi)     // Pointer to PROCESS_INFORMATION structure
   ) {
-    fwprintf(stderr, L"CreateProcessW failed: %lu\n", GetLastError());
+    log_wmessage(LOG_ERROR, "main", L"CreateProcessW failed: %lu", GetLastError());
   };
-  printf("Playing: %ls (PID: %lu)\n", args.filename, pi.dwProcessId);
+
+  log_wmessage(LOG_INFO, "main", L"Playing: %ls (PID: %lu)", args.filename, pi.dwProcessId);
   CloseHandle(pi.hProcess);
   CloseHandle(pi.hThread);
   return 0;
