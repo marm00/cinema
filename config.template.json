@@ -1,11 +1,35 @@
 {
   "path": "D:\\Test\\video ❗.mp4",
+  "layouts": {
+    "1": [
+      {
+        "left": 0,
+        "top": 0,
+        "width": 1920,
+        "height": 1080
+      }
+    ],
+    "2": [
+      {
+        "left": 0,
+        "top": 0,
+        "width": "50",
+        "height": 1080
+      },
+      {
+        "left": "33.33",
+        "top": 0,
+        "width": "66.67",
+        "height": 1080
+      }
+    ]
+  },
   "ffplay": {
     "volume": 100,
     "loop": 0,
     "alwaysontop": true,
     "noborder": false,
     "showmode": 0,
-    "fullscreen": true
+    "fullscreen": false
   }
 }
