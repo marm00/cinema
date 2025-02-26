@@ -34,6 +34,13 @@
 #define MAX_LOG_MESSAGE 1024
 
 typedef struct {
+  int left;
+  int top;
+  int width;
+  int height;
+} Screen;
+
+typedef struct {
   wchar_t filename[MAX_FILENAME];
   int volume;
   int loop;
@@ -180,6 +187,47 @@ static int setup_int(const cJSON *json, const char *key, int default_val) {
   return result;
 }
 
+static double parse_percentage(const char *input, double default_val) {
+  if (input == NULL || input[0] == '\0') {
+    log_message(LOG_WARNING, "json", "Defaulting percentage to '%f': empty input", input);
+    return default_val;
+  }
+  int chars_read = 0;
+  int int_result;
+  int success = sscanf(input, "%d%n", &int_result, &chars_read);
+  if (success == 1 && input[chars_read] == '\0') {
+    return (double)int_result;
+  }
+  double double_result;
+  chars_read = 0;
+  success = sscanf(input, "%lf%n", &double_result, &chars_read);
+  if (success == 1 && input[chars_read] == '\0') {
+    return double_result;
+  }
+  log_message(LOG_WARNING, "json", "Defaulting percentage '%s' to '%f': failed to parse", input, default_val);
+  return default_val;
+}
+
+static int setup_screen_value(const cJSON *json, const char *key, int default_val, int monitor_dimension) {
+  int result = default_val;
+  cJSON *option = cJSON_GetObjectItemCaseSensitive(json, key);
+  if (cJSON_IsNumber(option)) {
+    result = option->valueint;
+  } else if (cJSON_IsString(option)) {
+    double percentage = parse_percentage(option->valuestring, (double)default_val);
+    if (percentage >= 0 && percentage <= 100) {
+      result = (int)(percentage * monitor_dimension / 100 + 0.5);
+    } else {
+      log_message(LOG_WARNING, "json", "Defaulting '%s' to '%d': percentage '%f' is out of bounds",
+                  key, default_val, percentage);
+      result = default_val;
+    }
+  } else {
+    log_message(LOG_WARNING, "json", "Defaulting '%s' to '%d': did not find number in JSON", key, default_val);
+  }
+  return result;
+}
+
 static int setup_bool(const cJSON *json, const char *key, int default_val) {
   if (default_val != 0 && default_val != 1) {
     log_message(LOG_WARNING, "json", "Default value '%d' invalid for '%s'; defaulting to '0'", default_val, key);
@@ -230,6 +278,42 @@ static int setup_ffplay(const cJSON *json_ffplay, FFplayArgs *settings) {
   settings->noborder = setup_bool(json_ffplay, "noborder", 0);
   settings->showmode = setup_int(json_ffplay, "showmode", 0);
   settings->fullscreen = setup_bool(json_ffplay, "fullscreen", 0);
+  return 1;
+}
+
+static int setup_layouts(const cJSON *layouts) {
+  if (layouts == NULL) {
+    return 0;
+  }
+  // https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getsystemmetrics
+  int monitor_width = GetSystemMetrics(SM_CXSCREEN);
+  int monitor_height = GetSystemMetrics(SM_CYSCREEN);
+  if (monitor_width == 0 || monitor_height == 0) {
+    log_message(LOG_ERROR, "layouts", "Failed to scan monitor for screen dimensions.");
+    return 0;
+  }
+  log_message(LOG_INFO, "layouts", "Monitor dimensions: %dx%d", monitor_width, monitor_height);
+  const cJSON *layout = layouts->child;
+  while (layout != NULL) {
+    log_message(LOG_DEBUG, "layouts", "Processing layout '%s'", layout->string);
+    if (!cJSON_IsArray(layout)) {
+      log_message(LOG_ERROR, "layouts", "Layout '%s' is not an Array", layout->string);
+      return 0;
+    }
+    const cJSON *screen = layout->child;
+    int i = 0;
+    while (screen != NULL) {
+      log_message(LOG_DEBUG, "layouts", "Adding screen %d", i);
+      int left = setup_screen_value(screen, "left", 0, monitor_width);
+      int top = setup_screen_value(screen, "top", 0, monitor_height);
+      int width = setup_screen_value(screen, "width", 0, monitor_width);
+      int height = setup_screen_value(screen, "height", 0, monitor_height);
+      log_message(LOG_DEBUG, "layouts", "left=%d top=%d width=%d height=%d", left, top, width, height);
+      screen = screen->next;
+      ++i;
+    }
+    layout = layout->next;
+  }
   return 1;
 }
 
@@ -289,6 +373,9 @@ int main() {
            (args.fullscreen ? " -fs" : ""),
            args.filename);
   log_wmessage(LOG_INFO, "main", command);
+
+  cJSON *layouts = cJSON_GetObjectItemCaseSensitive(json, "layouts");
+  setup_layouts(layouts);
 
   STARTUPINFOW si = {0};
   si.cb = sizeof(si);
