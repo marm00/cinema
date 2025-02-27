@@ -357,20 +357,18 @@ int main() {
 
   wchar_t command[COMMAND_LINE_LIMIT];
   swprintf(command, sizeof(command),
-           L"ffplay"
-           " -volume %d"
-           " -loop %d"
-           " -showmode %d"
+           L"mpv"
+           " --volume=%d"
+           " --loop=%d"
            "%s"        // alwaysontop
            "%s"        // noborder
            "%s"        // fullscreen (fs)
            " \"%ls\"", // filename
            args.volume,
            args.loop,
-           args.showmode,
-           (args.alwaysontop ? " -alwaysontop" : ""),
-           (args.noborder ? " -noborder" : ""),
-           (args.fullscreen ? " -fs" : ""),
+           (args.alwaysontop ? " --ontop" : ""),
+           (args.noborder ? " --border=no" : ""),
+           (args.fullscreen ? " --fullscreen=yes" : ""),
            args.filename);
   log_wmessage(LOG_INFO, "main", command);
 
