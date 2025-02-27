@@ -48,7 +48,7 @@ typedef struct {
   int noborder;
   int showmode;
   int fullscreen;
-} FFplayArgs;
+} MpvArgs;
 
 typedef enum {
   LOG_ERROR,
@@ -268,16 +268,16 @@ static wchar_t *setup_wstring(const cJSON *json, const char *key, const wchar_t 
   return result;
 }
 
-static int setup_ffplay(const cJSON *json_ffplay, FFplayArgs *settings) {
-  if (json_ffplay == NULL || settings == NULL) {
+static int setup_mpv(const cJSON *json_mpv, MpvArgs *settings) {
+  if (json_mpv == NULL || settings == NULL) {
     return 0;
   }
-  settings->volume = setup_int(json_ffplay, "volume", 100);
-  settings->loop = setup_int(json_ffplay, "loop", 0);
-  settings->alwaysontop = setup_bool(json_ffplay, "alwaysontop", 1);
-  settings->noborder = setup_bool(json_ffplay, "noborder", 0);
-  settings->showmode = setup_int(json_ffplay, "showmode", 0);
-  settings->fullscreen = setup_bool(json_ffplay, "fullscreen", 0);
+  settings->volume = setup_int(json_mpv, "volume", 100);
+  settings->loop = setup_int(json_mpv, "loop", 0);
+  settings->alwaysontop = setup_bool(json_mpv, "alwaysontop", 1);
+  settings->noborder = setup_bool(json_mpv, "noborder", 0);
+  settings->showmode = setup_int(json_mpv, "showmode", 0);
+  settings->fullscreen = setup_bool(json_mpv, "fullscreen", 0);
   return 1;
 }
 
@@ -317,6 +317,26 @@ static int setup_layouts(const cJSON *layouts) {
   return 1;
 }
 
+static int spawn_mpv(const MpvArgs *args) {
+  wchar_t command[COMMAND_LINE_LIMIT];
+  swprintf(command, sizeof(command),
+           L"mpv"
+           " --volume=%d"
+           " --loop=%d"
+           "%s"        // alwaysontop
+           "%s"        // noborder
+           "%s"        // fullscreen (fs)
+           " \"%ls\"", // filename
+           args->volume,
+           args->loop,
+           (args->alwaysontop ? " --ontop" : ""),
+           (args->noborder ? " --border=no" : ""),
+           (args->fullscreen ? " --fullscreen=yes" : ""),
+           args->filename);
+  log_wmessage(LOG_INFO, "main", command);
+  return 1;
+}
+
 int main() {
 #ifndef _WIN32
   log_message(LOG_ERROR, "main", "Error: Your operating system is not supported, Windows-only currently.");
@@ -340,18 +360,18 @@ int main() {
     log_message(LOG_ERROR, "main", "No valid 'path' found in config");
     return 1;
   }
-  cJSON *json_ffplay = cJSON_GetObjectItemCaseSensitive(json, "ffplay");
-  if (!cJSON_IsObject(json_ffplay)) {
-    log_message(LOG_ERROR, "main", "No 'ffplay' object found in config");
+  cJSON *json_mpv = cJSON_GetObjectItemCaseSensitive(json, "mpv");
+  if (!cJSON_IsObject(json_mpv)) {
+    log_message(LOG_ERROR, "main", "No 'mpv' object found in config");
     return 1;
   }
 
-  FFplayArgs args;
+  MpvArgs args;
   wcsncpy(args.filename, name, (sizeof(args.filename) / sizeof(wchar_t)) - 1);
   free(name);
   args.filename[(sizeof(args.filename) / sizeof(wchar_t)) - 1] = L'\0';
-  if (!setup_ffplay(json_ffplay, &args)) {
-    log_message(LOG_ERROR, "main", "Failed to setup ffplay with JSON config");
+  if (!setup_mpv(json_mpv, &args)) {
+    log_message(LOG_ERROR, "main", "Failed to setup mpv with JSON config");
     return 1;
   }
 
