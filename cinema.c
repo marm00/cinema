@@ -337,6 +337,79 @@ static int spawn_mpv(const MpvArgs *args) {
   return 1;
 }
 
+typedef struct {
+  int index;
+  STARTUPINFOW *si;
+  PROCESS_INFORMATION *pi;
+  HANDLE *hPipe;
+} MpvPipe;
+
+static MpvPipe *pipes;
+static int screen_index = 0;
+static const wchar_t PIPE_PREFIXW[] = L"\\\\.\\pipe\\cinema_mpv_";
+
+static MpvPipe *spawn_mpv_pipe(MpvArgs *args) {
+  wchar_t pipe_name[256];
+  swprintf(pipe_name, sizeof(pipe_name) / sizeof(wchar_t), L"%ls%d", PIPE_PREFIXW, screen_index);
+
+  wchar_t command[COMMAND_LINE_LIMIT];
+  swprintf(command, sizeof(command),
+           L"mpv"
+           " --volume=%d"
+           " --loop=inf"
+          //  " --loop=%d"
+           "%s"        // alwaysontop
+           "%s"        // noborder
+           "%s"        // fullscreen (fs)
+           " \"%ls\"" // filename
+           " --input-ipc-server=%ls",
+           args->volume,
+          //  args->loop,
+           (args->alwaysontop ? " --ontop" : ""),
+           (args->noborder ? " --border=no" : ""),
+           (args->fullscreen ? " --fullscreen=yes" : ""),
+           args->filename,
+           pipe_name);
+  log_wmessage(LOG_INFO, "main", command);
+
+  STARTUPINFOW si = {0};
+  si.cb = sizeof(si);
+  PROCESS_INFORMATION pi = {0};
+  // https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessa
+  if (!CreateProcessW(NULL,    // No module name (use command line)
+                      command, // Command line
+                      NULL,    // Process handle not inheritable
+                      NULL,    // Thread handle not inheritable
+                      FALSE,   // Set handle inheritance to FALSE
+                      0,       // No creation flags
+                      NULL,    // Use parent's environment block
+                      NULL,    // Use parent's starting directory
+                      &si,     // Pointer to STARTUPINFO structure
+                      &pi)     // Pointer to PROCESS_INFORMATION structure
+  ) {
+    log_wmessage(LOG_ERROR, "spawn", L"CreateProcessW failed: %lu", GetLastError());
+    return NULL;
+  };
+
+  // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilea
+  HANDLE *hPipe = INVALID_HANDLE_VALUE;
+  while (1) {
+    hPipe = CreateFileW(pipe_name, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    if (hPipe != INVALID_HANDLE_VALUE) {
+      break;
+    }
+    printf("lol");
+    Sleep(10);
+  }
+
+  MpvPipe *pipe;
+  pipe->index = screen_index;
+  pipe->si = &si;
+  pipe->pi = &pi;
+  pipe->hPipe = hPipe;
+  return pipe;
+}
+
 int main() {
 #ifndef _WIN32
   log_message(LOG_ERROR, "main", "Error: Your operating system is not supported, Windows-only currently.");
@@ -375,46 +448,53 @@ int main() {
     return 1;
   }
 
-  wchar_t command[COMMAND_LINE_LIMIT];
-  swprintf(command, sizeof(command),
-           L"mpv"
-           " --volume=%d"
-           " --loop=%d"
-           "%s"        // alwaysontop
-           "%s"        // noborder
-           "%s"        // fullscreen (fs)
-           " \"%ls\"", // filename
-           args.volume,
-           args.loop,
-           (args.alwaysontop ? " --ontop" : ""),
-           (args.noborder ? " --border=no" : ""),
-           (args.fullscreen ? " --fullscreen=yes" : ""),
-           args.filename);
-  log_wmessage(LOG_INFO, "main", command);
+  MpvPipe *pipe = spawn_mpv_pipe(&args);
+  // CloseHandle(&pipe->pi->hProcess);
+  // CloseHandle(&pipe->pi->hThread);
+  // wchar_t command[COMMAND_LINE_LIMIT];
+  // swprintf(command, sizeof(command),
+  //          L"mpv"
+  //          " --volume=%d"
+  //          " --loop=%d"
+  //          "%s"        // alwaysontop
+  //          "%s"        // noborder
+  //          "%s"        // fullscreen (fs)
+  //          " \"%ls\"", // filename
+  //          args.volume,
+  //          args.loop,
+  //          (args.alwaysontop ? " --ontop" : ""),
+  //          (args.noborder ? " --border=no" : ""),
+  //          (args.fullscreen ? " --fullscreen=yes" : ""),
+  //          args.filename);
+  // log_wmessage(LOG_INFO, "main", command);
 
-  cJSON *layouts = cJSON_GetObjectItemCaseSensitive(json, "layouts");
-  setup_layouts(layouts);
+  // cJSON *layouts = cJSON_GetObjectItemCaseSensitive(json, "layouts");
+  // setup_layouts(layouts);
 
-  STARTUPINFOW si = {0};
-  si.cb = sizeof(si);
-  PROCESS_INFORMATION pi = {0};
-  // https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessa
-  if (!CreateProcessW(NULL,    // No module name (use command line)
-                      command, // Command line
-                      NULL,    // Process handle not inheritable
-                      NULL,    // Thread handle not inheritable
-                      FALSE,   // Set handle inheritance to FALSE
-                      0,       // No creation flags
-                      NULL,    // Use parent's environment block
-                      NULL,    // Use parent's starting directory
-                      &si,     // Pointer to STARTUPINFO structure
-                      &pi)     // Pointer to PROCESS_INFORMATION structure
-  ) {
-    log_wmessage(LOG_ERROR, "main", L"CreateProcessW failed: %lu", GetLastError());
-  };
+  // // https://github.com/mpv-player/mpv/blob/master/DOCS/man/ipc.rst#command-prompt-example
+  // // mpv file.mkv --input-ipc-server=\\.\pipe\mpvsocket
+  // // echo loadfile "filepath" replace >\\.\pipe\mpvsocket
 
-  log_wmessage(LOG_INFO, "main", L"Playing: %ls (PID: %lu)", args.filename, pi.dwProcessId);
-  CloseHandle(pi.hProcess);
-  CloseHandle(pi.hThread);
+  // STARTUPINFOW si = {0};
+  // si.cb = sizeof(si);
+  // PROCESS_INFORMATION pi = {0};
+  // // https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessa
+  // if (!CreateProcessW(NULL,    // No module name (use command line)
+  //                     command, // Command line
+  //                     NULL,    // Process handle not inheritable
+  //                     NULL,    // Thread handle not inheritable
+  //                     FALSE,   // Set handle inheritance to FALSE
+  //                     0,       // No creation flags
+  //                     NULL,    // Use parent's environment block
+  //                     NULL,    // Use parent's starting directory
+  //                     &si,     // Pointer to STARTUPINFO structure
+  //                     &pi)     // Pointer to PROCESS_INFORMATION structure
+  // ) {
+  //   log_wmessage(LOG_ERROR, "main", L"CreateProcessW failed: %lu", GetLastError());
+  // };
+
+  // log_wmessage(LOG_INFO, "main", L"Playing: %ls (PID: %lu)", args.filename, pi.dwProcessId);
+  // CloseHandle(pi.hProcess);
+  // CloseHandle(pi.hThread);
   return 0;
 }
