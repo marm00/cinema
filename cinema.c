@@ -18,6 +18,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -317,97 +318,75 @@ static int setup_layouts(const cJSON *layouts) {
   return 1;
 }
 
-static int spawn_mpv(const MpvArgs *args) {
-  wchar_t command[COMMAND_LINE_LIMIT];
-  swprintf(command, sizeof(command),
-           L"mpv"
-           " --volume=%d"
-           " --loop=%d"
-           "%s"        // alwaysontop
-           "%s"        // noborder
-           "%s"        // fullscreen (fs)
-           " \"%ls\"", // filename
-           args->volume,
-           args->loop,
-           (args->alwaysontop ? " --ontop" : ""),
-           (args->noborder ? " --border=no" : ""),
-           (args->fullscreen ? " --fullscreen=yes" : ""),
-           args->filename);
-  log_wmessage(LOG_INFO, "main", command);
-  return 1;
-}
-
 typedef struct {
-  int index;
-  STARTUPINFOW *si;
-  PROCESS_INFORMATION *pi;
-  HANDLE *hPipe;
-} MpvPipe;
+  STARTUPINFOW si;
+  PROCESS_INFORMATION pi;
+  HANDLE pipe;
+} Pipe;
 
-static MpvPipe *pipes;
-static int screen_index = 0;
-static const wchar_t PIPE_PREFIXW[] = L"\\\\.\\pipe\\cinema_mpv_";
-
-static MpvPipe *spawn_mpv_pipe(MpvArgs *args) {
-  wchar_t pipe_name[256];
-  swprintf(pipe_name, sizeof(pipe_name) / sizeof(wchar_t), L"%ls%d", PIPE_PREFIXW, screen_index);
-
-  wchar_t command[COMMAND_LINE_LIMIT];
-  swprintf(command, sizeof(command),
+static bool create_pipe(Pipe *pipe, const wchar_t *name, MpvArgs *args) {
+  static wchar_t command[COMMAND_LINE_LIMIT];
+  if (name == NULL || args == NULL) {
+    return false;
+  }
+  swprintf(command, COMMAND_LINE_LIMIT,
            L"mpv"
-           " --volume=%d"
-           " --loop=inf"
-          //  " --loop=%d"
-           "%s"        // alwaysontop
-           "%s"        // noborder
-           "%s"        // fullscreen (fs)
-           " \"%ls\"" // filename
-           " --input-ipc-server=%ls",
+           L" --volume=%d"
+           L" --loop=inf"
+           L"%ls"      // alwaysontop
+           L"%ls"      // noborder
+           L"%ls"      // fullscreen (fs)
+           L" \"%ls\"" // filename
+           L" --input-ipc-server=%ls",
            args->volume,
-          //  args->loop,
-           (args->alwaysontop ? " --ontop" : ""),
-           (args->noborder ? " --border=no" : ""),
-           (args->fullscreen ? " --fullscreen=yes" : ""),
+           //  args->loop,
+           (args->alwaysontop ? L" --ontop" : L""),
+           (args->noborder ? L" --border=no" : L""),
+           (args->fullscreen ? L" --fullscreen=yes" : L""),
            args->filename,
-           pipe_name);
-  log_wmessage(LOG_INFO, "main", command);
-
+           name);
+  log_wmessage(LOG_INFO, "pipe", command);
   STARTUPINFOW si = {0};
   si.cb = sizeof(si);
   PROCESS_INFORMATION pi = {0};
   // https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessa
-  if (!CreateProcessW(NULL,    // No module name (use command line)
-                      command, // Command line
-                      NULL,    // Process handle not inheritable
-                      NULL,    // Thread handle not inheritable
-                      FALSE,   // Set handle inheritance to FALSE
-                      0,       // No creation flags
-                      NULL,    // Use parent's environment block
-                      NULL,    // Use parent's starting directory
-                      &si,     // Pointer to STARTUPINFO structure
-                      &pi)     // Pointer to PROCESS_INFORMATION structure
-  ) {
-    log_wmessage(LOG_ERROR, "spawn", L"CreateProcessW failed: %lu", GetLastError());
-    return NULL;
+  if (!CreateProcessW(NULL, command, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+    log_wmessage(LOG_ERROR, "pipe", L"CreateProcessW failed: %lu", GetLastError());
+    return false;
   };
-
   // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilea
-  HANDLE *hPipe = INVALID_HANDLE_VALUE;
+  HANDLE hPipe = INVALID_HANDLE_VALUE;
   while (1) {
-    hPipe = CreateFileW(pipe_name, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    hPipe = CreateFileW(name, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
     if (hPipe != INVALID_HANDLE_VALUE) {
       break;
     }
-    printf("lol");
     Sleep(10);
+    log_message(LOG_DEBUG, "pipe", "Failed to read pipe. Trying again in 10 seconds...");
   }
+  pipe->si = si;
+  pipe->pi = pi;
+  pipe->pipe = hPipe;
+  return true;
+}
 
-  MpvPipe *pipe;
-  pipe->index = screen_index;
-  pipe->si = &si;
-  pipe->pi = &pi;
-  pipe->hPipe = hPipe;
-  return pipe;
+static bool process_layout(size_t count, Pipe *pipes, MpvArgs *args) {
+  static const wchar_t PIPE_PREFIXW[] = L"\\\\.\\pipe\\cinema_mpv_";
+  static const int PIPE_NAME_BUFFER = 1 << 5;
+  if (count <= 0) {
+    log_message(LOG_TRACE, "layout", "Count of %d, nothing to process.", count);
+    return false;
+  }
+  wchar_t pipe_name[PIPE_NAME_BUFFER];
+  for (size_t i = 0; i < count; ++i) {
+    swprintf(pipe_name, PIPE_NAME_BUFFER, L"%ls%d", PIPE_PREFIXW, i);
+    if (!create_pipe(&pipes[i], pipe_name, args)) {
+      free(pipes);
+      log_message(LOG_ERROR, "layout", "Failed to create pipe");
+      return false;
+    }
+  }
+  return true;
 }
 
 int main() {
@@ -448,53 +427,20 @@ int main() {
     return 1;
   }
 
-  MpvPipe *pipe = spawn_mpv_pipe(&args);
-  // CloseHandle(&pipe->pi->hProcess);
-  // CloseHandle(&pipe->pi->hThread);
-  // wchar_t command[COMMAND_LINE_LIMIT];
-  // swprintf(command, sizeof(command),
-  //          L"mpv"
-  //          " --volume=%d"
-  //          " --loop=%d"
-  //          "%s"        // alwaysontop
-  //          "%s"        // noborder
-  //          "%s"        // fullscreen (fs)
-  //          " \"%ls\"", // filename
-  //          args.volume,
-  //          args.loop,
-  //          (args.alwaysontop ? " --ontop" : ""),
-  //          (args.noborder ? " --border=no" : ""),
-  //          (args.fullscreen ? " --fullscreen=yes" : ""),
-  //          args.filename);
-  // log_wmessage(LOG_INFO, "main", command);
+  size_t count = 3;
+  Pipe *pipes = malloc(count * sizeof(Pipe));
+  if (pipes == NULL) {
+    log_message(LOG_ERROR, "main", "Failed to allocate memory for count=%d", count);
+    return false;
+  }
 
-  // cJSON *layouts = cJSON_GetObjectItemCaseSensitive(json, "layouts");
-  // setup_layouts(layouts);
+  process_layout(count, pipes, &args);
+  for (size_t i = 0; i < count; ++i) {
+    log_message(LOG_INFO, "main", "Pipe[%zu] Process ID: %lu", i, (unsigned long)pipes[i].pi.dwProcessId);
+  }
 
-  // // https://github.com/mpv-player/mpv/blob/master/DOCS/man/ipc.rst#command-prompt-example
-  // // mpv file.mkv --input-ipc-server=\\.\pipe\mpvsocket
-  // // echo loadfile "filepath" replace >\\.\pipe\mpvsocket
-
-  // STARTUPINFOW si = {0};
-  // si.cb = sizeof(si);
-  // PROCESS_INFORMATION pi = {0};
-  // // https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessa
-  // if (!CreateProcessW(NULL,    // No module name (use command line)
-  //                     command, // Command line
-  //                     NULL,    // Process handle not inheritable
-  //                     NULL,    // Thread handle not inheritable
-  //                     FALSE,   // Set handle inheritance to FALSE
-  //                     0,       // No creation flags
-  //                     NULL,    // Use parent's environment block
-  //                     NULL,    // Use parent's starting directory
-  //                     &si,     // Pointer to STARTUPINFO structure
-  //                     &pi)     // Pointer to PROCESS_INFORMATION structure
-  // ) {
-  //   log_wmessage(LOG_ERROR, "main", L"CreateProcessW failed: %lu", GetLastError());
-  // };
-
-  // log_wmessage(LOG_INFO, "main", L"Playing: %ls (PID: %lu)", args.filename, pi.dwProcessId);
-  // CloseHandle(pi.hProcess);
-  // CloseHandle(pi.hThread);
+  // https://github.com/mpv-player/mpv/blob/master/DOCS/man/ipc.rst#command-prompt-example
+  // mpv file.mkv --input-ipc-server=\\.\pipe\mpvsocket
+  // echo loadfile "filepath" replace >\\.\pipe\mpvsocket
   return 0;
 }
