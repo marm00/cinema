@@ -365,7 +365,7 @@ static bool create_pipe(Instance *instance, const wchar_t *name) {
   int unfound_duration = 0;
   HANDLE hPipe = INVALID_HANDLE_VALUE;
   while (1) {
-    hPipe = CreateFileW(name, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    hPipe = CreateFileW(name, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
     if (hPipe != INVALID_HANDLE_VALUE) {
       break;
     }
@@ -472,6 +472,23 @@ int main() {
   for (size_t i = 0; i < count; ++i) {
     log_message(LOG_INFO, "main", "Instance[%zu] Process ID: %lu", i, (unsigned long)pipes[i].pi.dwProcessId);
   }
+
+  char buffer[] = "loadfile \"D:\\\\Test\\\\video.mp4\" replace\n";
+  DWORD written = 0;
+  printf("%d\n", WriteFile(pipes[0].pipe, buffer, (DWORD)strlen(buffer), &written, NULL));
+
+  // TODO: supply and read by request_id
+  char bufferRead[1024];
+  DWORD bytesRead = 0;
+  BOOL success = ReadFile(
+      pipes[0].pipe,
+      bufferRead,
+      sizeof(bufferRead) - 1,
+      &bytesRead,
+      NULL);
+
+  bufferRead[bytesRead] = '\0';
+  printf("mpv responded with: %s\n", bufferRead);
 
   // https://mpv.io/manual/stable/#json-ipc
   // mpv file.mkv --input-ipc-server=\\.\pipe\mpvsocket
