@@ -324,9 +324,7 @@ typedef struct {
   PROCESS_INFORMATION pi;
   HANDLE pipe;
   OVERLAPPED ovl_read;
-  OVERLAPPED ovl_write;
   CHAR read_buffer[BUF_SIZE];
-  CHAR write_buffer[BUF_SIZE];
 } Instance;
 
 static bool create_process(Instance *instance, const wchar_t *name, MpvArgs *args) {
@@ -403,11 +401,47 @@ static bool overlap_read(Instance *instance) {
   ZeroMemory(&instance->ovl_read, sizeof(OVERLAPPED));
   if (!ReadFile(instance->pipe, instance->read_buffer, (BUF_SIZE)-1, NULL, &instance->ovl_read)) {
     if (GetLastError() != ERROR_IO_PENDING) {
-      log_message(LOG_ERROR, "overlap_read", "Failed to initialize read with GLE=%d", GetLastError());
+      log_message(LOG_ERROR, "read", "Failed to initialize read with GLE=%d", GetLastError());
       return false;
     }
   }
   // Read is queued for iocp
+  return true;
+}
+
+// https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-transactnamedpipe
+#define PIPE_WRITE_BUFFER 65536
+
+typedef struct OverlappedWrite {
+  OVERLAPPED ovl;
+  char buffer[PIPE_WRITE_BUFFER];
+} OverlappedWrite;
+
+static bool overlap_write(Instance *instance, const char *message) {
+  OverlappedWrite *write = malloc(sizeof(*write));
+  if (write == NULL) {
+    log_message(LOG_ERROR, "write", "Failed to allocate memory.");
+    return false;
+  }
+  // Message needs to be UTF-8
+  size_t len = strlen(message);
+  if (len >= sizeof(write->buffer)) {
+    log_message(LOG_ERROR, "write", "Message len '%d' bigger than buffer '%d'", len, sizeof(write->buffer));
+    return false;
+  }
+  memcpy(write->buffer, message, len);
+  if (!WriteFile(instance->pipe, write->buffer, (DWORD)len, NULL, &write->ovl)) {
+    if (GetLastError() == ERROR_IO_PENDING) {
+      // iocp will free write
+      log_message(LOG_TRACE, "write", "Pending write call, handled by iocp.");
+      return true;
+    }
+    log_message(LOG_ERROR, "write", "Failed to initialize write with GLE=%d", GetLastError());
+    free(write);
+    return false;
+  }
+  log_message(LOG_TRACE, "write", "Write call completed immediately.");
+  free(write);
   return true;
 }
 
@@ -502,31 +536,10 @@ int main() {
     log_message(LOG_INFO, "main", "Instance[%zu] Process ID: %lu", i, (unsigned long)pipes[i].pi.dwProcessId);
   }
 
-  char buffer[] = "loadfile \"D:\\\\Test\\\\video.mp4\" replace\n";
-  DWORD written = 0;
-  printf("Success = %d\n", WriteFile(pipes[0].pipe, buffer, (DWORD)strlen(buffer), &written, NULL));
+  overlap_write(&pipes[0], "{\"command\":[\"loadfile\",\"D:\\\\Test\\\\video.mp4\"]}\n");
+  overlap_write(&pipes[0], "{\"command\":[\"loadfile\",\"D:\\\\Test\\\\video ❗.mp4\"]}\n");
 
-  // OVERLAPPED ovlWrite = {0};
-  // char writeBuf[512];
-
-  // // Queue a write
-  // strcpy(writeBuf, "{\"command\":[\"loadfile\",\"video.mp4\"]}\n");
-  // WriteFile(pipeHandle, writeBuf, strlen(writeBuf), NULL, &ovlWrite);
-
-// Wait or check for completion, then issue next write
-
-  // TODO: supply and read by request_id
-  char bufferRead[1024];
-  DWORD bytesRead = 0;
-  BOOL success = ReadFile(
-      pipes[0].pipe,
-      bufferRead,
-      sizeof(bufferRead) - 1,
-      &bytesRead,
-      NULL);
-
-  bufferRead[bytesRead] = '\0';
-  printf("mpv responded with: %s\n", bufferRead);
+  // TODO: supply and read by request_id in iocp worker thread
 
   // https://mpv.io/manual/stable/#json-ipc
   // mpv file.mkv --input-ipc-server=\\.\pipe\mpvsocket
