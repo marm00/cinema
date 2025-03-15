@@ -318,16 +318,23 @@ static int setup_layouts(const cJSON *layouts) {
   return 1;
 }
 
+#define BUF_SIZE 1 << 10
 typedef struct {
   STARTUPINFOW si;
   PROCESS_INFORMATION pi;
   HANDLE pipe;
+  OVERLAPPED ovl_read;
+  OVERLAPPED ovl_write;
+  CHAR read_buffer[BUF_SIZE];
+  CHAR write_buffer[BUF_SIZE];
 } Instance;
 
 static bool create_process(Instance *instance, const wchar_t *name, MpvArgs *args) {
   static wchar_t command[COMMAND_LINE_LIMIT];
   swprintf(command, COMMAND_LINE_LIMIT,
            L"mpv"
+           L" --terminal=no"
+           L" --no-config" // TODO: default --config-dir
            L" --volume=%d"
            L" --loop=inf"
            L"%ls"      // alwaysontop
@@ -365,7 +372,8 @@ static bool create_pipe(Instance *instance, const wchar_t *name) {
   int unfound_duration = 0;
   HANDLE hPipe = INVALID_HANDLE_VALUE;
   while (1) {
-    hPipe = CreateFileW(name, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    // hPipe = CreateFileW(name, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    hPipe = CreateFileW(name, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
     if (hPipe != INVALID_HANDLE_VALUE) {
       break;
     }
@@ -391,7 +399,19 @@ static bool create_pipe(Instance *instance, const wchar_t *name) {
   return true;
 }
 
-static bool create_instance(Instance *instance, const wchar_t *name, MpvArgs *args) {
+static bool overlap_read(Instance *instance) {
+  ZeroMemory(&instance->ovl_read, sizeof(OVERLAPPED));
+  if (!ReadFile(instance->pipe, instance->read_buffer, (BUF_SIZE)-1, NULL, &instance->ovl_read)) {
+    if (GetLastError() != ERROR_IO_PENDING) {
+      log_message(LOG_ERROR, "overlap_read", "Failed to initialize read with GLE=%d", GetLastError());
+      return false;
+    }
+  }
+  // Read is queued for iocp
+  return true;
+}
+
+static bool create_instance(Instance *instance, const wchar_t *name, MpvArgs *args, HANDLE *iocp) {
   if (name == NULL || args == NULL) {
     return false;
   }
@@ -401,10 +421,18 @@ static bool create_instance(Instance *instance, const wchar_t *name, MpvArgs *ar
   if (!create_pipe(instance, name)) {
     return false;
   }
+  // Does not create a new iocp if pointer is invalid since Existing is provided
+  if (CreateIoCompletionPort(instance->pipe, iocp, (ULONG_PTR)&instance, 0) == NULL) {
+    log_message(LOG_ERROR, "iocp", "Failed to associate pipe with iocp: GLE=%d", GetLastError());
+    return false;
+  }
+  if (!overlap_read(instance)) {
+    return false;
+  }
   return true;
 }
 
-static bool process_layout(size_t count, Instance *pipes, MpvArgs *args) {
+static bool process_layout(size_t count, Instance *pipes, MpvArgs *args, HANDLE *iocp) {
   static const wchar_t PIPE_PREFIXW[] = L"\\\\.\\pipe\\cinema_mpv_";
   static const int PIPE_NAME_BUFFER = 1 << 5;
   if (count <= 0) {
@@ -414,7 +442,7 @@ static bool process_layout(size_t count, Instance *pipes, MpvArgs *args) {
   wchar_t pipe_name[PIPE_NAME_BUFFER];
   for (size_t i = 0; i < count; ++i) {
     swprintf(pipe_name, PIPE_NAME_BUFFER, L"%ls%d", PIPE_PREFIXW, i);
-    if (!create_instance(&pipes[i], pipe_name, args)) {
+    if (!create_instance(&pipes[i], pipe_name, args, iocp)) {
       free(pipes);
       log_message(LOG_ERROR, "layout", "Failed to create instance");
       return false;
@@ -461,6 +489,7 @@ int main() {
     return 1;
   }
 
+  HANDLE iopc = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
   size_t count = 1;
   Instance *pipes = malloc(count * sizeof(Instance));
   if (pipes == NULL) {
@@ -468,14 +497,23 @@ int main() {
     return false;
   }
 
-  process_layout(count, pipes, &args);
+  process_layout(count, pipes, &args, iopc);
   for (size_t i = 0; i < count; ++i) {
     log_message(LOG_INFO, "main", "Instance[%zu] Process ID: %lu", i, (unsigned long)pipes[i].pi.dwProcessId);
   }
 
   char buffer[] = "loadfile \"D:\\\\Test\\\\video.mp4\" replace\n";
   DWORD written = 0;
-  printf("%d\n", WriteFile(pipes[0].pipe, buffer, (DWORD)strlen(buffer), &written, NULL));
+  printf("Success = %d\n", WriteFile(pipes[0].pipe, buffer, (DWORD)strlen(buffer), &written, NULL));
+
+  // OVERLAPPED ovlWrite = {0};
+  // char writeBuf[512];
+
+  // // Queue a write
+  // strcpy(writeBuf, "{\"command\":[\"loadfile\",\"video.mp4\"]}\n");
+  // WriteFile(pipeHandle, writeBuf, strlen(writeBuf), NULL, &ovlWrite);
+
+// Wait or check for completion, then issue next write
 
   // TODO: supply and read by request_id
   char bufferRead[1024];
