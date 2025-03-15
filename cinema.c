@@ -418,18 +418,23 @@ typedef struct OverlappedWrite {
 } OverlappedWrite;
 
 static bool overlap_write(Instance *instance, const char *message) {
+  size_t len = strlen(message);
+  if (len <= 0) {
+    return false;
+  }
   OverlappedWrite *write = malloc(sizeof(*write));
   if (write == NULL) {
     log_message(LOG_ERROR, "write", "Failed to allocate memory.");
     return false;
   }
   // Message needs to be UTF-8
-  size_t len = strlen(message);
   if (len >= sizeof(write->buffer)) {
     log_message(LOG_ERROR, "write", "Message len '%d' bigger than buffer '%d'", len, sizeof(write->buffer));
     return false;
   }
   memcpy(write->buffer, message, len);
+  // Remove \n when logging
+  log_message(LOG_INFO, "write", "%.*s", len - 1, message);
   if (!WriteFile(instance->pipe, write->buffer, (DWORD)len, NULL, &write->ovl)) {
     if (GetLastError() == ERROR_IO_PENDING) {
       // iocp will free write
@@ -524,7 +529,7 @@ int main() {
   }
 
   HANDLE iopc = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
-  size_t count = 1;
+  size_t count = 3;
   Instance *pipes = malloc(count * sizeof(Instance));
   if (pipes == NULL) {
     log_message(LOG_ERROR, "main", "Failed to allocate memory for count=%d", count);
@@ -537,7 +542,8 @@ int main() {
   }
 
   overlap_write(&pipes[0], "{\"command\":[\"loadfile\",\"D:\\\\Test\\\\video.mp4\"]}\n");
-  overlap_write(&pipes[0], "{\"command\":[\"loadfile\",\"D:\\\\Test\\\\video ❗.mp4\"]}\n");
+  overlap_write(&pipes[1], "{\"command\":[\"loadfile\",\"D:\\\\Test\\\\video ❗.mp4\"]}\n");
+  overlap_write(&pipes[2], "{\"command\":[\"loadfile\",\"D:\\\\Test\\\\video ❗.mp4\"]}\n");
 
   // TODO: supply and read by request_id in iocp worker thread
 
