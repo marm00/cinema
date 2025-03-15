@@ -322,13 +322,10 @@ typedef struct {
   STARTUPINFOW si;
   PROCESS_INFORMATION pi;
   HANDLE pipe;
-} Pipe;
+} Instance;
 
-static bool create_pipe(Pipe *pipe, const wchar_t *name, MpvArgs *args) {
+static bool create_process(Instance *instance, const wchar_t *name, MpvArgs *args) {
   static wchar_t command[COMMAND_LINE_LIMIT];
-  if (name == NULL || args == NULL) {
-    return false;
-  }
   swprintf(command, COMMAND_LINE_LIMIT,
            L"mpv"
            L" --volume=%d"
@@ -345,32 +342,69 @@ static bool create_pipe(Pipe *pipe, const wchar_t *name, MpvArgs *args) {
            (args->fullscreen ? L" --fullscreen=yes" : L""),
            args->filename,
            name);
-  log_wmessage(LOG_INFO, "pipe", command);
+  log_wmessage(LOG_INFO, "instance", command);
   STARTUPINFOW si = {0};
   si.cb = sizeof(si);
   PROCESS_INFORMATION pi = {0};
   // https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessa
   if (!CreateProcessW(NULL, command, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
-    log_wmessage(LOG_ERROR, "pipe", L"CreateProcessW failed: %lu", GetLastError());
+    log_message(LOG_ERROR, "instance", "CreateProcessW failed: GLE=%d", GetLastError());
     return false;
   };
+  instance->si = si;
+  instance->pi = pi;
+  return true;
+}
+
+static bool create_pipe(Instance *instance, const wchar_t *name) {
   // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilea
+  // https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-client
+  static const int FOUND_TIMEOUT = 20000;
+  static const int UNFOUND_TIMEOUT = 20000;
+  static const int UNFOUND_WAIT = 50;
+  int unfound_duration = 0;
   HANDLE hPipe = INVALID_HANDLE_VALUE;
   while (1) {
     hPipe = CreateFileW(name, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
     if (hPipe != INVALID_HANDLE_VALUE) {
       break;
     }
-    Sleep(10);
-    log_message(LOG_DEBUG, "pipe", "Failed to read pipe. Trying again in 10 seconds...");
+    if (GetLastError() == ERROR_FILE_NOT_FOUND) {
+      // Wait for the IPC server to start with timeout
+      unfound_duration += UNFOUND_WAIT;
+      if (unfound_duration >= UNFOUND_TIMEOUT) {
+        log_message(LOG_ERROR, "pipe", "Failed to find pipe in time: %dms/%dms", unfound_duration, UNFOUND_TIMEOUT);
+        return false;
+      }
+      log_message(LOG_DEBUG, "pipe", "Failed to find pipe. Trying again in %dms...", UNFOUND_WAIT);
+      Sleep(UNFOUND_WAIT);
+    } else {
+      // Unlikely error, try to resolve by waiting
+      log_message(LOG_WARNING, "pipe", "Could not connect to pipe: GLE=%d - Waiting for %dms", GetLastError(), FOUND_TIMEOUT);
+      if (!WaitNamedPipeW(name, FOUND_TIMEOUT)) {
+        log_message(LOG_ERROR, "pipe", "Failed to connect to pipe: GLE=%d", GetLastError());
+        return false;
+      }
+    }
   }
-  pipe->si = si;
-  pipe->pi = pi;
-  pipe->pipe = hPipe;
+  instance->pipe = hPipe;
   return true;
 }
 
-static bool process_layout(size_t count, Pipe *pipes, MpvArgs *args) {
+static bool create_instance(Instance *instance, const wchar_t *name, MpvArgs *args) {
+  if (name == NULL || args == NULL) {
+    return false;
+  }
+  if (!create_process(instance, name, args)) {
+    return false;
+  }
+  if (!create_pipe(instance, name)) {
+    return false;
+  }
+  return true;
+}
+
+static bool process_layout(size_t count, Instance *pipes, MpvArgs *args) {
   static const wchar_t PIPE_PREFIXW[] = L"\\\\.\\pipe\\cinema_mpv_";
   static const int PIPE_NAME_BUFFER = 1 << 5;
   if (count <= 0) {
@@ -380,9 +414,9 @@ static bool process_layout(size_t count, Pipe *pipes, MpvArgs *args) {
   wchar_t pipe_name[PIPE_NAME_BUFFER];
   for (size_t i = 0; i < count; ++i) {
     swprintf(pipe_name, PIPE_NAME_BUFFER, L"%ls%d", PIPE_PREFIXW, i);
-    if (!create_pipe(&pipes[i], pipe_name, args)) {
+    if (!create_instance(&pipes[i], pipe_name, args)) {
       free(pipes);
-      log_message(LOG_ERROR, "layout", "Failed to create pipe");
+      log_message(LOG_ERROR, "layout", "Failed to create instance");
       return false;
     }
   }
@@ -427,8 +461,8 @@ int main() {
     return 1;
   }
 
-  size_t count = 3;
-  Pipe *pipes = malloc(count * sizeof(Pipe));
+  size_t count = 1;
+  Instance *pipes = malloc(count * sizeof(Instance));
   if (pipes == NULL) {
     log_message(LOG_ERROR, "main", "Failed to allocate memory for count=%d", count);
     return false;
@@ -436,11 +470,15 @@ int main() {
 
   process_layout(count, pipes, &args);
   for (size_t i = 0; i < count; ++i) {
-    log_message(LOG_INFO, "main", "Pipe[%zu] Process ID: %lu", i, (unsigned long)pipes[i].pi.dwProcessId);
+    log_message(LOG_INFO, "main", "Instance[%zu] Process ID: %lu", i, (unsigned long)pipes[i].pi.dwProcessId);
   }
 
-  // https://github.com/mpv-player/mpv/blob/master/DOCS/man/ipc.rst#command-prompt-example
+  // https://mpv.io/manual/stable/#json-ipc
   // mpv file.mkv --input-ipc-server=\\.\pipe\mpvsocket
   // echo loadfile "filepath" replace >\\.\pipe\mpvsocket
+  // ipc commands:
+  // https://mpv.io/manual/stable/#list-of-input-commands
+  // https://mpv.io/manual/stable/#commands-with-named-arguments
+  // these commands can also be async
   return 0;
 }
