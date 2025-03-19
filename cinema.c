@@ -471,7 +471,7 @@ static bool create_instance(Instance *instance, const wchar_t *name, MpvArgs *ar
   return true;
 }
 
-static bool process_layout(size_t count, Instance *pipes, MpvArgs *args, HANDLE *iocp) {
+static bool process_layout(size_t count, Instance *instances, MpvArgs *args, HANDLE *iocp) {
   static const wchar_t PIPE_PREFIXW[] = L"\\\\.\\pipe\\cinema_mpv_";
   static const int PIPE_NAME_BUFFER = 1 << 5;
   if (count <= 0) {
@@ -481,13 +481,39 @@ static bool process_layout(size_t count, Instance *pipes, MpvArgs *args, HANDLE 
   wchar_t pipe_name[PIPE_NAME_BUFFER];
   for (size_t i = 0; i < count; ++i) {
     swprintf(pipe_name, PIPE_NAME_BUFFER, L"%ls%d", PIPE_PREFIXW, i);
-    if (!create_instance(&pipes[i], pipe_name, args, iocp)) {
-      free(pipes);
+    if (!create_instance(&instances[i], pipe_name, args, iocp)) {
+      free(instances);
       log_message(LOG_ERROR, "layout", "Failed to create instance");
       return false;
     }
   }
   return true;
+}
+
+DWORD WINAPI iocp_listener(LPVOID lp_param) {
+  HANDLE iocp = (HANDLE)lp_param;
+  for (;;) {
+    DWORD bytes;
+    ULONG_PTR completion_key;
+    OVERLAPPED *ovl;
+    if (!GetQueuedCompletionStatus(iocp, &bytes, &completion_key, &ovl, INFINITE)) {
+      log_message(LOG_ERROR, "listener", "Failed to dequeue package with GLE=%d", GetLastError());
+      break;
+    }
+    // completion_key == NULL ?
+    if (ovl == NULL) {
+      fprintf(stderr, "HUH\n");
+    }
+    // TODO: support both read and write
+    Instance *pState = (Instance*)completion_key;
+    pState->read_buffer[bytes] = '\0';
+    fprintf(stderr, "Got data from pipe (%p): %s\n", (void*)pState->pipe, pState->read_buffer);
+    if (!overlap_read((Instance *)completion_key)) {
+      log_message(LOG_ERROR, "listener", "Failed to start reading again with GLE=%d", GetLastError());
+      break;
+    }
+  }
+  return 0;
 }
 
 int main() {
@@ -528,22 +554,30 @@ int main() {
     return 1;
   }
 
-  HANDLE iopc = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
-  size_t count = 3;
+  HANDLE iocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
+  size_t count = 1;
   Instance *pipes = malloc(count * sizeof(Instance));
   if (pipes == NULL) {
     log_message(LOG_ERROR, "main", "Failed to allocate memory for count=%d", count);
     return false;
   }
 
-  process_layout(count, pipes, &args, iopc);
+  process_layout(count, pipes, &args, iocp);
   for (size_t i = 0; i < count; ++i) {
     log_message(LOG_INFO, "main", "Instance[%zu] Process ID: %lu", i, (unsigned long)pipes[i].pi.dwProcessId);
   }
 
+  DWORD listener_id;
+  HANDLE listener = CreateThread(NULL, 0, iocp_listener, (LPVOID)iocp, 0, &listener_id);
+  if (listener == NULL) {
+    log_message(LOG_ERROR, "main", "Failed to create listener thread. GLE=%d", GetLastError());
+    return 1;
+  }
+
+  Sleep(2000);
   overlap_write(&pipes[0], "{\"command\":[\"loadfile\",\"D:\\\\Test\\\\video.mp4\"]}\n");
-  overlap_write(&pipes[1], "{\"command\":[\"loadfile\",\"D:\\\\Test\\\\video ❗.mp4\"]}\n");
-  overlap_write(&pipes[2], "{\"command\":[\"loadfile\",\"D:\\\\Test\\\\video ❗.mp4\"]}\n");
+  // overlap_write(&pipes[1], "{\"command\":[\"loadfile\",\"D:\\\\Test\\\\video ❗.mp4\"]}\n");
+  // overlap_write(&pipes[2], "{\"command\":[\"loadfile\",\"D:\\\\Test\\\\video ❗.mp4\"]}\n");
 
   // TODO: supply and read by request_id in iocp worker thread
 
