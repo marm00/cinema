@@ -19,6 +19,7 @@
 // SOFTWARE.
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -339,13 +340,32 @@ static int setup_layouts(const cJSON *layouts) {
   return 1;
 }
 
-#define BUF_SIZE 1 << 10
+// https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-transactnamedpipe
+#define PIPE_WRITE_BUFFER 65536
+#define PIPE_READ_BUFFER 1024
+
 typedef struct {
+  OVERLAPPED ovl;
+  bool is_write;
+} OverlappedContext;
+
+typedef struct OverlappedWrite {
+  OverlappedContext ovl_context;
+  char buffer[PIPE_WRITE_BUFFER];
+  size_t bytes;
+  int64_t request_id;
+} OverlappedWrite;
+
+typedef struct {
+  // NOTE: currently, we use a single overlapped read per instance
+  // (unlike multiple writes). This could lead to gaps in incoming
+  // data if the OS buffer does not preserve it fully for the next
+  // read. If that is observed, switch to multiple reads as well
   STARTUPINFOW si;
   PROCESS_INFORMATION pi;
   HANDLE pipe;
-  OVERLAPPED ovl_read;
-  CHAR read_buffer[BUF_SIZE];
+  OverlappedContext ovl_context;
+  CHAR read_buffer[PIPE_READ_BUFFER];
 } Instance;
 
 static bool create_process(Instance *instance, const wchar_t *name, MpvArgs *args) {
@@ -421,8 +441,8 @@ static bool create_pipe(Instance *instance, const wchar_t *name) {
 
 static bool overlap_read(Instance *instance) {
   log_message(LOG_TRACE, "read", "Initializing read on PID %lu", instance->pi.dwProcessId);
-  ZeroMemory(&instance->ovl_read, sizeof(OVERLAPPED));
-  if (!ReadFile(instance->pipe, instance->read_buffer, (BUF_SIZE)-1, NULL, &instance->ovl_read)) {
+  ZeroMemory(&instance->ovl_context.ovl, sizeof(OVERLAPPED));
+  if (!ReadFile(instance->pipe, instance->read_buffer, (PIPE_READ_BUFFER)-1, NULL, &instance->ovl_context.ovl)) {
     if (GetLastError() != ERROR_IO_PENDING) {
       log_last_error("read", "Failed to initialize read");
       return false;
@@ -431,14 +451,6 @@ static bool overlap_read(Instance *instance) {
   // Read is queued for iocp
   return true;
 }
-
-// https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-transactnamedpipe
-#define PIPE_WRITE_BUFFER 65536
-
-typedef struct OverlappedWrite {
-  OVERLAPPED ovl;
-  char buffer[PIPE_WRITE_BUFFER];
-} OverlappedWrite;
 
 static bool overlap_write(Instance *instance, const char *message) {
   log_message(LOG_TRACE, "write", "Initializing write on PID %lu", instance->pi.dwProcessId);
@@ -457,9 +469,12 @@ static bool overlap_write(Instance *instance, const char *message) {
     return false;
   }
   memcpy(write->buffer, message, len);
+  write->ovl_context.is_write = true;
+  write->bytes = len;
+  write->request_id = 0; // TODO: increment request id
   // Remove \n when logging
-  log_message(LOG_INFO, "write", "%.*s", len - 1, message);
-  if (!WriteFile(instance->pipe, write->buffer, (DWORD)len, NULL, &write->ovl)) {
+  log_message(LOG_DEBUG, "write", "Writing message: %.*s", len - 1, message);
+  if (!WriteFile(instance->pipe, write->buffer, (DWORD)len, NULL, &write->ovl_context.ovl)) {
     if (GetLastError() == ERROR_IO_PENDING) {
       // iocp will free write
       log_message(LOG_TRACE, "write", "Pending write call, handled by iocp.");
@@ -475,6 +490,7 @@ static bool overlap_write(Instance *instance, const char *message) {
 }
 
 static bool create_instance(Instance *instance, const wchar_t *name, MpvArgs *args, HANDLE *iocp) {
+  instance->ovl_context.is_write = false;
   if (name == NULL || args == NULL) {
     return false;
   }
@@ -527,23 +543,20 @@ DWORD WINAPI iocp_listener(LPVOID lp_param) {
       break;
     }
     log_message(LOG_TRACE, "listener", "Processing dequeued completion packet from successful I/O operation");
-    // fprintf(stderr, "completion key %lu\n", completion_key);
-    // if (completion_key == 0) {
-    //   fprintf(stderr, "HUH\n");
-    // }
-    // if (ovl == NULL) {
-    //   fprintf(stderr, "HUH\n");
-    // }
-    // TODO: support both read and write
     Instance *pState = (Instance *)completion_key;
-    // fprintf(stderr, "instance pointer %p\n", pState);
-    // fprintf(stderr, "size %lu\n", pState->si.cb);
-    // fprintf(stderr, "Pipe PID %lu\n", pState->pi.dwProcessId);
-    pState->read_buffer[bytes] = '\0'; // TODO: handle buffer gracefully
-    fprintf(stderr, "Got data from pipe (%p): %s", (void *)pState->pipe, pState->read_buffer);
-    if (!overlap_read((Instance *)completion_key)) {
-      // TODO: resolve instead of break
-      break;
+    OverlappedContext *ctx = (OverlappedContext *)ovl;
+    if (ctx->is_write) {
+      // TODO: check if bytes equals ovl->bytes for write
+      OverlappedWrite *write = (OverlappedWrite *)ctx;
+      fprintf(stderr, "expected: %ld\n", write->bytes);
+      fprintf(stderr, "written: %ld\n", bytes);
+    } else {
+      pState->read_buffer[bytes] = '\0'; // TODO: handle buffer gracefully
+      fprintf(stderr, "Got data from pipe (%p): %s", (void *)pState->pipe, pState->read_buffer);
+      if (!overlap_read((Instance *)completion_key)) {
+        // TODO: resolve instead of break
+        break;
+      }
     }
   }
   return 0;
@@ -607,8 +620,10 @@ int main() {
     log_message(LOG_INFO, "main", "Instance[%zu] Process ID: %lu", i, (unsigned long)pipes[i].pi.dwProcessId);
   }
 
+  overlap_write(&pipes[0], "{\"command\":[\"loadfile\",\"D:\\\\Test\\\\video.mp4\"]}\n");
   Sleep(2000);
   overlap_write(&pipes[0], "{\"command\":[\"loadfile\",\"D:\\\\Test\\\\video.mp4\"]}\n");
+  Sleep(2000);
   // overlap_write(&pipes[1], "{\"command\":[\"loadfile\",\"D:\\\\Test\\\\video ❗.mp4\"]}\n");
   // overlap_write(&pipes[2], "{\"command\":[\"loadfile\",\"D:\\\\Test\\\\video ❗.mp4\"]}\n");
 
