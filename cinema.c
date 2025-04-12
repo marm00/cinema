@@ -549,13 +549,10 @@ OverlappedWrite *find_write(Instance *instance, int64_t request_id) {
     log_message(LOG_ERROR, "find_write", "Tried to find '%" PRId64 "' without pending writes", request_id);
     return NULL;
   }
-  if (instance->pending_writes.count == 1) {
-    return &instance->pending_writes.items[0];
-  }
-  size_t left = 0;
-  size_t right = instance->pending_writes.count - 1;
+  ptrdiff_t left = 0;
+  ptrdiff_t right = instance->pending_writes.count - 1;
   while (left <= right) {
-    size_t middle = left + ((right - left) >> 1);
+    ptrdiff_t middle = left + ((right - left) >> 1);
     int64_t mid_val = instance->pending_writes.items[middle].request_id;
     if (mid_val < request_id) {
       left = middle + 1;
