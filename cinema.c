@@ -18,6 +18,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+#include <inttypes.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -356,6 +357,12 @@ typedef struct OverlappedWrite {
   int64_t request_id;
 } OverlappedWrite;
 
+typedef struct PendingWrites {
+  OverlappedWrite *items;
+  size_t count;
+  size_t capacity;
+} PendingWrites;
+
 typedef struct {
   // NOTE: currently, we use a single overlapped read per instance
   // (unlike multiple writes). This could lead to gaps in incoming
@@ -366,6 +373,7 @@ typedef struct {
   HANDLE pipe;
   OverlappedContext ovl_context;
   CHAR read_buffer[PIPE_READ_BUFFER];
+  PendingWrites pending_writes;
 } Instance;
 
 static bool create_process(Instance *instance, const wchar_t *name, MpvArgs *args) {
@@ -453,6 +461,7 @@ static bool overlap_read(Instance *instance) {
 }
 
 static bool overlap_write(Instance *instance, const char *message) {
+  static int current_id = 0; // TODO: request id should probably be unique to instance
   log_message(LOG_TRACE, "write", "Initializing write on PID %lu", instance->pi.dwProcessId);
   size_t len = strlen(message);
   if (len <= 0) {
@@ -471,7 +480,7 @@ static bool overlap_write(Instance *instance, const char *message) {
   memcpy(write->buffer, message, len);
   write->ovl_context.is_write = true;
   write->bytes = len;
-  write->request_id = 0; // TODO: increment request id
+  write->request_id = current_id++; // TODO: add request_id here or on json message creation
   // Remove \n when logging
   log_message(LOG_DEBUG, "write", "Writing message: %.*s", len - 1, message);
   if (!WriteFile(instance->pipe, write->buffer, (DWORD)len, NULL, &write->ovl_context.ovl)) {
@@ -530,6 +539,36 @@ static bool process_layout(size_t count, Instance *instances, MpvArgs *args, HAN
   return true;
 }
 
+OverlappedWrite *find_write(Instance *instance, int64_t request_id) {
+  // Uses binary search over sorted dynamic array
+  if (instance == NULL) {
+    log_message(LOG_ERROR, "find_write", "Tried to find '%" PRId64 "' on NULL instance", request_id);
+    return NULL;
+  }
+  if (instance->pending_writes.count == 0) {
+    log_message(LOG_ERROR, "find_write", "Tried to find '%" PRId64 "' without pending writes", request_id);
+    return NULL;
+  }
+  if (instance->pending_writes.count == 1) {
+    return &instance->pending_writes.items[0];
+  }
+  size_t left = 0;
+  size_t right = instance->pending_writes.count - 1;
+  while (left <= right) {
+    size_t middle = left + ((right - left) >> 1);
+    int64_t mid_val = instance->pending_writes.items[middle].request_id;
+    if (mid_val < request_id) {
+      left = middle + 1;
+    } else if (mid_val > request_id) {
+      right = middle - 1;
+    } else {
+      return &instance->pending_writes.items[middle];
+    }
+  }
+  log_message(LOG_ERROR, "find_write", "Tried to find '%" PRId64 "' but could not find it", request_id);
+  return NULL;
+}
+
 DWORD WINAPI iocp_listener(LPVOID lp_param) {
   HANDLE iocp = (HANDLE)lp_param;
   for (;;) {
@@ -538,7 +577,7 @@ DWORD WINAPI iocp_listener(LPVOID lp_param) {
     OVERLAPPED *ovl;
     if (!GetQueuedCompletionStatus(iocp, &bytes, &completion_key, &ovl, INFINITE)) {
       log_last_error("listener", "Failed to dequeue packet");
-      // TODO: resolve instead of break
+      // TODO: when observed, resolve instead of break
       // https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-getqueuedcompletionstatus#remarks
       break;
     }
@@ -546,15 +585,20 @@ DWORD WINAPI iocp_listener(LPVOID lp_param) {
     Instance *pState = (Instance *)completion_key;
     OverlappedContext *ctx = (OverlappedContext *)ovl;
     if (ctx->is_write) {
-      // TODO: check if bytes equals ovl->bytes for write
       OverlappedWrite *write = (OverlappedWrite *)ctx;
-      fprintf(stderr, "expected: %ld\n", write->bytes);
-      fprintf(stderr, "written: %ld\n", bytes);
+      // TODO: hash table for requests
+      fprintf(stderr, "Request id %d", write->request_id);
+      if (write->bytes != bytes) {
+        log_message(LOG_ERROR, "listener", "Expected '%ld' bytes but received '%ld'", write->bytes, bytes);
+        // TODO: when observed, resolve instead of break
+        break;
+      }
     } else {
+      // TODO: Currently, embedded 0 bytes terminate the current line, but you should not rely on this.
       pState->read_buffer[bytes] = '\0'; // TODO: handle buffer gracefully
       fprintf(stderr, "Got data from pipe (%p): %s", (void *)pState->pipe, pState->read_buffer);
       if (!overlap_read((Instance *)completion_key)) {
-        // TODO: resolve instead of break
+        // TODO: when observed, resolve instead of break
         break;
       }
     }
@@ -620,9 +664,8 @@ int main() {
     log_message(LOG_INFO, "main", "Instance[%zu] Process ID: %lu", i, (unsigned long)pipes[i].pi.dwProcessId);
   }
 
-  overlap_write(&pipes[0], "{\"command\":[\"loadfile\",\"D:\\\\Test\\\\video.mp4\"]}\n");
   Sleep(2000);
-  overlap_write(&pipes[0], "{\"command\":[\"loadfile\",\"D:\\\\Test\\\\video.mp4\"]}\n");
+  overlap_write(&pipes[0], "{\"command\":[\"loadfile\",\"D:\\\\Test\\\\video.mp4\"], \"request_id\": 0}\n");
   Sleep(2000);
   // overlap_write(&pipes[1], "{\"command\":[\"loadfile\",\"D:\\\\Test\\\\video ❗.mp4\"]}\n");
   // overlap_write(&pipes[2], "{\"command\":[\"loadfile\",\"D:\\\\Test\\\\video ❗.mp4\"]}\n");
