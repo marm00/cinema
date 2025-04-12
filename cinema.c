@@ -390,7 +390,7 @@ static bool create_pipe(Instance *instance, const wchar_t *name) {
   static const int UNFOUND_WAIT = 50;
   int unfound_duration = 0;
   HANDLE hPipe = INVALID_HANDLE_VALUE;
-  while (1) {
+  for (;;) {
     // hPipe = CreateFileW(name, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
     hPipe = CreateFileW(name, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
     if (hPipe != INVALID_HANDLE_VALUE) {
@@ -415,12 +415,13 @@ static bool create_pipe(Instance *instance, const wchar_t *name) {
     }
   }
   instance->pipe = hPipe;
+  log_message(LOG_TRACE, "pipe", "Successfully created pipe (HANDLE) %p", (void *)instance->pipe);
   return true;
 }
 
 static bool overlap_read(Instance *instance) {
+  log_message(LOG_TRACE, "read", "Initializing read on PID %lu", instance->pi.dwProcessId);
   ZeroMemory(&instance->ovl_read, sizeof(OVERLAPPED));
-  log_message(LOG_DEBUG, "read", "Initializing read");
   if (!ReadFile(instance->pipe, instance->read_buffer, (BUF_SIZE)-1, NULL, &instance->ovl_read)) {
     if (GetLastError() != ERROR_IO_PENDING) {
       log_last_error("read", "Failed to initialize read");
@@ -440,6 +441,7 @@ typedef struct OverlappedWrite {
 } OverlappedWrite;
 
 static bool overlap_write(Instance *instance, const char *message) {
+  log_message(LOG_TRACE, "write", "Initializing write on PID %lu", instance->pi.dwProcessId);
   size_t len = strlen(message);
   if (len <= 0) {
     return false;
@@ -483,7 +485,7 @@ static bool create_instance(Instance *instance, const wchar_t *name, MpvArgs *ar
     return false;
   }
   // Does not create a new iocp if pointer is invalid since Existing is provided
-  if (CreateIoCompletionPort(instance->pipe, iocp, (ULONG_PTR)&instance, 0) == NULL) {
+  if (CreateIoCompletionPort(instance->pipe, iocp, (ULONG_PTR)instance, 0) == NULL) {
     log_last_error("iocp", "Failed to associate pipe with iocp");
     return false;
   }
@@ -519,19 +521,28 @@ DWORD WINAPI iocp_listener(LPVOID lp_param) {
     ULONG_PTR completion_key;
     OVERLAPPED *ovl;
     if (!GetQueuedCompletionStatus(iocp, &bytes, &completion_key, &ovl, INFINITE)) {
-      log_last_error("listener", "Failed to dequeue package");
+      log_last_error("listener", "Failed to dequeue packet");
+      // TODO: resolve instead of break
+      // https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-getqueuedcompletionstatus#remarks
       break;
     }
-    // completion_key == NULL ?
-    if (ovl == NULL) {
-      fprintf(stderr, "HUH\n");
-    }
+    log_message(LOG_TRACE, "listener", "Processing dequeued completion packet from successful I/O operation");
+    // fprintf(stderr, "completion key %lu\n", completion_key);
+    // if (completion_key == 0) {
+    //   fprintf(stderr, "HUH\n");
+    // }
+    // if (ovl == NULL) {
+    //   fprintf(stderr, "HUH\n");
+    // }
     // TODO: support both read and write
     Instance *pState = (Instance *)completion_key;
-    pState->read_buffer[bytes] = '\0';
-    fprintf(stderr, "Got data from pipe (%p): %s\n", (void *)pState->pipe, pState->read_buffer);
+    // fprintf(stderr, "instance pointer %p\n", pState);
+    // fprintf(stderr, "size %lu\n", pState->si.cb);
+    // fprintf(stderr, "Pipe PID %lu\n", pState->pi.dwProcessId);
+    pState->read_buffer[bytes] = '\0'; // TODO: handle buffer gracefully
+    fprintf(stderr, "Got data from pipe (%p): %s", (void *)pState->pipe, pState->read_buffer);
     if (!overlap_read((Instance *)completion_key)) {
-      log_last_error("listener", "Failed to start reading again");
+      // TODO: resolve instead of break
       break;
     }
   }
@@ -553,7 +564,7 @@ int main() {
   if (string == NULL) {
     log_message(LOG_ERROR, "main", "Failed to print cJSON items from config tree with cJSON_Print.");
   } else {
-    log_message(LOG_INFO, "main", string);
+    // log_message(LOG_INFO, "main", string);
   }
 
   wchar_t *name = setup_wstring(json, "path", NULL);
