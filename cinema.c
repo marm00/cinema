@@ -132,6 +132,27 @@ static void log_wmessage(LogLevel level, const char *location, const wchar_t *wm
   va_end(args);
 }
 
+static void log_last_error(const char *location, const char *message, ...) {
+  static const char *log_level = "ERROR";
+  static const DWORD dw_flags = FORMAT_MESSAGE_ALLOCATE_BUFFER |
+                                FORMAT_MESSAGE_FROM_SYSTEM |
+                                FORMAT_MESSAGE_IGNORE_INSERTS;
+  LPVOID buffer;
+  DWORD code = GetLastError();
+  if (!FormatMessage(dw_flags, NULL, code, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+                     (LPTSTR)&buffer, 0, NULL)) {
+    log_message(LOG_ERROR, location, "Failed to log GLE=%d - error with GLE=%d", code, GetLastError());
+    return;
+  }
+  va_list args;
+  va_start(args, message);
+  fprintf(stderr, "[%s] [%s] ", log_level, location);
+  vfprintf(stderr, message, args);
+  va_end(args);
+  fprintf(stderr, " - Code %d: %s", code, (char *)buffer);
+  LocalFree(buffer);
+}
+
 static char *read_json(const char *filename) {
   if (filename == NULL || filename[0] == '\0') {
     log_message(LOG_ERROR, "json", "Invalid filename provided (empty string)");
@@ -353,7 +374,7 @@ static bool create_process(Instance *instance, const wchar_t *name, MpvArgs *arg
   PROCESS_INFORMATION pi = {0};
   // https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessa
   if (!CreateProcessW(NULL, command, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
-    log_message(LOG_ERROR, "instance", "CreateProcessW failed: GLE=%d", GetLastError());
+    log_last_error("instance", "CreateProcessW failed");
     return false;
   };
   instance->si = si;
@@ -386,9 +407,9 @@ static bool create_pipe(Instance *instance, const wchar_t *name) {
       Sleep(UNFOUND_WAIT);
     } else {
       // Unlikely error, try to resolve by waiting
-      log_message(LOG_WARNING, "pipe", "Could not connect to pipe: GLE=%d - Waiting for %dms", GetLastError(), FOUND_TIMEOUT);
+      log_last_error("pipe", "Could not connect to pipe - Waiting for %dms", FOUND_TIMEOUT);
       if (!WaitNamedPipeW(name, FOUND_TIMEOUT)) {
-        log_message(LOG_ERROR, "pipe", "Failed to connect to pipe: GLE=%d", GetLastError());
+        log_last_error("pipe", "Failed to connect to pipe");
         return false;
       }
     }
@@ -399,9 +420,10 @@ static bool create_pipe(Instance *instance, const wchar_t *name) {
 
 static bool overlap_read(Instance *instance) {
   ZeroMemory(&instance->ovl_read, sizeof(OVERLAPPED));
+  log_message(LOG_DEBUG, "read", "Initializing read");
   if (!ReadFile(instance->pipe, instance->read_buffer, (BUF_SIZE)-1, NULL, &instance->ovl_read)) {
     if (GetLastError() != ERROR_IO_PENDING) {
-      log_message(LOG_ERROR, "read", "Failed to initialize read with GLE=%d", GetLastError());
+      log_last_error("read", "Failed to initialize read");
       return false;
     }
   }
@@ -441,7 +463,7 @@ static bool overlap_write(Instance *instance, const char *message) {
       log_message(LOG_TRACE, "write", "Pending write call, handled by iocp.");
       return true;
     }
-    log_message(LOG_ERROR, "write", "Failed to initialize write with GLE=%d", GetLastError());
+    log_last_error("write", "Failed to initialize write");
     free(write);
     return false;
   }
@@ -462,7 +484,7 @@ static bool create_instance(Instance *instance, const wchar_t *name, MpvArgs *ar
   }
   // Does not create a new iocp if pointer is invalid since Existing is provided
   if (CreateIoCompletionPort(instance->pipe, iocp, (ULONG_PTR)&instance, 0) == NULL) {
-    log_message(LOG_ERROR, "iocp", "Failed to associate pipe with iocp: GLE=%d", GetLastError());
+    log_last_error("iocp", "Failed to associate pipe with iocp");
     return false;
   }
   if (!overlap_read(instance)) {
@@ -473,7 +495,7 @@ static bool create_instance(Instance *instance, const wchar_t *name, MpvArgs *ar
 
 static bool process_layout(size_t count, Instance *instances, MpvArgs *args, HANDLE *iocp) {
   static const wchar_t PIPE_PREFIXW[] = L"\\\\.\\pipe\\cinema_mpv_";
-  static const int PIPE_NAME_BUFFER = 1 << 5;
+  static const int PIPE_NAME_BUFFER = 32;
   if (count <= 0) {
     log_message(LOG_TRACE, "layout", "Count of %d, nothing to process.", count);
     return false;
@@ -497,7 +519,7 @@ DWORD WINAPI iocp_listener(LPVOID lp_param) {
     ULONG_PTR completion_key;
     OVERLAPPED *ovl;
     if (!GetQueuedCompletionStatus(iocp, &bytes, &completion_key, &ovl, INFINITE)) {
-      log_message(LOG_ERROR, "listener", "Failed to dequeue package with GLE=%d", GetLastError());
+      log_last_error("listener", "Failed to dequeue package");
       break;
     }
     // completion_key == NULL ?
@@ -505,11 +527,11 @@ DWORD WINAPI iocp_listener(LPVOID lp_param) {
       fprintf(stderr, "HUH\n");
     }
     // TODO: support both read and write
-    Instance *pState = (Instance*)completion_key;
+    Instance *pState = (Instance *)completion_key;
     pState->read_buffer[bytes] = '\0';
-    fprintf(stderr, "Got data from pipe (%p): %s\n", (void*)pState->pipe, pState->read_buffer);
+    fprintf(stderr, "Got data from pipe (%p): %s\n", (void *)pState->pipe, pState->read_buffer);
     if (!overlap_read((Instance *)completion_key)) {
-      log_message(LOG_ERROR, "listener", "Failed to start reading again with GLE=%d", GetLastError());
+      log_last_error("listener", "Failed to start reading again");
       break;
     }
   }
@@ -555,6 +577,13 @@ int main() {
   }
 
   HANDLE iocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
+  DWORD listener_id;
+  HANDLE listener = CreateThread(NULL, 0, iocp_listener, (LPVOID)iocp, 0, &listener_id);
+  if (listener == NULL) {
+    log_last_error("main", "Failed to create listener thread");
+    return 1;
+  }
+
   size_t count = 1;
   Instance *pipes = malloc(count * sizeof(Instance));
   if (pipes == NULL) {
@@ -565,13 +594,6 @@ int main() {
   process_layout(count, pipes, &args, iocp);
   for (size_t i = 0; i < count; ++i) {
     log_message(LOG_INFO, "main", "Instance[%zu] Process ID: %lu", i, (unsigned long)pipes[i].pi.dwProcessId);
-  }
-
-  DWORD listener_id;
-  HANDLE listener = CreateThread(NULL, 0, iocp_listener, (LPVOID)iocp, 0, &listener_id);
-  if (listener == NULL) {
-    log_message(LOG_ERROR, "main", "Failed to create listener thread. GLE=%d", GetLastError());
-    return 1;
   }
 
   Sleep(2000);
