@@ -33,7 +33,8 @@
 #include "cJSON.h"
 
 #define MAX_FILENAME 260
-#define COMMAND_LINE_LIMIT 32768 // likely way smaller in practice
+// TODO: find better upper bound for command line
+#define COMMAND_LINE_LIMIT 32768
 #define MAX_LOG_MESSAGE 1024
 
 typedef struct {
@@ -141,8 +142,7 @@ static void log_last_error(const char *location, const char *message, ...) {
                                 FORMAT_MESSAGE_IGNORE_INSERTS;
   LPVOID buffer;
   DWORD code = GetLastError();
-  if (!FormatMessage(dw_flags, NULL, code, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-                     (LPTSTR)&buffer, 0, NULL)) {
+  if (!FormatMessage(dw_flags, NULL, code, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPTSTR)&buffer, 0, NULL)) {
     log_message(LOG_ERROR, location, "Failed to log GLE=%d - error with GLE=%d", code, GetLastError());
     return;
   }
@@ -151,7 +151,7 @@ static void log_last_error(const char *location, const char *message, ...) {
   fprintf(stderr, "[%s] [%s] ", log_level, location);
   vfprintf(stderr, message, args);
   va_end(args);
-  fprintf(stderr, " - Code %d: %s", code, (char *)buffer);
+  fprintf(stderr, " - Code %lu: %s", code, (char *)buffer);
   LocalFree(buffer);
 }
 
@@ -342,6 +342,7 @@ static int setup_layouts(const cJSON *layouts) {
 }
 
 // https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-transactnamedpipe
+// TODO: find better upper bound for transaction (pending 64kb writes can scale very fast)
 #define PIPE_WRITE_BUFFER 65536
 #define PIPE_READ_BUFFER 1024
 
@@ -358,6 +359,7 @@ typedef struct OverlappedWrite {
 } OverlappedWrite;
 
 typedef struct PendingWrites {
+  // TODO: initial to like 32
   OverlappedWrite *items;
   size_t count;
   size_t capacity;
@@ -499,10 +501,11 @@ static bool overlap_write(Instance *instance, const char *message) {
 }
 
 static bool create_instance(Instance *instance, const wchar_t *name, MpvArgs *args, HANDLE *iocp) {
-  instance->ovl_context.is_write = false;
   if (name == NULL || args == NULL) {
     return false;
   }
+  instance->ovl_context.is_write = false;
+  // TODO: setup pending_writes
   if (!create_process(instance, name, args)) {
     return false;
   }
@@ -540,13 +543,19 @@ static bool process_layout(size_t count, Instance *instances, MpvArgs *args, HAN
 }
 
 OverlappedWrite *find_write(Instance *instance, int64_t request_id) {
-  // Uses binary search over sorted dynamic array
+  // Uses binary search over sorted dynamic array.
+  // The request_id should always find a pair in this scenario
+  // as the incoming request_id was sent as a targeted response.
   if (instance == NULL) {
     log_message(LOG_ERROR, "find_write", "Tried to find '%" PRId64 "' on NULL instance", request_id);
     return NULL;
   }
   if (instance->pending_writes.count == 0) {
     log_message(LOG_ERROR, "find_write", "Tried to find '%" PRId64 "' without pending writes", request_id);
+    return NULL;
+  }
+  if (instance->pending_writes.items == NULL) {
+    log_message(LOG_ERROR, "find_write", "Tried to find '%" PRId64 "' on NULL items", request_id);
     return NULL;
   }
   ptrdiff_t left = 0;
@@ -584,7 +593,7 @@ DWORD WINAPI iocp_listener(LPVOID lp_param) {
     if (ctx->is_write) {
       OverlappedWrite *write = (OverlappedWrite *)ctx;
       // TODO: hash table for requests
-      fprintf(stderr, "Request id %d", write->request_id);
+      fprintf(stderr, "Request id %lld", write->request_id);
       if (write->bytes != bytes) {
         log_message(LOG_ERROR, "listener", "Expected '%ld' bytes but received '%ld'", write->bytes, bytes);
         // TODO: when observed, resolve instead of break
@@ -603,7 +612,7 @@ DWORD WINAPI iocp_listener(LPVOID lp_param) {
   return 0;
 }
 
-int main() {
+int main(int argc, char **argv) {
 #ifndef _WIN32
   log_message(LOG_ERROR, "main", "Error: Your operating system is not supported, Windows-only currently.");
   return 1;
