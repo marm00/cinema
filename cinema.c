@@ -345,6 +345,7 @@ static int setup_layouts(const cJSON *layouts) {
 // TODO: find better upper bound for transaction (pending 64kb writes can scale very fast)
 #define PIPE_WRITE_BUFFER 65536
 #define PIPE_READ_BUFFER 1024
+#define WRITES_CAPACITY 32
 
 typedef struct {
   OVERLAPPED ovl;
@@ -359,8 +360,7 @@ typedef struct OverlappedWrite {
 } OverlappedWrite;
 
 typedef struct PendingWrites {
-  // TODO: initial to like 32
-  OverlappedWrite *items;
+  OverlappedWrite **items;
   size_t count;
   size_t capacity;
 } PendingWrites;
@@ -505,7 +505,11 @@ static bool create_instance(Instance *instance, const wchar_t *name, MpvArgs *ar
     return false;
   }
   instance->ovl_context.is_write = false;
-  // TODO: setup pending_writes
+  PendingWrites pending_writes = {
+      .items = malloc(sizeof(OverlappedWrite *) * WRITES_CAPACITY),
+      .count = 0,
+      .capacity = WRITES_CAPACITY};
+  instance->pending_writes = pending_writes;
   if (!create_process(instance, name, args)) {
     return false;
   }
@@ -562,13 +566,13 @@ OverlappedWrite *find_write(Instance *instance, int64_t request_id) {
   ptrdiff_t right = instance->pending_writes.count - 1;
   while (left <= right) {
     ptrdiff_t middle = left + ((right - left) >> 1);
-    int64_t mid_val = instance->pending_writes.items[middle].request_id;
+    int64_t mid_val = instance->pending_writes.items[middle]->request_id;
     if (mid_val < request_id) {
       left = middle + 1;
     } else if (mid_val > request_id) {
       right = middle - 1;
     } else {
-      return &instance->pending_writes.items[middle];
+      return instance->pending_writes.items[middle];
     }
   }
   log_message(LOG_ERROR, "find_write", "Tried to find '%" PRId64 "' but could not find it", request_id);
@@ -588,21 +592,32 @@ DWORD WINAPI iocp_listener(LPVOID lp_param) {
       break;
     }
     log_message(LOG_TRACE, "listener", "Processing dequeued completion packet from successful I/O operation");
-    Instance *pState = (Instance *)completion_key;
+    Instance *instance = (Instance *)completion_key;
     OverlappedContext *ctx = (OverlappedContext *)ovl;
     if (ctx->is_write) {
       OverlappedWrite *write = (OverlappedWrite *)ctx;
-      // TODO: hash table for requests
-      fprintf(stderr, "Request id %lld", write->request_id);
+      PendingWrites *array = &instance->pending_writes;
+      if (array->count >= array->capacity) {
+        array->capacity = array->capacity * 2;
+        array->items = realloc(array->items, sizeof(OverlappedWrite *) * array->capacity);
+        if (array->items == NULL) {
+          log_message(LOG_ERROR, "listener", "Failed to reallocate memory of pending writes");
+          break;
+        }
+      }
+      array->items[array->count++] = write;
+      fprintf(stderr, "Request id %lld\n", write->request_id);
       if (write->bytes != bytes) {
         log_message(LOG_ERROR, "listener", "Expected '%ld' bytes but received '%ld'", write->bytes, bytes);
         // TODO: when observed, resolve instead of break
         break;
       }
     } else {
+      find_write(instance, 0);
+      // TODO: parse JSON (and match request_id)
       // TODO: Currently, embedded 0 bytes terminate the current line, but you should not rely on this.
-      pState->read_buffer[bytes] = '\0'; // TODO: handle buffer gracefully
-      fprintf(stderr, "Got data from pipe (%p): %s", (void *)pState->pipe, pState->read_buffer);
+      instance->read_buffer[bytes] = '\0'; // TODO: handle buffer gracefully
+      fprintf(stderr, "Got data from pipe (%p): %s", (void *)instance->pipe, instance->read_buffer);
       if (!overlap_read((Instance *)completion_key)) {
         // TODO: when observed, resolve instead of break
         break;
