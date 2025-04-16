@@ -318,6 +318,26 @@ static cJSON *setup_entry_collection(cJSON *entry, const char *name) {
   return result;
 }
 
+static bool setup_directory(const cJSON *directory) {
+  // TODO: https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findfirstfileexw
+  // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findnextfilea
+  // TODO: explain allowed patterns in readme/json examples
+  if (directory->valuestring == NULL) {
+    return false;
+  }
+  wchar_t *str = utf8_to_utf16(directory->valuestring);
+  if (str == NULL) {
+    log_wmessage(LOG_WARNING, "json",
+                 L"Failed to convert JSON string '%s' for key '%s' to UTF-16",
+                 directory->valuestring, directory->string);
+    return false;
+  }
+  DWORD flags = GetFileAttributesW(str);
+  printf("%ld\n", flags);
+  free(str);
+  return true;
+}
+
 static bool setup_media_library(const cJSON *json) {
   cJSON *lib = cJSON_GetObjectItemCaseSensitive(json, "media_library");
   if (lib == NULL || !cJSON_IsArray(lib)) {
@@ -326,8 +346,12 @@ static bool setup_media_library(const cJSON *json) {
   }
   cJSON *entry = NULL;
   cJSON_ArrayForEach(entry, lib) {
+    cJSON *cursor = NULL;
     bool recursion = setup_entry_flag(entry, "recursive_directories");
     cJSON *directories = setup_entry_collection(entry, "directories");
+    cJSON_ArrayForEach(cursor, directories) {
+      setup_directory(cursor);
+    }
     cJSON *files = setup_entry_collection(entry, "files");
     cJSON *urls = setup_entry_collection(entry, "urls");
     cJSON *tags = setup_entry_collection(entry, "tags");
