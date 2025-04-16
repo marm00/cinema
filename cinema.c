@@ -44,16 +44,6 @@ typedef struct {
   int height;
 } Screen;
 
-typedef struct {
-  wchar_t filename[MAX_FILENAME];
-  int volume;
-  int loop;
-  int alwaysontop;
-  int noborder;
-  int showmode;
-  int fullscreen;
-} MpvArgs;
-
 typedef enum {
   LOG_ERROR,
   LOG_WARNING,
@@ -292,19 +282,6 @@ static wchar_t *setup_wstring(const cJSON *json, const char *key, const wchar_t 
   return result;
 }
 
-static int setup_mpv(const cJSON *json_mpv, MpvArgs *settings) {
-  if (json_mpv == NULL || settings == NULL) {
-    return 0;
-  }
-  settings->volume = setup_int(json_mpv, "volume", 100);
-  settings->loop = setup_int(json_mpv, "loop", 0);
-  settings->alwaysontop = setup_bool(json_mpv, "alwaysontop", 1);
-  settings->noborder = setup_bool(json_mpv, "noborder", 0);
-  settings->showmode = setup_int(json_mpv, "showmode", 0);
-  settings->fullscreen = setup_bool(json_mpv, "fullscreen", 0);
-  return 1;
-}
-
 static int setup_layouts(const cJSON *layouts) {
   if (layouts == NULL) {
     return 0;
@@ -378,14 +355,14 @@ typedef struct {
   PendingWrites pending_writes;
 } Instance;
 
-static bool create_process(Instance *instance, const wchar_t *name, MpvArgs *args) {
+static bool create_process(Instance *instance, const wchar_t *pipe_name, const wchar_t *file_name) {
   static wchar_t command[COMMAND_LINE_LIMIT];
   swprintf(command, COMMAND_LINE_LIMIT,
            L"mpv"
            L" \"%ls\"" // filename
            L" --input-ipc-server=%ls",
-           args->filename,
-           name);
+           file_name,
+           pipe_name);
   log_wmessage(LOG_INFO, "instance", command);
   STARTUPINFOW si = {0};
   si.cb = sizeof(si);
@@ -495,8 +472,8 @@ static bool overlap_write(Instance *instance, const char *message) {
   return true;
 }
 
-static bool create_instance(Instance *instance, const wchar_t *name, MpvArgs *args, HANDLE *iocp) {
-  if (name == NULL || args == NULL) {
+static bool create_instance(Instance *instance, const wchar_t *name, const wchar_t *file_name, HANDLE *iocp) {
+  if (name == NULL || file_name == NULL) {
     return false;
   }
   instance->ovl_context.is_write = false;
@@ -505,7 +482,7 @@ static bool create_instance(Instance *instance, const wchar_t *name, MpvArgs *ar
       .count = 0,
       .capacity = WRITES_CAPACITY};
   instance->pending_writes = pending_writes;
-  if (!create_process(instance, name, args)) {
+  if (!create_process(instance, name, file_name)) {
     return false;
   }
   if (!create_pipe(instance, name)) {
@@ -522,7 +499,7 @@ static bool create_instance(Instance *instance, const wchar_t *name, MpvArgs *ar
   return true;
 }
 
-static bool process_layout(size_t count, Instance *instances, MpvArgs *args, HANDLE *iocp) {
+static bool process_layout(size_t count, Instance *instances, const wchar_t *file_name, HANDLE *iocp) {
   static const wchar_t PIPE_PREFIXW[] = L"\\\\.\\pipe\\cinema_mpv_";
   static const int PIPE_NAME_BUFFER = 32;
   if (count <= 0) {
@@ -532,7 +509,7 @@ static bool process_layout(size_t count, Instance *instances, MpvArgs *args, HAN
   wchar_t pipe_name[PIPE_NAME_BUFFER];
   for (size_t i = 0; i < count; ++i) {
     swprintf(pipe_name, PIPE_NAME_BUFFER, L"%ls%d", PIPE_PREFIXW, i);
-    if (!create_instance(&instances[i], pipe_name, args, iocp)) {
+    if (!create_instance(&instances[i], pipe_name, file_name, iocp)) {
       free(instances);
       log_message(LOG_ERROR, "layout", "Failed to create instance");
       return false;
@@ -645,20 +622,6 @@ int main(int argc, char **argv) {
     log_message(LOG_ERROR, "main", "No valid 'path' found in config");
     return 1;
   }
-  cJSON *json_mpv = cJSON_GetObjectItemCaseSensitive(json, "mpv");
-  if (!cJSON_IsObject(json_mpv)) {
-    log_message(LOG_ERROR, "main", "No 'mpv' object found in config");
-    return 1;
-  }
-
-  MpvArgs args;
-  wcsncpy(args.filename, name, (sizeof(args.filename) / sizeof(wchar_t)) - 1);
-  free(name);
-  args.filename[(sizeof(args.filename) / sizeof(wchar_t)) - 1] = L'\0';
-  if (!setup_mpv(json_mpv, &args)) {
-    log_message(LOG_ERROR, "main", "Failed to setup mpv with JSON config");
-    return 1;
-  }
 
   HANDLE iocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
   DWORD listener_id;
@@ -675,7 +638,8 @@ int main(int argc, char **argv) {
     return false;
   }
 
-  process_layout(count, pipes, &args, iocp);
+  process_layout(count, pipes, name, iocp);
+  free(name);
   for (size_t i = 0; i < count; ++i) {
     log_message(LOG_INFO, "main", "Instance[%zu] Process ID: %lu", i, (unsigned long)pipes[i].pi.dwProcessId);
   }
