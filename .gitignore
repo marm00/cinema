@@ -2,3 +2,5 @@ cinema.exe
 config.json
 .vscode
 mpv.exe
+yt-dlp.exe
+portable_config/cache

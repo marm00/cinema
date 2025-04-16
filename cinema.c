@@ -382,20 +382,8 @@ static bool create_process(Instance *instance, const wchar_t *name, MpvArgs *arg
   static wchar_t command[COMMAND_LINE_LIMIT];
   swprintf(command, COMMAND_LINE_LIMIT,
            L"mpv"
-           L" --terminal=no"
-           L" --no-config" // TODO: default --config-dir
-           L" --volume=%d"
-           L" --loop=inf"
-           L"%ls"      // alwaysontop
-           L"%ls"      // noborder
-           L"%ls"      // fullscreen (fs)
            L" \"%ls\"" // filename
            L" --input-ipc-server=%ls",
-           args->volume,
-           //  args->loop,
-           (args->alwaysontop ? L" --ontop" : L""),
-           (args->noborder ? L" --border=no" : L""),
-           (args->fullscreen ? L" --fullscreen=yes" : L""),
            args->filename,
            name);
   log_wmessage(LOG_INFO, "instance", command);
@@ -404,7 +392,14 @@ static bool create_process(Instance *instance, const wchar_t *name, MpvArgs *arg
   PROCESS_INFORMATION pi = {0};
   // https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessa
   if (!CreateProcessW(NULL, command, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
-    log_last_error("instance", "CreateProcessW failed");
+    if (GetLastError() == ERROR_FILE_NOT_FOUND) {
+      // mpv binary not found
+      // TODO: link to somewhere to get the binary
+      // TODO: check for yt-dlp binary for streams
+      log_last_error("instance", "Failed to find mpv binary");
+    } else {
+      log_last_error("instance", "Failed to start mpv even though it was found");
+    }
     return false;
   };
   instance->si = si;
@@ -686,8 +681,14 @@ int main(int argc, char **argv) {
   }
 
   Sleep(2000);
-  overlap_write(&pipes[0], "{\"command\":[\"loadfile\",\"D:\\\\Test\\\\video.mp4\"], \"request_id\": 0}\n");
+  // overlap_write(&pipes[0], "{\"command\":[\"loadfile\",\"D:\\\\Test\\\\video.mp4\"], \"request_id\": 0}\n");
+  // overlap_write(&pipes[0], "{\"command\":[\"loadfile\",\"D:\\\\Test\\\\ast_recursive.png\"], \"request_id\": 0}\n");
+  // overlap_write(&pipes[0], "{\"command\":[\"loadfile\",\"https://twitch.tv/caedrel\"], \"request_id\": 0}\n");
+  // overlap_write(&pipes[0], "{\"command\":[\"loadfile\",\"https://www.youtube.com/watch?v=ZA-tUyM_y7s\"], \"request_id\": 0}\n");
+
   Sleep(2000);
+  // overlap_write(&pipes[0], "{\"command\":[\"get_property_string\", \"width\"], \"request_id\": 1}\n");
+  // Sleep(2000);
   // overlap_write(&pipes[1], "{\"command\":[\"loadfile\",\"D:\\\\Test\\\\video ❗.mp4\"]}\n");
   // overlap_write(&pipes[2], "{\"command\":[\"loadfile\",\"D:\\\\Test\\\\video ❗.mp4\"]}\n");
 
@@ -700,5 +701,7 @@ int main(int argc, char **argv) {
   // https://mpv.io/manual/stable/#list-of-input-commands
   // https://mpv.io/manual/stable/#commands-with-named-arguments
   // these commands can also be async
+
+  // TODO: subtitles conf
   return 0;
 }
