@@ -242,7 +242,7 @@ static int setup_screen_value(const cJSON *json, const char *key, int default_va
   return result;
 }
 
-static int setup_bool(const cJSON *json, const char *key, int default_val) {
+static bool setup_bool(const cJSON *json, const char *key, int default_val) {
   if (default_val != 0 && default_val != 1) {
     log_message(LOG_WARNING, "json", "Default value '%d' invalid for '%s'; defaulting to '0'", default_val, key);
     default_val = 0;
@@ -250,7 +250,7 @@ static int setup_bool(const cJSON *json, const char *key, int default_val) {
   int result = default_val;
   cJSON *option = cJSON_GetObjectItemCaseSensitive(json, key);
   if (cJSON_IsBool(option)) {
-    result = cJSON_IsTrue(option) ? 1 : 0;
+    result = cJSON_IsTrue(option) ? true : false;
   } else {
     log_message(LOG_WARNING, "json", "Defaulting '%s' to '%d': did not find boolean in JSON", key, default_val);
   }
@@ -282,16 +282,71 @@ static wchar_t *setup_wstring(const cJSON *json, const char *key, const wchar_t 
   return result;
 }
 
-static int setup_layouts(const cJSON *layouts) {
+static bool setup_entry_flag(const cJSON *entry, const char *name) {
+  cJSON *key = cJSON_GetObjectItemCaseSensitive(entry, name);
+  if (!cJSON_IsBool(key)) {
+    log_message(LOG_WARNING, "media_library", "Not true or false for \"%s\": %s", name, cJSON_Print(key));
+    return false;
+  }
+  return cJSON_IsTrue(key);
+}
+
+static cJSON *setup_entry_collection(cJSON *entry, const char *name) {
+  // Returns array pointer or NULL, converts string to array
+  cJSON *key = cJSON_GetObjectItemCaseSensitive(entry, name);
+  cJSON *result = NULL;
+  if (key == NULL) {
+    log_message(LOG_WARNING, "media_library", "Could not find key \"%s\"", name);
+  } else if (cJSON_IsArray(key)) {
+    result = key;
+  } else if (cJSON_IsString(key)) {
+    cJSON *str = cJSON_Duplicate(key, false);
+    cJSON *arr = cJSON_CreateArray();
+    cJSON_AddItemToArray(arr, str);
+    cJSON_ReplaceItemInObjectCaseSensitive(entry, name, arr);
+    if (cJSON_GetArraySize(arr) == 1) {
+      result = arr;
+    } else {
+      log_message(LOG_WARNING, "media_library",
+                  "Failed to convert string to array for \"%s\": %s",
+                  name, cJSON_Print(key));
+    }
+  } else {
+    log_message(LOG_WARNING, "media_library", "Unexpected type for \"%s\": %s",
+                name, cJSON_Print(key));
+  }
+  return result;
+}
+
+static bool setup_media_library(const cJSON *json) {
+  cJSON *lib = cJSON_GetObjectItemCaseSensitive(json, "media_library");
+  if (lib == NULL || !cJSON_IsArray(lib)) {
+    log_message(LOG_ERROR, "media_library", "Could not find media_library array in JSON");
+    return false;
+  }
+  cJSON *entry = NULL;
+  cJSON_ArrayForEach(entry, lib) {
+    bool recursion = setup_entry_flag(entry, "recursive_directories");
+    cJSON *directories = setup_entry_collection(entry, "directories");
+    cJSON *files = setup_entry_collection(entry, "files");
+    cJSON *urls = setup_entry_collection(entry, "urls");
+    cJSON *tags = setup_entry_collection(entry, "tags");
+    cJSON *str = NULL;
+    printf("%s\n", cJSON_PrintUnformatted(entry));
+  }
+  return true;
+}
+
+static bool setup_layouts(const cJSON *layouts) {
   if (layouts == NULL) {
-    return 0;
+    return false;
   }
   // https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getsystemmetrics
   int monitor_width = GetSystemMetrics(SM_CXSCREEN);
   int monitor_height = GetSystemMetrics(SM_CYSCREEN);
   if (monitor_width == 0 || monitor_height == 0) {
     log_message(LOG_ERROR, "layouts", "Failed to scan monitor for screen dimensions.");
-    return 0;
+    return false;
   }
   log_message(LOG_INFO, "layouts", "Monitor dimensions: %dx%d", monitor_width, monitor_height);
   const cJSON *layout = layouts->child;
@@ -299,7 +354,7 @@ static int setup_layouts(const cJSON *layouts) {
     log_message(LOG_DEBUG, "layouts", "Processing layout '%s'", layout->string);
     if (!cJSON_IsArray(layout)) {
       log_message(LOG_ERROR, "layouts", "Layout '%s' is not an Array", layout->string);
-      return 0;
+      return false;
     }
     const cJSON *screen = layout->child;
     int i = 0;
@@ -315,7 +370,7 @@ static int setup_layouts(const cJSON *layouts) {
     }
     layout = layout->next;
   }
-  return 1;
+  return true;
 }
 
 // https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-transactnamedpipe
@@ -616,6 +671,8 @@ int main(int argc, char **argv) {
   } else {
     // log_message(LOG_INFO, "main", string);
   }
+
+  setup_media_library(json);
 
   wchar_t *name = setup_wstring(json, "path", NULL);
   if (name == NULL) {
