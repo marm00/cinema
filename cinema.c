@@ -69,7 +69,7 @@ static const char *level_to_str(LogLevel level) {
   }
 }
 
-static LogLevel GLOBAL_LOG_LEVEL = LOG_TRACE;
+static LogLevel GLOBAL_LOG_LEVEL = LOG_INFO;
 
 static char *utf16_to_utf8(const wchar_t *wstr) {
   // https://learn.microsoft.com/en-us/windows/win32/api/stringapiset/nf-stringapiset-widechartomultibyte
@@ -321,8 +321,13 @@ static cJSON *setup_entry_collection(cJSON *entry, const char *name) {
 static bool setup_directory(const cJSON *directory) {
   // TODO: https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findfirstfileexw
   // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findnextfilea
-  // TODO: explain allowed patterns in readme/json examples
+  // TODO: explain allowed patterns (e.g., wildcards) in readme/json examples
   if (directory->valuestring == NULL) {
+    return false;
+  }
+  // TODO: try to sanitize the string based on what is allowed by winapi e.g. no trailing backspace
+  size_t len = strlen(directory->valuestring);
+  if (len <= 0 || len > MAX_PATH) {
     return false;
   }
   wchar_t *str = utf8_to_utf16(directory->valuestring);
@@ -332,10 +337,40 @@ static bool setup_directory(const cJSON *directory) {
                  directory->valuestring, directory->string);
     return false;
   }
-  DWORD flags = GetFileAttributesW(str);
-  printf("%ld\n", flags);
+  WIN32_FIND_DATAA data;
+  HANDLE search = FindFirstFileExW(str, FindExInfoBasic, &data,
+                                   FindExSearchNameMatch, NULL,
+                                   FIND_FIRST_EX_LARGE_FETCH);
+  if (search == INVALID_HANDLE_VALUE) {
+    log_last_error("directories", "Failed to find directory by name '%s'",
+                   directory->valuestring);
+    goto fail;
+  }
+  printf("%s\n", utf16_to_utf8((wchar_t *)data.cFileName));
+  // BY_HANDLE_FILE_INFORMATION attributes;
+  // if (GetFileInformationByHandle(search, &attributes) == 0) {
+  //   log_last_error("directories", "Failed to find file attribute information for '%s'",
+  //                  directory->valuestring);
+  //   goto fail;
+  // }
+  while (FindNextFileA(search, &data) > 0) {
+    printf("%s\n", (data.cFileName));
+  }
+  if (GetLastError() != ERROR_NO_MORE_FILES) {
+    log_last_error("directories", "Failed to find next file");
+    goto fail;
+  }
+  // DWORD flags = GetFileAttributesW(str);
+  // printf("%ld\n", flags);
+  FindClose(search);
   free(str);
   return true;
+fail:
+  if (search != NULL) {
+    FindClose(search);
+  }
+  free(str);
+  return false;
 }
 
 static bool setup_media_library(const cJSON *json) {
@@ -697,6 +732,7 @@ int main(int argc, char **argv) {
   }
 
   setup_media_library(json);
+  return 0;
 
   wchar_t *name = setup_wstring(json, "path", NULL);
   if (name == NULL) {
@@ -726,8 +762,8 @@ int main(int argc, char **argv) {
   }
 
   Sleep(2000);
-  // overlap_write(&pipes[0], "{\"command\":[\"loadfile\",\"D:\\\\Test\\\\video.mp4\"], \"request_id\": 0}\n");
-  // overlap_write(&pipes[0], "{\"command\":[\"loadfile\",\"D:\\\\Test\\\\ast_recursive.png\"], \"request_id\": 0}\n");
+  // overlap_write(&pipes[0], "{\"command\":[\"loadfile\",\"D:\\\\Test\\\\video ❗.mp4\"], \"request_id\": 0}\n");
+  overlap_write(&pipes[0], "{\"command\":[\"loadfile\",\"D:\\\\Test\\ast_recursive.png\"], \"request_id\": 0}\n");
   // overlap_write(&pipes[0], "{\"command\":[\"loadfile\",\"https://twitch.tv/caedrel\"], \"request_id\": 0}\n");
   // overlap_write(&pipes[0], "{\"command\":[\"loadfile\",\"https://www.youtube.com/watch?v=ZA-tUyM_y7s\"], \"request_id\": 0}\n");
 
