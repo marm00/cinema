@@ -318,6 +318,43 @@ static cJSON *setup_entry_collection(cJSON *entry, const char *name) {
   return result;
 }
 
+static bool setup_directory_contents(const wchar_t *str, bool recursive) {
+  DWORD da = GetFileAttributesW(str);
+  if (da != INVALID_FILE_ATTRIBUTES && (da & FILE_ATTRIBUTE_DIRECTORY)) {
+    // TODO: now it's a dir, process recursively by default
+    // TODO: otherwise, treat it as a pattern and just do the findnextfilew thing
+  }
+  wprintf(L"Name=%ls\n", str);
+  WIN32_FIND_DATAW data;
+  HANDLE search = FindFirstFileExW(str, FindExInfoBasic, &data,
+                                   FindExSearchNameMatch, NULL,
+                                   FIND_FIRST_EX_LARGE_FETCH);
+  if (search == INVALID_HANDLE_VALUE) {
+    log_last_error("directories", "Failed to find directory by name '%ls'",
+                   str);
+    goto fail;
+  }
+  do {
+    if (wcscmp(data.cFileName, L".") == 0 || wcscmp(data.cFileName, L"..") == 0) {
+      continue;
+    }
+    if (recursive && (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+      wchar_t full_path[MAX_PATH];
+      swprintf(full_path, MAX_PATH, L"%ls\\%ls", str, data.cFileName);
+      setup_directory_contents(full_path, true);
+    }
+  } while (FindNextFileW(search, &data) > 0);
+  if (GetLastError() != ERROR_NO_MORE_FILES) {
+    log_last_error("directories", "Failed to find next file");
+    goto fail;
+  }
+  FindClose(search);
+  return true;
+fail:
+  FindClose(search);
+  return false;
+}
+
 static bool setup_directory(const cJSON *directory) {
   // TODO: https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findfirstfileexw
   // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findnextfilea
@@ -337,40 +374,64 @@ static bool setup_directory(const cJSON *directory) {
                  directory->valuestring, directory->string);
     return false;
   }
-  WIN32_FIND_DATAA data;
-  HANDLE search = FindFirstFileExW(str, FindExInfoBasic, &data,
-                                   FindExSearchNameMatch, NULL,
-                                   FIND_FIRST_EX_LARGE_FETCH);
-  if (search == INVALID_HANDLE_VALUE) {
-    log_last_error("directories", "Failed to find directory by name '%s'",
-                   directory->valuestring);
-    goto fail;
-  }
-  printf("%s\n", utf16_to_utf8((wchar_t *)data.cFileName));
+
   // BY_HANDLE_FILE_INFORMATION attributes;
   // if (GetFileInformationByHandle(search, &attributes) == 0) {
   //   log_last_error("directories", "Failed to find file attribute information for '%s'",
   //                  directory->valuestring);
   //   goto fail;
   // }
-  while (FindNextFileA(search, &data) > 0) {
-    printf("%s\n", (data.cFileName));
+  return setup_directory_contents(str, true);
+}
+
+static bool setup_pattern(const cJSON *pattern) {
+  // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findfirstfileexw
+  // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findnextfilew
+  // https://support.microsoft.com/en-us/office/examples-of-wildcard-characters-939e153f-bd30-47e4-a763-61897c87b3f4
+  // TODO: explain allowed patterns (e.g., wildcards) in readme/json examples
+  bool success = false;
+  if (pattern->valuestring == NULL) {
+    goto end;
   }
-  if (GetLastError() != ERROR_NO_MORE_FILES) {
+  // TODO: try to sanitize the string based on what is allowed by winapi e.g. no trailing backspace
+  size_t len = strlen(pattern->valuestring);
+  if (len <= 0 || len > MAX_PATH) {
+    goto end;
+  }
+  wchar_t *lp_filename = utf8_to_utf16(pattern->valuestring);
+  if (lp_filename == NULL) {
+    goto end;
+  }
+  WIN32_FIND_DATAW data;
+  HANDLE search = FindFirstFileExW(lp_filename, FindExInfoBasic, &data,
+                                   FindExSearchNameMatch, NULL,
+                                   FIND_FIRST_EX_LARGE_FETCH);
+  if (search == INVALID_HANDLE_VALUE) {
+    log_last_error("directories", "Failed to match pattern '%ls'", lp_filename);
+    goto end;
+  }
+  do {
+    bool file = !(data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
+    if (file) {
+      char *temp_utf8 = utf16_to_utf8(data.cFileName);
+      printf("%s=%d\n", temp_utf8, file);
+      free(temp_utf8);
+    }
+  } while (FindNextFileW(search, &data) != 0);
+  if (GetLastError() == ERROR_NO_MORE_FILES) {
+    success = true;
+  } else {
     log_last_error("directories", "Failed to find next file");
-    goto fail;
   }
-  // DWORD flags = GetFileAttributesW(str);
-  // printf("%ld\n", flags);
-  FindClose(search);
-  free(str);
-  return true;
-fail:
+  goto end;
+end:
   if (search != NULL) {
     FindClose(search);
   }
-  free(str);
-  return false;
+  if (lp_filename != NULL) {
+    free(lp_filename);
+  }
+  return success;
 }
 
 static bool setup_media_library(const cJSON *json) {
@@ -382,12 +443,14 @@ static bool setup_media_library(const cJSON *json) {
   cJSON *entry = NULL;
   cJSON_ArrayForEach(entry, lib) {
     cJSON *cursor = NULL;
-    bool recursion = setup_entry_flag(entry, "recursive_directories");
+    cJSON *patterns = setup_entry_collection(entry, "patterns");
+    cJSON_ArrayForEach(cursor, patterns) {
+      setup_pattern(cursor);
+    }
     cJSON *directories = setup_entry_collection(entry, "directories");
     cJSON_ArrayForEach(cursor, directories) {
-      setup_directory(cursor);
+      // setup_directory(cursor);
     }
-    cJSON *files = setup_entry_collection(entry, "files");
     cJSON *urls = setup_entry_collection(entry, "urls");
     cJSON *tags = setup_entry_collection(entry, "tags");
     cJSON *str = NULL;
