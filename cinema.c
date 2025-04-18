@@ -296,20 +296,26 @@ static cJSON *setup_entry_collection(cJSON *entry, const char *name) {
   cJSON *key = cJSON_GetObjectItemCaseSensitive(entry, name);
   cJSON *result = NULL;
   if (key == NULL) {
-    log_message(LOG_WARNING, "media_library", "Could not find key \"%s\"", name);
+    log_message(LOG_DEBUG, "media_library", "Could not find key \"%s\"", name);
   } else if (cJSON_IsArray(key)) {
     result = key;
   } else if (cJSON_IsString(key)) {
     cJSON *str = cJSON_Duplicate(key, false);
     cJSON *arr = cJSON_CreateArray();
     cJSON_AddItemToArray(arr, str);
-    cJSON_ReplaceItemInObjectCaseSensitive(entry, name, arr);
     if (cJSON_GetArraySize(arr) == 1) {
+      cJSON_ReplaceItemInObjectCaseSensitive(entry, name, arr);
       result = arr;
     } else {
       log_message(LOG_WARNING, "media_library",
                   "Failed to convert string to array for \"%s\": %s",
                   name, cJSON_Print(key));
+      if (arr != NULL) {
+        cJSON_Delete(arr);
+      }
+      if (str != NULL) {
+        cJSON_Delete(str);
+      }
     }
   } else {
     log_message(LOG_WARNING, "media_library", "Unexpected type for \"%s\": %s",
@@ -324,7 +330,7 @@ static bool setup_directory_contents(const wchar_t *str, bool recursive) {
     // TODO: now it's a dir, process recursively by default
     // TODO: otherwise, treat it as a pattern and just do the findnextfilew thing
   }
-  wprintf(L"Name=%ls\n", str);
+  wprintf(L"setup_directory_contents - Name=%ls\n", str);
   WIN32_FIND_DATAW data;
   HANDLE search = FindFirstFileExW(str, FindExInfoBasic, &data,
                                    FindExSearchNameMatch, NULL,
@@ -385,6 +391,7 @@ static bool setup_directory(const cJSON *directory) {
 }
 
 static bool setup_pattern(const cJSON *pattern) {
+  // Processes all files (not directories) that match the pattern
   // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findfirstfileexw
   // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findnextfilew
   // https://support.microsoft.com/en-us/office/examples-of-wildcard-characters-939e153f-bd30-47e4-a763-61897c87b3f4
@@ -414,7 +421,7 @@ static bool setup_pattern(const cJSON *pattern) {
     bool file = !(data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
     if (file) {
       char *temp_utf8 = utf16_to_utf8(data.cFileName);
-      printf("%s=%d\n", temp_utf8, file);
+      printf("setup_pattern - %s=%d\n", temp_utf8, file);
       free(temp_utf8);
     }
   } while (FindNextFileW(search, &data) != 0);
@@ -454,7 +461,7 @@ static bool setup_media_library(const cJSON *json) {
     cJSON *urls = setup_entry_collection(entry, "urls");
     cJSON *tags = setup_entry_collection(entry, "tags");
     cJSON *str = NULL;
-    printf("%s\n", cJSON_PrintUnformatted(entry));
+    log_message(LOG_INFO, "media_library", "Processing entry: %s", cJSON_PrintUnformatted(entry));
   }
   return true;
 }
