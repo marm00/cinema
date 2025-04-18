@@ -361,61 +361,54 @@ fail:
   return false;
 }
 
-static bool setup_directory(const cJSON *directory) {
-  // TODO: https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findfirstfileexw
-  // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findnextfilea
-  // TODO: explain allowed patterns (e.g., wildcards) in readme/json examples
-  if (directory->valuestring == NULL) {
+static bool setup_directory(const wchar_t *directory) {
+  // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findfirstfileexw
+  // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findnextfilew
+  // TODO: explain in readme
+  wchar_t pattern[MAX_PATH];
+  swprintf(pattern, MAX_PATH, L"%ls\\*", directory);
+  WIN32_FIND_DATAW data;
+  HANDLE search = FindFirstFileExW(pattern, FindExInfoBasic, &data,
+                                   FindExSearchNameMatch, NULL,
+                                   FIND_FIRST_EX_LARGE_FETCH);
+  if (search == INVALID_HANDLE_VALUE) {
+    log_last_error("directories", "Failed to match pattern '%ls'", pattern);
     return false;
   }
-  // TODO: try to sanitize the string based on what is allowed by winapi e.g. no trailing backspace
-  size_t len = strlen(directory->valuestring);
-  if (len <= 0 || len > MAX_PATH) {
+  do {
+    if (wcscmp(data.cFileName, L".") == 0 || wcscmp(data.cFileName, L"..") == 0) {
+      continue;
+    }
+    wchar_t full[MAX_PATH];
+    swprintf(full, MAX_PATH, L"%ls\\%ls", directory, data.cFileName);
+    if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+      setup_directory(full);
+    } else {
+      wprintf(L"setup_directory - %ls\n", full);
+    }
+  } while (FindNextFileW(search, &data) != 0);
+  if (GetLastError() != ERROR_NO_MORE_FILES) {
+    log_last_error("directories", "Failed to find next file");
+    FindClose(search);
     return false;
   }
-  wchar_t *str = utf8_to_utf16(directory->valuestring);
-  if (str == NULL) {
-    log_wmessage(LOG_WARNING, "json",
-                 L"Failed to convert JSON string '%s' for key '%s' to UTF-16",
-                 directory->valuestring, directory->string);
-    return false;
-  }
-
-  // BY_HANDLE_FILE_INFORMATION attributes;
-  // if (GetFileInformationByHandle(search, &attributes) == 0) {
-  //   log_last_error("directories", "Failed to find file attribute information for '%s'",
-  //                  directory->valuestring);
-  //   goto fail;
-  // }
-  return setup_directory_contents(str, true);
+  FindClose(search);
+  return true;
 }
 
-static bool setup_pattern(const cJSON *pattern) {
+static bool setup_pattern(const wchar_t *pattern) {
   // Processes all files (not directories) that match the pattern
   // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findfirstfileexw
   // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findnextfilew
   // https://support.microsoft.com/en-us/office/examples-of-wildcard-characters-939e153f-bd30-47e4-a763-61897c87b3f4
   // TODO: explain allowed patterns (e.g., wildcards) in readme/json examples
-  bool success = false;
-  if (pattern->valuestring == NULL) {
-    goto end;
-  }
-  // TODO: try to sanitize the string based on what is allowed by winapi e.g. no trailing backspace
-  size_t len = strlen(pattern->valuestring);
-  if (len <= 0 || len > MAX_PATH) {
-    goto end;
-  }
-  wchar_t *lp_filename = utf8_to_utf16(pattern->valuestring);
-  if (lp_filename == NULL) {
-    goto end;
-  }
   WIN32_FIND_DATAW data;
-  HANDLE search = FindFirstFileExW(lp_filename, FindExInfoBasic, &data,
+  HANDLE search = FindFirstFileExW(pattern, FindExInfoBasic, &data,
                                    FindExSearchNameMatch, NULL,
                                    FIND_FIRST_EX_LARGE_FETCH);
   if (search == INVALID_HANDLE_VALUE) {
-    log_last_error("directories", "Failed to match pattern '%ls'", lp_filename);
-    goto end;
+    log_last_error("directories", "Failed to match pattern '%ls'", pattern);
+    return false;
   }
   do {
     bool file = !(data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
@@ -425,20 +418,13 @@ static bool setup_pattern(const cJSON *pattern) {
       free(temp_utf8);
     }
   } while (FindNextFileW(search, &data) != 0);
-  if (GetLastError() == ERROR_NO_MORE_FILES) {
-    success = true;
-  } else {
+  if (GetLastError() != ERROR_NO_MORE_FILES) {
     log_last_error("directories", "Failed to find next file");
-  }
-  goto end;
-end:
-  if (search != NULL) {
     FindClose(search);
+    return false;
   }
-  if (lp_filename != NULL) {
-    free(lp_filename);
-  }
-  return success;
+  FindClose(search);
+  return true;
 }
 
 static bool setup_media_library(const cJSON *json) {
@@ -452,11 +438,15 @@ static bool setup_media_library(const cJSON *json) {
     cJSON *cursor = NULL;
     cJSON *patterns = setup_entry_collection(entry, "patterns");
     cJSON_ArrayForEach(cursor, patterns) {
-      setup_pattern(cursor);
+      wchar_t *pattern = utf8_to_utf16(cursor->valuestring);
+      setup_pattern(pattern);
+      free(pattern);
     }
     cJSON *directories = setup_entry_collection(entry, "directories");
     cJSON_ArrayForEach(cursor, directories) {
-      // setup_directory(cursor);
+      wchar_t *directory = utf8_to_utf16(cursor->valuestring);
+      setup_directory(directory);
+      free(directory);
     }
     cJSON *urls = setup_entry_collection(entry, "urls");
     cJSON *tags = setup_entry_collection(entry, "tags");
