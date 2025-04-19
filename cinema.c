@@ -282,14 +282,22 @@ static wchar_t *setup_wstring(const cJSON *json, const char *key, const wchar_t 
   return result;
 }
 
-static bool setup_entry_flag(const cJSON *entry, const char *name) {
-  cJSON *key = cJSON_GetObjectItemCaseSensitive(entry, name);
-  if (!cJSON_IsBool(key)) {
-    log_message(LOG_WARNING, "media_library", "Not true or false for \"%s\": %s", name, cJSON_Print(key));
-    return false;
-  }
-  return cJSON_IsTrue(key);
-}
+typedef struct StrPool {
+  unsigned char *strings;
+  size_t count;
+  size_t capacity;
+} StrPool;
+
+static StrPool str_pool = {
+    .strings = NULL,
+    .count = 0,
+    .capacity = 0};
+
+typedef struct StrPoolSlice {
+  // References a UTF-8 string
+  uint32_t off;
+  uint16_t len;
+} StrPoolSlice;
 
 static cJSON *setup_entry_collection(cJSON *entry, const char *name) {
   // Returns array pointer or NULL, converts string to array
@@ -346,7 +354,7 @@ static bool setup_directory(wchar_t *path, size_t len) {
   len--;
   path[len] = L'\0';
   if (search == INVALID_HANDLE_VALUE) {
-    log_last_error("directories", "Failed to match pattern '%ls'", path);
+    log_last_error("directories", "Failed to match directory '%ls'", path);
     return false;
   }
   bool ok = true;
@@ -370,7 +378,7 @@ static bool setup_directory(wchar_t *path, size_t len) {
       }
     } else {
       char *temp_utf8 = utf16_to_utf8(path);
-      printf("setup_directory - %s\n", temp_utf8);
+      printf("=directory - %s\n", temp_utf8);
       free(temp_utf8);
     }
   } while (FindNextFileW(search, &data) != 0);
@@ -432,7 +440,7 @@ static bool setup_pattern(const wchar_t *pattern) {
     }
     wmemcpy(abs_buf + abs_len, file, file_len + 1);
     char *temp_utf8 = utf16_to_utf8(abs_buf);
-    printf("setup_pattern - %s\n", temp_utf8);
+    printf("=pattern - %s\n", temp_utf8);
     free(temp_utf8);
   } while (FindNextFileW(search, &data) != 0);
   if (GetLastError() != ERROR_NO_MORE_FILES) {
@@ -444,12 +452,12 @@ static bool setup_pattern(const wchar_t *pattern) {
 }
 
 static bool setup_url(const char *url) {
-  printf("setup_url - %s\n", url);
+  printf("=url - %s\n", url);
   return true;
 }
 
 static bool setup_tag(const char *tag) {
-  printf("setup_tag - %s\n", tag);
+  printf("=tag - %s\n", tag);
   return true;
 }
 
