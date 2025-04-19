@@ -32,7 +32,7 @@
 
 #include "cJSON.h"
 
-#define MAX_FILENAME 260
+#define CIN_MAX_PATH MAX_PATH // 260 win default
 // TODO: find better upper bound for command line
 #define COMMAND_LINE_LIMIT 32768
 #define MAX_LOG_MESSAGE 1024
@@ -345,8 +345,8 @@ static bool setup_directory_contents(const wchar_t *str, bool recursive) {
       continue;
     }
     if (recursive && (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-      wchar_t full_path[MAX_PATH];
-      swprintf(full_path, MAX_PATH, L"%ls\\%ls", str, data.cFileName);
+      wchar_t full_path[CIN_MAX_PATH];
+      swprintf(full_path, CIN_MAX_PATH, L"%ls\\%ls", str, data.cFileName);
       setup_directory_contents(full_path, true);
     }
   } while (FindNextFileW(search, &data) > 0);
@@ -361,36 +361,50 @@ fail:
   return false;
 }
 
-static bool setup_directory(const wchar_t *directory) {
+static bool setup_directory(wchar_t *path, size_t len) {
   // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findfirstfileexw
   // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findnextfilew
   // TODO: explain "directory" & recursive in readme
-  // TODO: note that we support up to MAX_PATH, not NTFS max of 32000+
-  wchar_t pattern[MAX_PATH];
-  swprintf(pattern, MAX_PATH, L"%ls\\*", directory);
-  WIN32_FIND_DATAW data;
-  HANDLE search = FindFirstFileExW(pattern, FindExInfoBasic, &data,
-                                   FindExSearchNameMatch, NULL,
-                                   FIND_FIRST_EX_LARGE_FETCH);
-  if (search == INVALID_HANDLE_VALUE) {
-    log_last_error("directories", "Failed to match pattern '%ls'", pattern);
+  // TODO: note that we support up to CIN_MAX_PATH, not NTFS max of 32000+
+  if (len + 2 >= CIN_MAX_PATH) {
+    // We have to append 2 chars \ and * for the correct pattern
     return false;
   }
-  bool ok = false;
+  path[len++] = L'\\';
+  path[len++] = L'*';
+  path[len] = L'\0';
+  WIN32_FIND_DATAW data;
+  HANDLE search = FindFirstFileExW(path, FindExInfoBasic, &data,
+                                   FindExSearchNameMatch, NULL,
+                                   FIND_FIRST_EX_LARGE_FETCH);
+  // We can now drop the 2 chars \ and * to restore the root,
+  // but choose to only drop * so that \ remains as a separator
+  // for the next file or directory, instead of adding later.
+  len--;
+  path[len] = L'\0';
+  if (search == INVALID_HANDLE_VALUE) {
+    log_last_error("directories", "Failed to match pattern '%ls'", path);
+    return false;
+  }
+  bool ok = true;
   do {
     if (data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
-      continue;
+      continue; // skip junction
     }
+    const wchar_t *file = data.cFileName;
     bool is_dir = data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY;
-    if (is_dir && (wcscmp(data.cFileName, L".") == 0 || wcscmp(data.cFileName, L"..") == 0)) {
-      continue;
+    if (is_dir && (file[0] == L'.') && (!file[1] || (file[1] == L'.' && !file[2]))) {
+      continue; // skip dot entry
     }
-    wchar_t full[MAX_PATH];
-    swprintf(full, MAX_PATH, L"%ls\\%ls", directory, data.cFileName);
-    if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-      ok = setup_directory(full) && ok;
+    size_t file_len = wcslen(file);
+    if (len + file_len + 1 >= CIN_MAX_PATH) {
+      continue; // skip absolute path (+ NUL) if silently truncated
+    }
+    wmemcpy(path + len, file, file_len + 1);
+    if (is_dir && !setup_directory(path, len + file_len)) {
+      ok = false;
     } else {
-      wprintf(L"setup_directory - %ls\n", full);
+      wprintf(L"setup_directory - %ls\n", path);
     }
   } while (FindNextFileW(search, &data) != 0);
   if (GetLastError() != ERROR_NO_MORE_FILES) {
@@ -445,14 +459,22 @@ static bool setup_media_library(const cJSON *json) {
     cJSON *patterns = setup_entry_collection(entry, "patterns");
     cJSON_ArrayForEach(cursor, patterns) {
       wchar_t *pattern = utf8_to_utf16(cursor->valuestring);
-      setup_pattern(pattern);
+      size_t len = wcslen(pattern);
+      if (len > 0 && len < CIN_MAX_PATH) {
+        setup_pattern(pattern);
+      }
       free(pattern);
     }
     cJSON *directories = setup_entry_collection(entry, "directories");
     cJSON_ArrayForEach(cursor, directories) {
-      wchar_t *directory = utf8_to_utf16(cursor->valuestring);
-      setup_directory(directory);
-      free(directory);
+      wchar_t *root = utf8_to_utf16(cursor->valuestring);
+      size_t len = wcslen(root);
+      if (len > 0 && len < CIN_MAX_PATH) {
+        wchar_t buf[CIN_MAX_PATH];
+        wmemcpy(buf, root, len + 1); // include NUL
+        setup_directory(buf, len);
+      }
+      free(root);
     }
     cJSON *urls = setup_entry_collection(entry, "urls");
     cJSON *tags = setup_entry_collection(entry, "tags");
@@ -828,9 +850,9 @@ int main(int argc, char **argv) {
   }
 
   Sleep(2000);
-  // overlap_write(&pipes[0], "{\"command\":[\"loadfile\",\"D:\\\\Test\\\\video ❗.mp4\"], \"request_id\": 0}\n");
-  overlap_write(&pipes[0], "{\"command\":[\"loadfile\",\"D:\\\\Test\\ast_recursive.png\"], \"request_id\": 0}\n");
-  // overlap_write(&pipes[0], "{\"command\":[\"loadfile\",\"https://twitch.tv/caedrel\"], \"request_id\": 0}\n");
+  overlap_write(&pipes[0], "{\"command\":[\"loadfile\",\"D:\\\\Test\\\\video ❗.mp4\"], \"request_id\": 0}\n");
+  // overlap_write(&pipes[0], "{\"command\":[\"loadfile\",\"D:\\\\Test\\\\ast_recursive.png\"], \"request_id\": 0}\n");
+  // overlap_write(&pipes[0], "{\"command\":[\"loadfile\",\"https://twitch.tv/bwipolol\"], \"request_id\": 0}\n");
   // overlap_write(&pipes[0], "{\"command\":[\"loadfile\",\"https://www.youtube.com/watch?v=ZA-tUyM_y7s\"], \"request_id\": 0}\n");
 
   Sleep(2000);
