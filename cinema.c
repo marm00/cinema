@@ -324,43 +324,6 @@ static cJSON *setup_entry_collection(cJSON *entry, const char *name) {
   return result;
 }
 
-static bool setup_directory_contents(const wchar_t *str, bool recursive) {
-  DWORD da = GetFileAttributesW(str);
-  if (da != INVALID_FILE_ATTRIBUTES && (da & FILE_ATTRIBUTE_DIRECTORY)) {
-    // TODO: now it's a dir, process recursively by default
-    // TODO: otherwise, treat it as a pattern and just do the findnextfilew thing
-  }
-  wprintf(L"setup_directory_contents - Name=%ls\n", str);
-  WIN32_FIND_DATAW data;
-  HANDLE search = FindFirstFileExW(str, FindExInfoBasic, &data,
-                                   FindExSearchNameMatch, NULL,
-                                   FIND_FIRST_EX_LARGE_FETCH);
-  if (search == INVALID_HANDLE_VALUE) {
-    log_last_error("directories", "Failed to find directory by name '%ls'",
-                   str);
-    goto fail;
-  }
-  do {
-    if (wcscmp(data.cFileName, L".") == 0 || wcscmp(data.cFileName, L"..") == 0) {
-      continue;
-    }
-    if (recursive && (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-      wchar_t full_path[CIN_MAX_PATH];
-      swprintf(full_path, CIN_MAX_PATH, L"%ls\\%ls", str, data.cFileName);
-      setup_directory_contents(full_path, true);
-    }
-  } while (FindNextFileW(search, &data) > 0);
-  if (GetLastError() != ERROR_NO_MORE_FILES) {
-    log_last_error("directories", "Failed to find next file");
-    goto fail;
-  }
-  FindClose(search);
-  return true;
-fail:
-  FindClose(search);
-  return false;
-}
-
 static bool setup_directory(wchar_t *path, size_t len) {
   // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findfirstfileexw
   // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findnextfilew
@@ -401,10 +364,14 @@ static bool setup_directory(wchar_t *path, size_t len) {
       continue; // skip absolute path (+ NUL) if silently truncated
     }
     wmemcpy(path + len, file, file_len + 1);
-    if (is_dir && !setup_directory(path, len + file_len)) {
-      ok = false;
+    if (is_dir) {
+      if (!setup_directory(path, len + file_len)) {
+        ok = false;
+      }
     } else {
-      wprintf(L"setup_directory - %ls\n", path);
+      char *temp_utf8 = utf16_to_utf8(path);
+      printf("setup_directory - %s\n", temp_utf8);
+      free(temp_utf8);
     }
   } while (FindNextFileW(search, &data) != 0);
   if (GetLastError() != ERROR_NO_MORE_FILES) {
@@ -417,11 +384,31 @@ static bool setup_directory(wchar_t *path, size_t len) {
 
 static bool setup_pattern(const wchar_t *pattern) {
   // Processes all files (not directories) that match the pattern
-  // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findfirstfileexw
-  // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findnextfilew
   // https://support.microsoft.com/en-us/office/examples-of-wildcard-characters-939e153f-bd30-47e4-a763-61897c87b3f4
   // TODO: explain allowed patterns (e.g., wildcards) in readme/json examples
-  // TODO: full paths instead of relative
+  wchar_t *separator = wcsrchr(pattern, L'\\');
+  if (separator == NULL || *(separator + 1) == L'\0') {
+    return false;
+  }
+  wchar_t dir_buf[CIN_MAX_PATH];
+  size_t dir_len = (size_t)(separator - pattern) + 1;
+  if (dir_len > CIN_MAX_PATH) {
+    return false;
+  }
+  wmemcpy(dir_buf, pattern, dir_len);
+  dir_buf[dir_len] = L'\0';
+  wchar_t abs_buf[CIN_MAX_PATH];
+  DWORD abs_dword = GetFullPathNameW(dir_buf, CIN_MAX_PATH, abs_buf, NULL);
+  if (abs_dword == 0 || abs_dword > CIN_MAX_PATH) {
+    return false;
+  }
+  // abs_len is essentially the same as abs_dword,
+  // we can safely add backslash here
+  size_t abs_len = wcslen(abs_buf);
+  if (abs_buf[abs_len - 1] != L'\\') {
+    abs_buf[abs_len++] = L'\\';
+    abs_buf[abs_len] = L'\0';
+  }
   WIN32_FIND_DATAW data;
   HANDLE search = FindFirstFileExW(pattern, FindExInfoBasic, &data,
                                    FindExSearchNameMatch, NULL,
@@ -430,21 +417,30 @@ static bool setup_pattern(const wchar_t *pattern) {
     log_last_error("directories", "Failed to match pattern '%ls'", pattern);
     return false;
   }
+  static const DWORD file_mask = FILE_ATTRIBUTE_DIRECTORY |
+                                 FILE_ATTRIBUTE_REPARSE_POINT |
+                                 FILE_ATTRIBUTE_DEVICE;
+  bool ok = true;
   do {
-    bool file = !(data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
-    if (file) {
-      char *temp_utf8 = utf16_to_utf8(data.cFileName);
-      printf("setup_pattern - %s=%d\n", temp_utf8, file);
-      free(temp_utf8);
+    if (data.dwFileAttributes & file_mask) {
+      continue; // skip directories
     }
+    const wchar_t *file = data.cFileName;
+    size_t file_len = wcslen(file);
+    if (abs_len + file_len + 1 >= CIN_MAX_PATH) {
+      continue; // skip absolute path (+ NUL) if silently truncated
+    }
+    wmemcpy(abs_buf + abs_len, file, file_len + 1);
+    char *temp_utf8 = utf16_to_utf8(abs_buf);
+    printf("setup_pattern - %s\n", temp_utf8);
+    free(temp_utf8);
   } while (FindNextFileW(search, &data) != 0);
   if (GetLastError() != ERROR_NO_MORE_FILES) {
     log_last_error("directories", "Failed to find next file");
-    FindClose(search);
-    return false;
+    ok = false;
   }
   FindClose(search);
-  return true;
+  return ok;
 }
 
 static bool setup_media_library(const cJSON *json) {
@@ -456,25 +452,25 @@ static bool setup_media_library(const cJSON *json) {
   cJSON *entry = NULL;
   cJSON_ArrayForEach(entry, lib) {
     cJSON *cursor = NULL;
-    cJSON *patterns = setup_entry_collection(entry, "patterns");
-    cJSON_ArrayForEach(cursor, patterns) {
-      wchar_t *pattern = utf8_to_utf16(cursor->valuestring);
-      size_t len = wcslen(pattern);
-      if (len > 0 && len < CIN_MAX_PATH) {
-        setup_pattern(pattern);
-      }
-      free(pattern);
-    }
     cJSON *directories = setup_entry_collection(entry, "directories");
     cJSON_ArrayForEach(cursor, directories) {
       wchar_t *root = utf8_to_utf16(cursor->valuestring);
       size_t len = wcslen(root);
-      if (len > 0 && len < CIN_MAX_PATH) {
+      if (len > 0 && len + 1 < CIN_MAX_PATH) {
         wchar_t buf[CIN_MAX_PATH];
         wmemcpy(buf, root, len + 1); // include NUL
         setup_directory(buf, len);
       }
       free(root);
+    }
+    cJSON *patterns = setup_entry_collection(entry, "patterns");
+    cJSON_ArrayForEach(cursor, patterns) {
+      wchar_t *pattern = utf8_to_utf16(cursor->valuestring);
+      size_t len = wcslen(pattern);
+      if (len > 0 && len + 1 < CIN_MAX_PATH) {
+        setup_pattern(pattern);
+      }
+      free(pattern);
     }
     cJSON *urls = setup_entry_collection(entry, "urls");
     cJSON *tags = setup_entry_collection(entry, "tags");
