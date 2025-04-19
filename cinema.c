@@ -443,6 +443,16 @@ static bool setup_pattern(const wchar_t *pattern) {
   return ok;
 }
 
+static bool setup_url(const char *url) {
+  printf("setup_url - %s\n", url);
+  return true;
+}
+
+static bool setup_tag(const char *tag) {
+  printf("setup_tag - %s\n", tag);
+  return true;
+}
+
 static bool setup_media_library(const cJSON *json) {
   cJSON *lib = cJSON_GetObjectItemCaseSensitive(json, "media_library");
   if (lib == NULL || !cJSON_IsArray(lib)) {
@@ -473,8 +483,17 @@ static bool setup_media_library(const cJSON *json) {
       free(pattern);
     }
     cJSON *urls = setup_entry_collection(entry, "urls");
+    cJSON_ArrayForEach(cursor, urls) {
+      if (cursor->valuestring != NULL && strlen(cursor->valuestring) > 0) {
+        setup_url(cursor->valuestring);
+      }
+    }
     cJSON *tags = setup_entry_collection(entry, "tags");
-    cJSON *str = NULL;
+    cJSON_ArrayForEach(cursor, tags) {
+      if (cursor->valuestring != NULL && strlen(cursor->valuestring) > 0) {
+        setup_tag(cursor->valuestring);
+      }
+    }
     log_message(LOG_INFO, "media_library", "Processing entry: %s", cJSON_PrintUnformatted(entry));
   }
   return true;
