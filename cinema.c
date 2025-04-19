@@ -364,7 +364,8 @@ fail:
 static bool setup_directory(const wchar_t *directory) {
   // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findfirstfileexw
   // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findnextfilew
-  // TODO: explain in readme
+  // TODO: explain "directory" & recursive in readme
+  // TODO: note that we support up to MAX_PATH, not NTFS max of 32000+
   wchar_t pattern[MAX_PATH];
   swprintf(pattern, MAX_PATH, L"%ls\\*", directory);
   WIN32_FIND_DATAW data;
@@ -375,25 +376,29 @@ static bool setup_directory(const wchar_t *directory) {
     log_last_error("directories", "Failed to match pattern '%ls'", pattern);
     return false;
   }
+  bool ok = false;
   do {
-    if (wcscmp(data.cFileName, L".") == 0 || wcscmp(data.cFileName, L"..") == 0) {
+    if (data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+      continue;
+    }
+    bool is_dir = data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY;
+    if (is_dir && (wcscmp(data.cFileName, L".") == 0 || wcscmp(data.cFileName, L"..") == 0)) {
       continue;
     }
     wchar_t full[MAX_PATH];
     swprintf(full, MAX_PATH, L"%ls\\%ls", directory, data.cFileName);
     if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-      setup_directory(full);
+      ok = setup_directory(full) && ok;
     } else {
       wprintf(L"setup_directory - %ls\n", full);
     }
   } while (FindNextFileW(search, &data) != 0);
   if (GetLastError() != ERROR_NO_MORE_FILES) {
     log_last_error("directories", "Failed to find next file");
-    FindClose(search);
-    return false;
+    ok = false;
   }
   FindClose(search);
-  return true;
+  return ok;
 }
 
 static bool setup_pattern(const wchar_t *pattern) {
@@ -402,6 +407,7 @@ static bool setup_pattern(const wchar_t *pattern) {
   // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findnextfilew
   // https://support.microsoft.com/en-us/office/examples-of-wildcard-characters-939e153f-bd30-47e4-a763-61897c87b3f4
   // TODO: explain allowed patterns (e.g., wildcards) in readme/json examples
+  // TODO: full paths instead of relative
   WIN32_FIND_DATAW data;
   HANDLE search = FindFirstFileExW(pattern, FindExInfoBasic, &data,
                                    FindExSearchNameMatch, NULL,
