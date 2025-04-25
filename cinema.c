@@ -50,9 +50,9 @@ typedef enum {
   LOG_INFO,
   LOG_DEBUG,
   LOG_TRACE
-} LogLevel;
+} Log_Level;
 
-static const char *level_to_str(LogLevel level) {
+static const char *level_to_str(Log_Level level) {
   switch (level) {
   case LOG_ERROR:
     return "ERROR";
@@ -69,7 +69,7 @@ static const char *level_to_str(LogLevel level) {
   }
 }
 
-static LogLevel GLOBAL_LOG_LEVEL = LOG_INFO;
+static Log_Level GLOBAL_LOG_LEVEL = LOG_INFO;
 
 static char *utf16_to_utf8(const wchar_t *wstr) {
   // https://learn.microsoft.com/en-us/windows/win32/api/stringapiset/nf-stringapiset-widechartomultibyte
@@ -99,7 +99,7 @@ static wchar_t *utf8_to_utf16(const char *utf8_str) {
   return wide_str;
 }
 
-static void log_message(LogLevel level, const char *location, const char *message, ...) {
+static void log_message(Log_Level level, const char *location, const char *message, ...) {
   if (level > GLOBAL_LOG_LEVEL) {
     return;
   }
@@ -112,7 +112,7 @@ static void log_message(LogLevel level, const char *location, const char *messag
   va_end(args);
 }
 
-static void log_wmessage(LogLevel level, const char *location, const wchar_t *wmessage, ...) {
+static void log_wmessage(Log_Level level, const char *location, const wchar_t *wmessage, ...) {
   if (level > GLOBAL_LOG_LEVEL)
     return;
   va_list args;
@@ -282,22 +282,22 @@ static wchar_t *setup_wstring(const cJSON *json, const char *key, const wchar_t 
   return result;
 }
 
-typedef struct StrPool {
+typedef struct Cin_String_Pool {
   unsigned char *strings;
   size_t count;
   size_t capacity;
-} StrPool;
+} Cin_String_Pool;
 
-static StrPool str_pool = {
+static Cin_String_Pool str_pool = {
     .strings = NULL,
     .count = 0,
     .capacity = 0};
 
-typedef struct StrPoolSlice {
+typedef struct Cin_String {
   // References a UTF-8 string
   uint32_t off;
   uint16_t len;
-} StrPoolSlice;
+} Cin_String;
 
 static cJSON *setup_entry_collection(cJSON *entry, const char *name) {
   // Returns array pointer or NULL, converts string to array
@@ -552,20 +552,20 @@ static bool setup_layouts(const cJSON *layouts) {
 typedef struct {
   OVERLAPPED ovl;
   bool is_write;
-} OverlappedContext;
+} Overlapped_Ctx;
 
-typedef struct OverlappedWrite {
-  OverlappedContext ovl_context;
+typedef struct Overlapped_Write {
+  Overlapped_Ctx ovl_context;
   char buffer[PIPE_WRITE_BUFFER];
   size_t bytes;
   int64_t request_id;
-} OverlappedWrite;
+} Overlapped_Write;
 
-typedef struct PendingWrites {
-  OverlappedWrite **items;
+typedef struct Pending_Writes {
+  Overlapped_Write **items;
   size_t count;
   size_t capacity;
-} PendingWrites;
+} Pending_Writes;
 
 typedef struct {
   // NOTE: currently, we use a single overlapped read per instance
@@ -575,9 +575,9 @@ typedef struct {
   STARTUPINFOW si;
   PROCESS_INFORMATION pi;
   HANDLE pipe;
-  OverlappedContext ovl_context;
+  Overlapped_Ctx ovl_context;
   CHAR read_buffer[PIPE_READ_BUFFER];
-  PendingWrites pending_writes;
+  Pending_Writes pending_writes;
 } Instance;
 
 static bool create_process(Instance *instance, const wchar_t *pipe_name, const wchar_t *file_name) {
@@ -666,7 +666,7 @@ static bool overlap_write(Instance *instance, const char *message) {
   if (len <= 0) {
     return false;
   }
-  OverlappedWrite *write = malloc(sizeof(*write));
+  Overlapped_Write *write = malloc(sizeof(*write));
   if (write == NULL) {
     log_message(LOG_ERROR, "write", "Failed to allocate memory.");
     return false;
@@ -702,8 +702,8 @@ static bool create_instance(Instance *instance, const wchar_t *name, const wchar
     return false;
   }
   instance->ovl_context.is_write = false;
-  PendingWrites pending_writes = {
-      .items = malloc(sizeof(OverlappedWrite *) * WRITES_CAPACITY),
+  Pending_Writes pending_writes = {
+      .items = malloc(sizeof(Overlapped_Write *) * WRITES_CAPACITY),
       .count = 0,
       .capacity = WRITES_CAPACITY};
   instance->pending_writes = pending_writes;
@@ -743,7 +743,7 @@ static bool process_layout(size_t count, Instance *instances, const wchar_t *fil
   return true;
 }
 
-OverlappedWrite *find_write(Instance *instance, int64_t request_id) {
+Overlapped_Write *find_write(Instance *instance, int64_t request_id) {
   // Uses binary search over sorted dynamic array.
   // The request_id should always find a pair in this scenario
   // as the incoming request_id was sent as a targeted response.
@@ -790,13 +790,13 @@ DWORD WINAPI iocp_listener(LPVOID lp_param) {
     }
     log_message(LOG_TRACE, "listener", "Processing dequeued completion packet from successful I/O operation");
     Instance *instance = (Instance *)completion_key;
-    OverlappedContext *ctx = (OverlappedContext *)ovl;
+    Overlapped_Ctx *ctx = (Overlapped_Ctx *)ovl;
     if (ctx->is_write) {
-      OverlappedWrite *write = (OverlappedWrite *)ctx;
-      PendingWrites *array = &instance->pending_writes;
+      Overlapped_Write *write = (Overlapped_Write *)ctx;
+      Pending_Writes *array = &instance->pending_writes;
       if (array->count >= array->capacity) {
         array->capacity = array->capacity * 2;
-        array->items = realloc(array->items, sizeof(OverlappedWrite *) * array->capacity);
+        array->items = realloc(array->items, sizeof(Overlapped_Write *) * array->capacity);
         if (array->items == NULL) {
           log_message(LOG_ERROR, "listener", "Failed to reallocate memory of pending writes");
           break;
