@@ -411,6 +411,7 @@ static bool setup_directory(wchar_t *path, size_t len) {
     } else {
       char *temp_utf8 = utf16_to_utf8(path);
       printf("=directory - %s\n", temp_utf8);
+      cin_strings_append(temp_utf8, strlen(temp_utf8));
       free(temp_utf8);
     }
   } while (FindNextFileW(search, &data) != 0);
@@ -472,6 +473,7 @@ static bool setup_pattern(const wchar_t *pattern) {
     }
     wmemcpy(abs_buf + abs_len, file, file_len + 1);
     char *temp_utf8 = utf16_to_utf8(abs_buf);
+    cin_strings_append(temp_utf8, strlen(temp_utf8));
     printf("=pattern - %s\n", temp_utf8);
     free(temp_utf8);
   } while (FindNextFileW(search, &data) != 0);
@@ -510,7 +512,6 @@ static bool setup_media_library(const cJSON *json) {
         wchar_t buf[CIN_MAX_PATH];
         wmemcpy(buf, root, len + 1); // include NUL
         setup_directory(buf, len);
-        cin_strings_append(cursor->valuestring, strlen(cursor->valuestring));
       }
       free(root);
     }
@@ -520,7 +521,6 @@ static bool setup_media_library(const cJSON *json) {
       size_t len = wcslen(pattern);
       if (len > 0 && len + 1 < CIN_MAX_PATH) {
         setup_pattern(pattern);
-        cin_strings_append(cursor->valuestring, strlen(cursor->valuestring));
       }
       free(pattern);
     }
