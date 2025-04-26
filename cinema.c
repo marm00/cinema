@@ -282,22 +282,54 @@ static wchar_t *setup_wstring(const cJSON *json, const char *key, const wchar_t 
   return result;
 }
 
-typedef struct Cin_String_Pool {
-  unsigned char *strings;
+typedef struct Cin_Strings {
+  // Each byte represents a UTF-8 unit
+  unsigned char *units;
   size_t count;
   size_t capacity;
-} Cin_String_Pool;
-
-static Cin_String_Pool str_pool = {
-    .strings = NULL,
-    .count = 0,
-    .capacity = 0};
+} Cin_Strings;
 
 typedef struct Cin_String {
-  // References a UTF-8 string
+  // Length-prefixed UTF-8 string in block
   uint32_t off;
   uint16_t len;
 } Cin_String;
+
+static Cin_Strings cin_strings = {0};
+
+static Cin_String cin_strings_append(const char *utf8, size_t len) {
+  // Geometric growth with clamp, based on 260 max path
+  static const size_t cin_strings_init = 1 << 15;
+  static const size_t cin_strings_clamp = 1 << 26;
+  void *dst = NULL;
+  if (cin_strings.capacity - cin_strings.count >= len) {
+    dst = cin_strings.units + cin_strings.count;
+  } else {
+    size_t cap = cin_strings.capacity;
+    if (cap <= 0) {
+      cap = cin_strings_init;
+    }
+    while (cap - cin_strings.count < len) {
+      cap = cap < cin_strings_clamp ? cap * 2 : cap + cin_strings_clamp;
+    }
+    cin_strings.capacity = cap;
+    unsigned char *units = realloc(cin_strings.units, cin_strings.capacity);
+    if (units != NULL) {
+      cin_strings.units = units;
+      dst = cin_strings.units + cin_strings.count;
+    }
+  }
+  Cin_String cin_string = {0};
+  if (dst == NULL) {
+    log_message(LOG_ERROR, "cin_strings", "Failed to reallocate memory");
+  } else {
+    memcpy(dst, utf8, len);
+    cin_string.off = (uint32_t)cin_strings.count;
+    cin_string.len = (uint16_t)len;
+    cin_strings.count += len;
+  }
+  return cin_string;
+}
 
 static cJSON *setup_entry_collection(cJSON *entry, const char *name) {
   // Returns array pointer or NULL, converts string to array
@@ -478,6 +510,7 @@ static bool setup_media_library(const cJSON *json) {
         wchar_t buf[CIN_MAX_PATH];
         wmemcpy(buf, root, len + 1); // include NUL
         setup_directory(buf, len);
+        cin_strings_append(cursor->valuestring, strlen(cursor->valuestring));
       }
       free(root);
     }
@@ -487,6 +520,7 @@ static bool setup_media_library(const cJSON *json) {
       size_t len = wcslen(pattern);
       if (len > 0 && len + 1 < CIN_MAX_PATH) {
         setup_pattern(pattern);
+        cin_strings_append(cursor->valuestring, strlen(cursor->valuestring));
       }
       free(pattern);
     }
@@ -494,16 +528,31 @@ static bool setup_media_library(const cJSON *json) {
     cJSON_ArrayForEach(cursor, urls) {
       if (cursor->valuestring != NULL && strlen(cursor->valuestring) > 0) {
         setup_url(cursor->valuestring);
+        cin_strings_append(cursor->valuestring, strlen(cursor->valuestring));
       }
     }
     cJSON *tags = setup_entry_collection(entry, "tags");
     cJSON_ArrayForEach(cursor, tags) {
       if (cursor->valuestring != NULL && strlen(cursor->valuestring) > 0) {
         setup_tag(cursor->valuestring);
+        cin_strings_append(cursor->valuestring, strlen(cursor->valuestring));
       }
     }
     log_message(LOG_INFO, "media_library", "Processing entry: %s", cJSON_PrintUnformatted(entry));
   }
+  if (cin_strings.count < cin_strings.capacity) {
+    unsigned char *tight = realloc(cin_strings.units, cin_strings.count);
+    if (tight != NULL) {
+      cin_strings.units = tight;
+    }
+    cin_strings.capacity = cin_strings.count;
+  }
+  printf("\n");
+  printf("count=%zu|capacity=%zu\t", cin_strings.count, cin_strings.capacity);
+  for (size_t i = 0; i < cin_strings.count; ++i) {
+    printf("%c", cin_strings.units[i]);
+  }
+  printf("\n\n");
   return true;
 }
 
