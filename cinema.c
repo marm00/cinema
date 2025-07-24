@@ -410,8 +410,8 @@ static bool setup_directory(wchar_t *path, size_t len) {
       }
     } else {
       char *temp_utf8 = utf16_to_utf8(path);
-      printf("=directory - %s\n", temp_utf8);
-      cin_strings_append(temp_utf8, strlen(temp_utf8));
+      // printf("=directory - %s\n", temp_utf8);
+      cin_strings_append(temp_utf8, strlen(temp_utf8) + 1);
       free(temp_utf8);
     }
   } while (FindNextFileW(search, &data) != 0);
@@ -473,8 +473,8 @@ static bool setup_pattern(const wchar_t *pattern) {
     }
     wmemcpy(abs_buf + abs_len, file, file_len + 1);
     char *temp_utf8 = utf16_to_utf8(abs_buf);
-    cin_strings_append(temp_utf8, strlen(temp_utf8));
-    printf("=pattern - %s\n", temp_utf8);
+    cin_strings_append(temp_utf8, strlen(temp_utf8) + 1);
+    // printf("=pattern - %s\n", temp_utf8);
     free(temp_utf8);
   } while (FindNextFileW(search, &data) != 0);
   if (GetLastError() != ERROR_NO_MORE_FILES) {
@@ -486,12 +486,12 @@ static bool setup_pattern(const wchar_t *pattern) {
 }
 
 static bool setup_url(const char *url) {
-  printf("=url - %s\n", url);
+  // printf("=url - %s\n", url);
   return true;
 }
 
 static bool setup_tag(const char *tag) {
-  printf("=tag - %s\n", tag);
+  // printf("=tag - %s\n", tag);
   return true;
 }
 
@@ -528,16 +528,17 @@ static bool setup_media_library(const cJSON *json) {
     cJSON_ArrayForEach(cursor, urls) {
       if (cursor->valuestring != NULL && strlen(cursor->valuestring) > 0) {
         setup_url(cursor->valuestring);
-        cin_strings_append(cursor->valuestring, strlen(cursor->valuestring));
+        cin_strings_append(cursor->valuestring, strlen(cursor->valuestring) + 1);
       }
     }
-    cJSON *tags = setup_entry_collection(entry, "tags");
-    cJSON_ArrayForEach(cursor, tags) {
-      if (cursor->valuestring != NULL && strlen(cursor->valuestring) > 0) {
-        setup_tag(cursor->valuestring);
-        cin_strings_append(cursor->valuestring, strlen(cursor->valuestring));
-      }
-    }
+    // TODO: put tags in separate structure
+    // cJSON *tags = setup_entry_collection(entry, "tags");
+    // cJSON_ArrayForEach(cursor, tags) {
+    //   if (cursor->valuestring != NULL && strlen(cursor->valuestring) > 0) {
+    //     setup_tag(cursor->valuestring);
+    //     cin_strings_append(cursor->valuestring, strlen(cursor->valuestring));
+    //   }
+    // }
     log_message(LOG_INFO, "media_library", "Processing entry: %s", cJSON_PrintUnformatted(entry));
   }
   if (cin_strings.count < cin_strings.capacity) {
@@ -548,9 +549,9 @@ static bool setup_media_library(const cJSON *json) {
     cin_strings.capacity = cin_strings.count;
   }
   printf("\n");
-  printf("count=%zu|capacity=%zu\t", cin_strings.count, cin_strings.capacity);
+  printf("units=%zu|count=%zu|capacity=%zu\n", strlen((char *)cin_strings.units), cin_strings.count, cin_strings.capacity);
   for (size_t i = 0; i < cin_strings.count; ++i) {
-    printf("%c", cin_strings.units[i]);
+    printf(cin_strings.units[i] ? "%c" : " ", cin_strings.units[i]);
   }
   printf("\n\n");
   return true;
@@ -922,6 +923,7 @@ int main(int argc, char **argv) {
   }
 
   Sleep(2000);
+  // TODO: lowercase
   overlap_write(&pipes[0], "{\"command\":[\"loadfile\",\"D:\\\\Test\\\\video ❗.mp4\"], \"request_id\": 0}\n");
   // overlap_write(&pipes[0], "{\"command\":[\"loadfile\",\"D:\\\\Test\\\\ast_recursive.png\"], \"request_id\": 0}\n");
   // overlap_write(&pipes[0], "{\"command\":[\"loadfile\",\"https://twitch.tv/bwipolol\"], \"request_id\": 0}\n");
