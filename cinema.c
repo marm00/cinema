@@ -145,6 +145,14 @@ static void log_last_error(const char *location, const char *message, ...) {
   LocalFree(buffer);
 }
 
+static void to_lower_ascii(char *ascii) {
+  for (int i = 0; ascii[i]; ++i) {
+    if (ascii[i] >= 'A' && ascii[i] <= 'Z') {
+      ascii[i] += 32;
+    }
+  }
+}
+
 static char *read_json(const char *filename) {
   if (filename == NULL || filename[0] == '\0') {
     log_message(LOG_ERROR, "json", "Invalid filename provided (empty string)");
@@ -394,7 +402,8 @@ static bool setup_directory(wchar_t *path, size_t len) {
     if (data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
       continue; // skip junction
     }
-    const wchar_t *file = data.cFileName;
+    wchar_t *file = data.cFileName;
+    CharLowerW(file);
     bool is_dir = data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY;
     if (is_dir && (file[0] == L'.') && (!file[1] || (file[1] == L'.' && !file[2]))) {
       continue; // skip dot entry
@@ -466,7 +475,8 @@ static bool setup_pattern(const wchar_t *pattern) {
     if (data.dwFileAttributes & file_mask) {
       continue; // skip directories
     }
-    const wchar_t *file = data.cFileName;
+    wchar_t *file = data.cFileName;
+    CharLowerW(file);
     size_t file_len = wcslen(file);
     if (abs_len + file_len + 1 >= CIN_MAX_PATH) {
       continue; // skip absolute path (+ NUL) if silently truncated
@@ -485,13 +495,16 @@ static bool setup_pattern(const wchar_t *pattern) {
   return ok;
 }
 
-static bool setup_url(const char *url) {
+static bool setup_url(char *url) {
   // printf("=url - %s\n", url);
+  to_lower_ascii(url);
+  cin_strings_append(url, strlen(url) + 1);
   return true;
 }
 
-static bool setup_tag(const char *tag) {
+static bool setup_tag(char *tag) {
   // printf("=tag - %s\n", tag);
+  to_lower_ascii(tag);
   return true;
 }
 
@@ -507,6 +520,7 @@ static bool setup_media_library(const cJSON *json) {
     cJSON *directories = setup_entry_collection(entry, "directories");
     cJSON_ArrayForEach(cursor, directories) {
       wchar_t *root = utf8_to_utf16(cursor->valuestring);
+      CharLowerW(root);
       size_t len = wcslen(root);
       if (len > 0 && len + 1 < CIN_MAX_PATH) {
         wchar_t buf[CIN_MAX_PATH];
@@ -518,6 +532,7 @@ static bool setup_media_library(const cJSON *json) {
     cJSON *patterns = setup_entry_collection(entry, "patterns");
     cJSON_ArrayForEach(cursor, patterns) {
       wchar_t *pattern = utf8_to_utf16(cursor->valuestring);
+      CharLowerW(pattern);
       size_t len = wcslen(pattern);
       if (len > 0 && len + 1 < CIN_MAX_PATH) {
         setup_pattern(pattern);
@@ -528,7 +543,6 @@ static bool setup_media_library(const cJSON *json) {
     cJSON_ArrayForEach(cursor, urls) {
       if (cursor->valuestring != NULL && strlen(cursor->valuestring) > 0) {
         setup_url(cursor->valuestring);
-        cin_strings_append(cursor->valuestring, strlen(cursor->valuestring) + 1);
       }
     }
     // TODO: put tags in separate structure
@@ -549,11 +563,11 @@ static bool setup_media_library(const cJSON *json) {
     cin_strings.capacity = cin_strings.count;
   }
   printf("\n");
-  printf("units=%zu|count=%zu|capacity=%zu\n", strlen((char *)cin_strings.units), cin_strings.count, cin_strings.capacity);
+  printf("count=%zu|capacity=%zu\n", cin_strings.count, cin_strings.capacity);
   for (size_t i = 0; i < cin_strings.count; ++i) {
-    printf(cin_strings.units[i] ? "%c" : " ", cin_strings.units[i]);
+    printf(cin_strings.units[i] ? "%c" : "\n", cin_strings.units[i]);
   }
-  printf("\n\n");
+  printf("\n");
   return true;
 }
 

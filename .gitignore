@@ -1,6 +1,9 @@
 cinema.exe
+cinema.pdb
+cinema.rdi
 config.json
 .vscode
+.proj
 mpv.exe
 yt-dlp.exe
 portable_config/cache
