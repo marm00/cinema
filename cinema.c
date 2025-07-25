@@ -69,7 +69,8 @@ static const char *level_to_str(Log_Level level) {
   }
 }
 
-static Log_Level GLOBAL_LOG_LEVEL = LOG_INFO;
+static Log_Level GLOBAL_LOG_LEVEL = LOG_TRACE;
+CRITICAL_SECTION log_lock;
 
 static char *utf16_to_utf8(const wchar_t *wstr) {
   // https://learn.microsoft.com/en-us/windows/win32/api/stringapiset/nf-stringapiset-widechartomultibyte
@@ -100,6 +101,7 @@ static wchar_t *utf8_to_utf16(const char *utf8_str) {
 }
 
 static void log_message(Log_Level level, const char *location, const char *message, ...) {
+  EnterCriticalSection(&log_lock);
   if (level > GLOBAL_LOG_LEVEL) {
     return;
   }
@@ -110,9 +112,11 @@ static void log_message(Log_Level level, const char *location, const char *messa
   vfprintf(stderr, message, args);
   fprintf(stderr, "\n");
   va_end(args);
+  LeaveCriticalSection(&log_lock);
 }
 
 static void log_wmessage(Log_Level level, const char *location, const wchar_t *wmessage, ...) {
+  EnterCriticalSection(&log_lock);
   if (level > GLOBAL_LOG_LEVEL)
     return;
   va_list args;
@@ -123,9 +127,11 @@ static void log_wmessage(Log_Level level, const char *location, const wchar_t *w
   fprintf(stderr, "[%s] [%s] %s\n", level_to_str(level), location, message_utf8);
   free(message_utf8);
   va_end(args);
+  LeaveCriticalSection(&log_lock);
 }
 
 static void log_last_error(const char *location, const char *message, ...) {
+  EnterCriticalSection(&log_lock);
   static const char *log_level = "ERROR";
   static const DWORD dw_flags = FORMAT_MESSAGE_ALLOCATE_BUFFER |
                                 FORMAT_MESSAGE_FROM_SYSTEM |
@@ -143,6 +149,7 @@ static void log_last_error(const char *location, const char *message, ...) {
   va_end(args);
   fprintf(stderr, " - Code %lu: %s", code, (char *)buffer);
   LocalFree(buffer);
+  LeaveCriticalSection(&log_lock);
 }
 
 static void to_lower_ascii(char *ascii) {
@@ -419,7 +426,6 @@ static bool setup_directory(wchar_t *path, size_t len) {
       }
     } else {
       char *temp_utf8 = utf16_to_utf8(path);
-      // printf("=directory - %s\n", temp_utf8);
       cin_strings_append(temp_utf8, strlen(temp_utf8) + 1);
       free(temp_utf8);
     }
@@ -484,7 +490,6 @@ static bool setup_pattern(const wchar_t *pattern) {
     wmemcpy(abs_buf + abs_len, file, file_len + 1);
     char *temp_utf8 = utf16_to_utf8(abs_buf);
     cin_strings_append(temp_utf8, strlen(temp_utf8) + 1);
-    // printf("=pattern - %s\n", temp_utf8);
     free(temp_utf8);
   } while (FindNextFileW(search, &data) != 0);
   if (GetLastError() != ERROR_NO_MORE_FILES) {
@@ -496,14 +501,12 @@ static bool setup_pattern(const wchar_t *pattern) {
 }
 
 static bool setup_url(char *url) {
-  // printf("=url - %s\n", url);
   to_lower_ascii(url);
   cin_strings_append(url, strlen(url) + 1);
   return true;
 }
 
 static bool setup_tag(char *tag) {
-  // printf("=tag - %s\n", tag);
   to_lower_ascii(tag);
   return true;
 }
@@ -562,12 +565,12 @@ static bool setup_media_library(const cJSON *json) {
     }
     cin_strings.capacity = cin_strings.count;
   }
-  printf("\n");
-  printf("count=%zu|capacity=%zu\n", cin_strings.count, cin_strings.capacity);
+  fprintf(stderr, "\n");
+  fprintf(stderr, "count=%zu|capacity=%zu\n", cin_strings.count, cin_strings.capacity);
   for (size_t i = 0; i < cin_strings.count; ++i) {
-    printf(cin_strings.units[i] ? "%c" : "\n", cin_strings.units[i]);
+    fprintf(stderr, cin_strings.units[i] ? "%c" : "\n", cin_strings.units[i]);
   }
-  printf("\n");
+  fprintf(stderr, "\n");
   return true;
 }
 
@@ -642,6 +645,7 @@ typedef struct {
   Overlapped_Ctx ovl_context;
   CHAR read_buffer[PIPE_READ_BUFFER];
   Pending_Writes pending_writes;
+  int64_t request_id;
 } Instance;
 
 static bool create_process(Instance *instance, const wchar_t *pipe_name, const wchar_t *file_name) {
@@ -723,13 +727,38 @@ static bool overlap_read(Instance *instance) {
   return true;
 }
 
-static bool overlap_write(Instance *instance, const char *message) {
-  static int current_id = 0; // TODO: request id should probably be unique to instance
+static cJSON *mpv_command(const char *command, int64_t request_id) {
+  cJSON *json = cJSON_CreateObject();
+  if (json == NULL) {
+    goto end;
+  }
+  cJSON *cmd_array = cJSON_CreateArray();
+  if (cmd_array == NULL) {
+    goto end;
+  }
+  cJSON *cmd_element = cJSON_CreateString(command);
+  if (cmd_element == NULL) {
+    goto end;
+  }
+  cJSON_AddItemToArray(cmd_array, cmd_element);
+  cJSON_AddItemToObject(json, "command", cmd_array);
+  cJSON *cmd_id = cJSON_CreateNumber(request_id);
+  cJSON_AddItemToObject(json, "request_id", cmd_id);
+  return json;
+end:
+  cJSON_Delete(json);
+  return NULL;
+}
+
+static bool overlap_write(Instance *instance, cJSON *command) {
   log_message(LOG_TRACE, "write", "Initializing write on PID %lu", instance->pi.dwProcessId);
-  size_t len = strlen(message);
-  if (len <= 0) {
+  char *command_str = cJSON_PrintUnformatted(command);
+  cJSON_Delete(command);
+  if (command_str == NULL) {
+    log_message(LOG_ERROR, "write", "Failed to cJSON_PrintUnformatted the mpv command.");
     return false;
   }
+  size_t len = strlen(command_str) + 1;
   Overlapped_Write *write = malloc(sizeof(*write));
   if (write == NULL) {
     log_message(LOG_ERROR, "write", "Failed to allocate memory.");
@@ -740,12 +769,14 @@ static bool overlap_write(Instance *instance, const char *message) {
     log_message(LOG_ERROR, "write", "Message len '%d' bigger than buffer '%d'", len, sizeof(write->buffer));
     return false;
   }
-  memcpy(write->buffer, message, len);
+  memcpy(write->buffer, command_str, len - 1);
+  write->buffer[len - 1] = '\n';
   write->ovl_context.is_write = true;
   write->bytes = len;
-  write->request_id = current_id++; // TODO: add request_id here or on json message creation
+  write->request_id = instance->request_id - 1;
   // Remove \n when logging
-  log_message(LOG_DEBUG, "write", "Writing message: %.*s", len - 1, message);
+  log_message(LOG_DEBUG, "write", "Writing message: %.*s", len - 1, write->buffer);
+  free(command_str);
   if (!WriteFile(instance->pipe, write->buffer, (DWORD)len, NULL, &write->ovl_context.ovl)) {
     if (GetLastError() == ERROR_IO_PENDING) {
       // iocp will free write
@@ -757,7 +788,6 @@ static bool overlap_write(Instance *instance, const char *message) {
     return false;
   }
   log_message(LOG_TRACE, "write", "Write call completed immediately.");
-  free(write);
   return true;
 }
 
@@ -766,6 +796,7 @@ static bool create_instance(Instance *instance, const wchar_t *name, const wchar
     return false;
   }
   instance->ovl_context.is_write = false;
+  instance->request_id = 0;
   Pending_Writes pending_writes = {
       .items = malloc(sizeof(Overlapped_Write *) * WRITES_CAPACITY),
       .count = 0,
@@ -867,18 +898,27 @@ DWORD WINAPI iocp_listener(LPVOID lp_param) {
         }
       }
       array->items[array->count++] = write;
-      fprintf(stderr, "Request id %lld\n", write->request_id);
       if (write->bytes != bytes) {
         log_message(LOG_ERROR, "listener", "Expected '%ld' bytes but received '%ld'", write->bytes, bytes);
         // TODO: when observed, resolve instead of break
         break;
       }
     } else {
-      find_write(instance, 0);
-      // TODO: parse JSON (and match request_id)
+      cJSON *json = cJSON_Parse(instance->read_buffer);
+      if (json == NULL) {
+        // TODO: when observed, resolve instead of break
+        break;
+      }
+      cJSON *request_id = cJSON_GetObjectItemCaseSensitive(json, "request_id");
+      if (cJSON_IsNumber(request_id)) {
+        Overlapped_Write *write = find_write(instance, request_id->valueint);
+        log_message(LOG_DEBUG, "listener", "Written to pipe    (%p): %.*s", (void *)instance->pipe, strlen(write->buffer) - 1, write->buffer);
+        // TODO: free the write struct and prune pending_writes
+        // TODO: handle different return cases beyond request_id
+      }
       // TODO: Currently, embedded 0 bytes terminate the current line, but you should not rely on this.
       instance->read_buffer[bytes] = '\0'; // TODO: handle buffer gracefully
-      fprintf(stderr, "Got data from pipe (%p): %s", (void *)instance->pipe, instance->read_buffer);
+      log_message(LOG_DEBUG, "listener", "Got data from pipe (%p): %.*s", (void *)instance->pipe, strlen(instance->read_buffer) - 1, instance->read_buffer);
       if (!overlap_read((Instance *)completion_key)) {
         // TODO: when observed, resolve instead of break
         break;
@@ -889,6 +929,8 @@ DWORD WINAPI iocp_listener(LPVOID lp_param) {
 }
 
 int main(int argc, char **argv) {
+  // TODO: check if critical_section is best
+  InitializeCriticalSectionAndSpinCount(&log_lock, 0);
 #ifndef _WIN32
   log_message(LOG_ERROR, "main", "Error: Your operating system is not supported, Windows-only currently.");
   return 1;
@@ -907,7 +949,7 @@ int main(int argc, char **argv) {
   }
 
   setup_media_library(json);
-  return 0;
+  // return 0;
 
   wchar_t *name = setup_wstring(json, "path", NULL);
   if (name == NULL) {
@@ -937,19 +979,20 @@ int main(int argc, char **argv) {
   }
 
   Sleep(2000);
-  // TODO: lowercase
-  overlap_write(&pipes[0], "{\"command\":[\"loadfile\",\"D:\\\\Test\\\\video ❗.mp4\"], \"request_id\": 0}\n");
-  // overlap_write(&pipes[0], "{\"command\":[\"loadfile\",\"D:\\\\Test\\\\ast_recursive.png\"], \"request_id\": 0}\n");
-  // overlap_write(&pipes[0], "{\"command\":[\"loadfile\",\"https://twitch.tv/bwipolol\"], \"request_id\": 0}\n");
-  // overlap_write(&pipes[0], "{\"command\":[\"loadfile\",\"https://www.youtube.com/watch?v=ZA-tUyM_y7s\"], \"request_id\": 0}\n");
-
+  cJSON *command = mpv_command("loadfile", pipes[0].request_id++);
+  cJSON *command_array = cJSON_GetObjectItem(command, "command");
+  cJSON *command_arg = cJSON_CreateString("D:\\Test\\video ❗.mp4");
+  cJSON_AddItemToArray(command_array, command_arg);
+  overlap_write(&pipes[0], command);
+  
   Sleep(2000);
-  // overlap_write(&pipes[0], "{\"command\":[\"get_property_string\", \"width\"], \"request_id\": 1}\n");
-  // Sleep(2000);
-  // overlap_write(&pipes[1], "{\"command\":[\"loadfile\",\"D:\\\\Test\\\\video ❗.mp4\"]}\n");
-  // overlap_write(&pipes[2], "{\"command\":[\"loadfile\",\"D:\\\\Test\\\\video ❗.mp4\"]}\n");
-
-  // TODO: supply and read by request_id in iocp worker thread
+  cJSON *command2 = mpv_command("get_property_string", pipes[0].request_id++);
+  cJSON *command_array2 = cJSON_GetObjectItem(command2, "command");
+  cJSON *command_arg2 = cJSON_CreateString("width");
+  cJSON_AddItemToArray(command_array2, command_arg2);
+  overlap_write(&pipes[0], command2);;
+  
+  Sleep(2000);
 
   // https://mpv.io/manual/stable/#json-ipc
   // mpv file.mkv --input-ipc-server=\\.\pipe\mpvsocket
@@ -960,5 +1003,6 @@ int main(int argc, char **argv) {
   // these commands can also be async
 
   // TODO: subtitles conf
+  // TODO: urls
   return 0;
 }
