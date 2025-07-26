@@ -1,5 +1,20 @@
 {
-  "path": "D:\\Test\\video ❗.mp4",
+  "media_library": [
+    {
+      "directories": "D:\\Test",
+      "patterns": "D:\\Test\\*.png"
+    },
+    {
+      "urls": "https://twitch.tv/caedreL",
+      "tags": "Funny"
+    },
+    {
+      "directories": ["ee"],
+      "urls": [],
+      "tags": []
+    }
+  ],
+  "path": "D:\\Test\\0_561mb.mp4",
   "layouts": {
     "1": [
       {
@@ -23,13 +38,5 @@
         "height": 1080
       }
     ]
-  },
-  "ffplay": {
-    "volume": 100,
-    "loop": 0,
-    "alwaysontop": true,
-    "noborder": false,
-    "showmode": 0,
-    "fullscreen": false
   }
 }

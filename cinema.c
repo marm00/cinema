@@ -297,6 +297,11 @@ static wchar_t *setup_wstring(const cJSON *json, const char *key, const wchar_t 
   return result;
 }
 
+// TODO: the Cin_String approach is probably worse than
+// just storing the offets and building an index of offsets
+// to strlen. This way a string is simply a uint8/16_t and one
+// lookup gives the length to memcpy into write buffer 
+
 typedef struct Cin_Strings {
   // Each byte represents a UTF-8 unit
   unsigned char *units;
@@ -307,6 +312,7 @@ typedef struct Cin_Strings {
 typedef struct Cin_String {
   // Length-prefixed UTF-8 string in block
   uint32_t off;
+  // TODO: probably change to uint8_t and update max path accordingly
   uint16_t len;
 } Cin_String;
 
@@ -986,9 +992,10 @@ int main(int argc, char **argv) {
   overlap_write(&pipes[0], command);
   
   Sleep(2000);
-  cJSON *command2 = mpv_command("get_property_string", pipes[0].request_id++);
+  // normalizing backslash probably not worth 
+  cJSON *command2 = mpv_command("normalize-path", pipes[0].request_id++);
   cJSON *command_array2 = cJSON_GetObjectItem(command2, "command");
-  cJSON *command_arg2 = cJSON_CreateString("width");
+  cJSON *command_arg2 = cJSON_CreateString("D:/Test/video ❗.mp4");
   cJSON_AddItemToArray(command_array2, command_arg2);
   overlap_write(&pipes[0], command2);;
   
