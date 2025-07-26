@@ -913,6 +913,7 @@ DWORD WINAPI iocp_listener(LPVOID lp_param) {
       cJSON *json = cJSON_Parse(instance->read_buffer);
       if (json == NULL) {
         // TODO: when observed, resolve instead of break
+        log_message(LOG_ERROR, "listener", "Failed to parse instance read buffer as JSON");
         break;
       }
       cJSON *request_id = cJSON_GetObjectItemCaseSensitive(json, "request_id");
@@ -922,9 +923,12 @@ DWORD WINAPI iocp_listener(LPVOID lp_param) {
         // TODO: free the write struct and prune pending_writes
         // TODO: handle different return cases beyond request_id
       }
+      // TODO: read each line (separated by \n character) separately
       // TODO: Currently, embedded 0 bytes terminate the current line, but you should not rely on this.
       instance->read_buffer[bytes] = '\0'; // TODO: handle buffer gracefully
       log_message(LOG_DEBUG, "listener", "Got data from pipe (%p): %.*s", (void *)instance->pipe, strlen(instance->read_buffer) - 1, instance->read_buffer);
+      log_message(LOG_DEBUG, "listener", "END data from pipe (%p)", (void *)instance->pipe);
+      cJSON_Delete(json);
       if (!overlap_read((Instance *)completion_key)) {
         // TODO: when observed, resolve instead of break
         break;
@@ -1011,5 +1015,7 @@ int main(int argc, char **argv) {
 
   // TODO: subtitles conf
   // TODO: urls
+  // TODO: substring search with SA/LCP
+  // TODO: tag lookup with circular buffer and exclusion window
   return 0;
 }
