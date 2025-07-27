@@ -580,26 +580,29 @@ static bool setup_media_library(const cJSON *json) {
   fprintf(stderr, "\n");
   // TODO: Binary search pattern P in text T
   // With suffix array SA: O(|P| * log|T|) 
-  //  and LCP information: O(|P| + log|T|)
-  // SA and LCP construction with https://github.com/IlyaGrebnov/libsais
-  int32_t* sa = malloc(cin_strings.count * sizeof(int32_t));
-  int result = libsais((const uint8_t*)cin_strings.units, sa, cin_strings.count, 0, NULL);
+  // and PLCP information: O(|P| + log|T|)
+  // SA and (P)LCP construction with https://github.com/IlyaGrebnov/libsais
+  int32_t* gsa = malloc(cin_strings.count * sizeof(int32_t));
+  int result = libsais_gsa((const uint8_t*)cin_strings.units, gsa, cin_strings.count, 0, NULL);
   if (result != 0) {
     log_message(LOG_ERROR, "media_library", "Failed to build SA");
     return false;
   }
   for (int i = 0; i < cin_strings.count; i++) {
-    printf("SA[%d] = %d (suffix: \"%s\")\n", i, sa[i], cin_strings.units + sa[i]);
+    printf("SA[%d] = %d (suffix: \"%s\")\n", i, gsa[i], cin_strings.units + gsa[i]);
   }
-  int32_t* lcp = malloc(cin_strings.count * sizeof(int32_t));
-  result = libsais_plcp((const uint8_t*)cin_strings.units, sa, lcp, cin_strings.count);
+  int32_t* plcp = malloc(cin_strings.count * sizeof(int32_t));
+  result = libsais_plcp_gsa((const uint8_t*)cin_strings.units, gsa, plcp, cin_strings.count);
   if (result != 0) {
     log_message(LOG_ERROR, "media_library", "Failed to build LCP array");
     return false;
   }
   for (int i = 0; i < cin_strings.count; i++) {
-    printf("LCP[%d] = %d\n", i, lcp[i]);
+    printf("LCP[%d] = %d\n", i, plcp[i]);
   }
+  // TODO: dont need to free these
+  free(gsa);
+  free(plcp);
   return true;
 }
 
