@@ -1,6 +1,7 @@
 cinema.exe
 cinema.pdb
 cinema.rdi
+cinema.lib
 config.json
 .vscode
 .proj

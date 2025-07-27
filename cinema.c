@@ -31,6 +31,9 @@
 #endif
 
 #include "cJSON.h"
+
+// TODO: conditional openmp include
+#define LIBSAIS_OPENMP 1
 #include "libsais.h"
 
 #define CIN_MAX_PATH MAX_PATH // 260 win default
@@ -583,7 +586,7 @@ static bool setup_media_library(const cJSON *json) {
   // and PLCP information: O(|P| + log|T|)
   // SA and (P)LCP construction with https://github.com/IlyaGrebnov/libsais
   int32_t* gsa = malloc(cin_strings.count * sizeof(int32_t));
-  int result = libsais_gsa((const uint8_t*)cin_strings.units, gsa, cin_strings.count, 0, NULL);
+  int result = libsais_gsa_omp((const uint8_t*)cin_strings.units, gsa, cin_strings.count, 0, NULL, 0);
   if (result != 0) {
     log_message(LOG_ERROR, "media_library", "Failed to build SA");
     return false;
@@ -592,17 +595,27 @@ static bool setup_media_library(const cJSON *json) {
     printf("SA[%d] = %d (suffix: \"%s\")\n", i, gsa[i], cin_strings.units + gsa[i]);
   }
   int32_t* plcp = malloc(cin_strings.count * sizeof(int32_t));
-  result = libsais_plcp_gsa((const uint8_t*)cin_strings.units, gsa, plcp, cin_strings.count);
+  result = libsais_plcp_gsa_omp((const uint8_t*)cin_strings.units, gsa, plcp, cin_strings.count, 0);
   if (result != 0) {
     log_message(LOG_ERROR, "media_library", "Failed to build LCP array");
     return false;
   }
   for (int i = 0; i < cin_strings.count; i++) {
-    printf("LCP[%d] = %d\n", i, plcp[i]);
+    printf("PLCP[%d] = %d\n", i, plcp[i]);
   }
-  // TODO: dont need to free these
-  free(gsa);
+  int32_t* lcp = malloc(cin_strings.count * sizeof(int32_t));
+  result = libsais_lcp_omp(plcp, gsa, lcp, cin_strings.count, 0);
+  if (result != 0) {
+    log_message(LOG_ERROR, "media_library", "Failed to build LCP array");
+    return false;
+  }
   free(plcp);
+  for (int i = 0; i < cin_strings.count; i++) {
+    printf("LCP[%d] = %d\n", i, lcp[i]);
+  }
+  // TODO: dont need to free these if used later
+  free(gsa);
+  free(lcp);
   return true;
 }
 
