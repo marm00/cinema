@@ -76,9 +76,9 @@ static const char *level_to_str(Log_Level level) {
 static Log_Level GLOBAL_LOG_LEVEL = LOG_TRACE;
 CRITICAL_SECTION log_lock;
 
-static char *utf16_to_utf8(const wchar_t *wstr) {
+static char *utf16_to_utf8(const wchar_t *wstr, int len) {
   // https://learn.microsoft.com/en-us/windows/win32/api/stringapiset/nf-stringapiset-widechartomultibyte
-  int convert_result = WideCharToMultiByte(CP_UTF8, 0, wstr, -1, NULL, 0, NULL, NULL);
+  int convert_result = WideCharToMultiByte(CP_UTF8, 0, wstr, len, NULL, 0, NULL, NULL);
   if (convert_result <= 0) {
     return NULL;
   }
@@ -86,7 +86,10 @@ static char *utf16_to_utf8(const wchar_t *wstr) {
   if (str == NULL) {
     return NULL;
   }
-  WideCharToMultiByte(CP_UTF8, 0, wstr, -1, str, convert_result, NULL, NULL);
+  convert_result = WideCharToMultiByte(CP_UTF8, 0, wstr, len, str, convert_result, NULL, NULL);
+  if (convert_result <= 0) {
+    return NULL;
+  }
   return str;
 }
 
@@ -127,7 +130,7 @@ static void log_wmessage(Log_Level level, const char *location, const wchar_t *w
   va_start(args, wmessage);
   wchar_t formatted_wmsg[MAX_LOG_MESSAGE];
   vswprintf(formatted_wmsg, MAX_LOG_MESSAGE, wmessage, args);
-  char *message_utf8 = utf16_to_utf8(formatted_wmsg);
+  char *message_utf8 = utf16_to_utf8(formatted_wmsg, -1);
   fprintf(stderr, "[%s] [%s] %s\n", level_to_str(level), location, message_utf8);
   free(message_utf8);
   va_end(args);
@@ -394,6 +397,9 @@ static bool setup_directory(wchar_t *path, size_t len) {
   // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findnextfilew
   // TODO: explain "directory" & recursive in readme
   // TODO: note that we support up to CIN_MAX_PATH, not NTFS max of 32000+
+  if (path[len - 1] == L'\0') {
+    len--;
+  }
   if (len + 2 >= CIN_MAX_PATH) {
     // We have to append 2 chars \ and * for the correct pattern
     return false;
@@ -425,17 +431,19 @@ static bool setup_directory(wchar_t *path, size_t len) {
     if (is_dir && (file[0] == L'.') && (!file[1] || (file[1] == L'.' && !file[2]))) {
       continue; // skip dot entry
     }
-    size_t file_len = wcslen(file);
-    if (len + file_len + 1 >= CIN_MAX_PATH) {
+    size_t file_len = wcslen(file) + 1; // add \0
+    size_t path_len = len + file_len;
+    if (path_len >= CIN_MAX_PATH) {
       continue; // skip absolute path (+ NUL) if silently truncated
     }
-    wmemcpy(path + len, file, file_len + 1);
+    wmemcpy(path + len, file, file_len);
     if (is_dir) {
-      if (!setup_directory(path, len + file_len)) {
+      if (!setup_directory(path, path_len)) {
         ok = false;
       }
     } else {
-      char *temp_utf8 = utf16_to_utf8(path);
+      char *temp_utf8 = utf16_to_utf8(path, path_len);
+      // need to use strlen to get bytes
       cin_strings_append(temp_utf8, strlen(temp_utf8) + 1);
       free(temp_utf8);
     }
@@ -493,12 +501,14 @@ static bool setup_pattern(const wchar_t *pattern) {
     }
     wchar_t *file = data.cFileName;
     CharLowerW(file);
-    size_t file_len = wcslen(file);
-    if (abs_len + file_len + 1 >= CIN_MAX_PATH) {
+    size_t file_len = wcslen(file) + 1; // add \0
+    size_t path_len = abs_len + file_len;
+    if (path_len >= CIN_MAX_PATH) {
       continue; // skip absolute path (+ NUL) if silently truncated
     }
-    wmemcpy(abs_buf + abs_len, file, file_len + 1);
-    char *temp_utf8 = utf16_to_utf8(abs_buf);
+    wmemcpy(abs_buf + abs_len, file, file_len);
+    char *temp_utf8 = utf16_to_utf8(abs_buf, path_len);
+    // need to use strlen to get bytes
     cin_strings_append(temp_utf8, strlen(temp_utf8) + 1);
     free(temp_utf8);
   } while (FindNextFileW(search, &data) != 0);
@@ -534,10 +544,10 @@ static bool setup_media_library(const cJSON *json) {
     cJSON_ArrayForEach(cursor, directories) {
       wchar_t *root = utf8_to_utf16(cursor->valuestring);
       CharLowerW(root);
-      size_t len = wcslen(root);
-      if (len > 0 && len + 1 < CIN_MAX_PATH) {
+      size_t len = wcslen(root) + 1; // add \0
+      if (len > 1 && len < CIN_MAX_PATH) {
         wchar_t buf[CIN_MAX_PATH];
-        wmemcpy(buf, root, len + 1); // include NUL
+        wmemcpy(buf, root, len);
         setup_directory(buf, len);
       }
       free(root);
@@ -546,8 +556,8 @@ static bool setup_media_library(const cJSON *json) {
     cJSON_ArrayForEach(cursor, patterns) {
       wchar_t *pattern = utf8_to_utf16(cursor->valuestring);
       CharLowerW(pattern);
-      size_t len = wcslen(pattern);
-      if (len > 0 && len + 1 < CIN_MAX_PATH) {
+      size_t len = wcslen(pattern) + 1; // add \0
+      if (len > 1 && len < CIN_MAX_PATH) {
         setup_pattern(pattern);
       }
       free(pattern);
@@ -583,7 +593,7 @@ static bool setup_media_library(const cJSON *json) {
   fprintf(stderr, "\n");
   // TODO: Binary search pattern P in text T
   // With suffix array SA: O(|P| * log|T|) 
-  // and PLCP information: O(|P| + log|T|)
+  //  and LCP information: O(|P| + log|T|)
   // SA and (P)LCP construction with https://github.com/IlyaGrebnov/libsais
   int32_t* gsa = malloc(cin_strings.count * sizeof(int32_t));
   int result = libsais_gsa_omp((const uint8_t*)cin_strings.units, gsa, cin_strings.count, 0, NULL, 0);
@@ -597,7 +607,7 @@ static bool setup_media_library(const cJSON *json) {
   int32_t* plcp = malloc(cin_strings.count * sizeof(int32_t));
   result = libsais_plcp_gsa_omp((const uint8_t*)cin_strings.units, gsa, plcp, cin_strings.count, 0);
   if (result != 0) {
-    log_message(LOG_ERROR, "media_library", "Failed to build LCP array");
+    log_message(LOG_ERROR, "media_library", "Failed to build PLCP array");
     return false;
   }
   for (int i = 0; i < cin_strings.count; i++) {
