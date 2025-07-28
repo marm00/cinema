@@ -25,6 +25,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
+#include <assert.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -93,18 +94,23 @@ static char *utf16_to_utf8(const wchar_t *wstr, int len) {
   return str;
 }
 
-static wchar_t *utf8_to_utf16(const char *utf8_str) {
+static bool utf8_to_utf16(const char *utf8_str, wchar_t *buf, int buf_size, int *len) {
+  if (buf == NULL) {
+    return false;
+  }
   // https://learn.microsoft.com/en-us/windows/win32/api/stringapiset/nf-stringapiset-multibytetowidechar
   int convert_result = MultiByteToWideChar(CP_UTF8, 0, utf8_str, -1, NULL, 0);
+  if (convert_result <= 0 || convert_result > buf_size) {
+    return false;
+  }
+  convert_result = MultiByteToWideChar(CP_UTF8, 0, utf8_str, -1, buf, buf_size);
   if (convert_result <= 0) {
-    return NULL;
+    return false;
   }
-  wchar_t *wide_str = malloc(convert_result * sizeof(wchar_t));
-  if (wide_str == NULL) {
-    return NULL;
+  if (len != NULL) {
+    *len = convert_result;
   }
-  MultiByteToWideChar(CP_UTF8, 0, utf8_str, -1, wide_str, convert_result);
-  return wide_str;
+  return true;
 }
 
 static void log_message(Log_Level level, const char *location, const char *message, ...) {
@@ -279,6 +285,7 @@ static bool setup_bool(const cJSON *json, const char *key, int default_val) {
   return result;
 }
 
+// TODO: remove this function
 static wchar_t *setup_wstring(const cJSON *json, const char *key, const wchar_t *default_val) {
   if (default_val == NULL) {
     log_message(LOG_DEBUG, "json", "Passed NULL as default value for setup_wstring");
@@ -286,8 +293,9 @@ static wchar_t *setup_wstring(const cJSON *json, const char *key, const wchar_t 
   cJSON *option = cJSON_GetObjectItemCaseSensitive(json, key);
   wchar_t *result = NULL;
   if (cJSON_IsString(option) && option->valuestring) {
-    result = utf8_to_utf16(option->valuestring);
-    if (result == NULL) {
+    result = malloc(sizeof(wchar_t) * CIN_MAX_PATH);
+    bool ok = utf8_to_utf16(option->valuestring, result, CIN_MAX_PATH, NULL);
+    if (!ok || result == NULL) {
       log_wmessage(LOG_WARNING, "json", L"Failed to convert JSON string '%s' for key '%s' to UTF-16",
                    option->valuestring, key);
     }
@@ -538,29 +546,29 @@ static bool setup_media_library(const cJSON *json) {
     return false;
   }
   cJSON *entry = NULL;
+  // TODO: parallelize with openmp
+  static wchar_t buf[CIN_MAX_PATH];
   cJSON_ArrayForEach(entry, lib) {
     cJSON *cursor = NULL;
     cJSON *directories = setup_entry_collection(entry, "directories");
     cJSON_ArrayForEach(cursor, directories) {
-      wchar_t *root = utf8_to_utf16(cursor->valuestring);
-      CharLowerW(root);
-      size_t len = wcslen(root) + 1; // add \0
-      if (len > 1 && len < CIN_MAX_PATH) {
-        wchar_t buf[CIN_MAX_PATH];
-        wmemcpy(buf, root, len);
+      int len = 0;
+      bool ok = utf8_to_utf16(cursor->valuestring, buf, CIN_MAX_PATH, &len);
+      if (ok && len > 1 && len < CIN_MAX_PATH) {
+        int lower = CharLowerBuffW(buf, len - 1); // remove \0
+        assert(len - 1 == lower);
         setup_directory(buf, len);
       }
-      free(root);
     }
     cJSON *patterns = setup_entry_collection(entry, "patterns");
     cJSON_ArrayForEach(cursor, patterns) {
-      wchar_t *pattern = utf8_to_utf16(cursor->valuestring);
-      CharLowerW(pattern);
-      size_t len = wcslen(pattern) + 1; // add \0
-      if (len > 1 && len < CIN_MAX_PATH) {
-        setup_pattern(pattern);
+      int len = 0;
+      bool ok = utf8_to_utf16(cursor->valuestring, buf, CIN_MAX_PATH, &len);
+      if (ok && len > 1 && len < CIN_MAX_PATH) {
+        int lower = CharLowerBuffW(buf, len - 1); // remove \0
+        assert(len - 1 == lower);
+        setup_pattern(buf);
       }
-      free(pattern);
     }
     cJSON *urls = setup_entry_collection(entry, "urls");
     cJSON_ArrayForEach(cursor, urls) {
