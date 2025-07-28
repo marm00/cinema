@@ -94,23 +94,16 @@ static char *utf16_to_utf8(const wchar_t *wstr, int len) {
   return str;
 }
 
-static bool utf8_to_utf16(const char *utf8_str, wchar_t *buf, int buf_size, int *len) {
+static int utf8_to_utf16(const char *utf8_str, wchar_t *buf, int buf_size) {
   if (buf == NULL) {
-    return false;
+    return -1;
   }
   // https://learn.microsoft.com/en-us/windows/win32/api/stringapiset/nf-stringapiset-multibytetowidechar
   int convert_result = MultiByteToWideChar(CP_UTF8, 0, utf8_str, -1, NULL, 0);
   if (convert_result <= 0 || convert_result > buf_size) {
-    return false;
+    return -1;
   }
-  convert_result = MultiByteToWideChar(CP_UTF8, 0, utf8_str, -1, buf, buf_size);
-  if (convert_result <= 0) {
-    return false;
-  }
-  if (len != NULL) {
-    *len = convert_result;
-  }
-  return true;
+  return MultiByteToWideChar(CP_UTF8, 0, utf8_str, -1, buf, buf_size);;
 }
 
 static void log_message(Log_Level level, const char *location, const char *message, ...) {
@@ -294,8 +287,8 @@ static wchar_t *setup_wstring(const cJSON *json, const char *key, const wchar_t 
   wchar_t *result = NULL;
   if (cJSON_IsString(option) && option->valuestring) {
     result = malloc(sizeof(wchar_t) * CIN_MAX_PATH);
-    bool ok = utf8_to_utf16(option->valuestring, result, CIN_MAX_PATH, NULL);
-    if (!ok || result == NULL) {
+    utf8_to_utf16(option->valuestring, result, CIN_MAX_PATH);
+    if (result == NULL) {
       log_wmessage(LOG_WARNING, "json", L"Failed to convert JSON string '%s' for key '%s' to UTF-16",
                    option->valuestring, key);
     }
@@ -552,20 +545,18 @@ static bool setup_media_library(const cJSON *json) {
     cJSON *cursor = NULL;
     cJSON *directories = setup_entry_collection(entry, "directories");
     cJSON_ArrayForEach(cursor, directories) {
-      int len = 0;
-      bool ok = utf8_to_utf16(cursor->valuestring, buf, CIN_MAX_PATH, &len);
-      if (ok && len > 1 && len < CIN_MAX_PATH) {
-        int lower = CharLowerBuffW(buf, len - 1); // remove \0
+      int len = utf8_to_utf16(cursor->valuestring, buf, CIN_MAX_PATH);
+      if (len > 1 && len < CIN_MAX_PATH) {
+        int lower = CharLowerBuffW(buf, len - 1); // ignore \0
         assert(len - 1 == lower);
         setup_directory(buf, len);
       }
     }
     cJSON *patterns = setup_entry_collection(entry, "patterns");
     cJSON_ArrayForEach(cursor, patterns) {
-      int len = 0;
-      bool ok = utf8_to_utf16(cursor->valuestring, buf, CIN_MAX_PATH, &len);
-      if (ok && len > 1 && len < CIN_MAX_PATH) {
-        int lower = CharLowerBuffW(buf, len - 1); // remove \0
+      int len = utf8_to_utf16(cursor->valuestring, buf, CIN_MAX_PATH);
+      if (len > 1 && len < CIN_MAX_PATH) {
+        int lower = CharLowerBuffW(buf, len - 1); // ignore \0
         assert(len - 1 == lower);
         setup_pattern(buf);
       }
