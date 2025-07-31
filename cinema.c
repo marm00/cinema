@@ -37,7 +37,20 @@
 #define LIBSAIS_OPENMP 1
 #include "libsais.h"
 
-#define CIN_MAX_PATH MAX_PATH // 260 win default
+// https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
+// A path can have 248 "characters" (260 - 12 = 248)
+// with 12 reserved for 8.3 file name.
+// This refers to a WCHAR sequence (UTF-16 code units),
+// i.e., wchar_t, such that max bytes = (248 * 2) = 496
+// of UTF-16 data or (260 * 2) = 520 upper bound
+// This is different from the full storage since
+// a surrogate pair character can hold 2 wchar_t or
+// (260 * 2 * 2) = 1040 bytes, exceeding the bound
+// if many/all characters need 2 code units
+#define CIN_MAX_PATH MAX_PATH
+#define CIN_MAX_PATH_BYTES MAX_PATH * 2
+#define CIN_MAX_WRITABLE_PATH MAX_PATH - 12
+#define CIN_MAX_WRITABLE_PATH_BYTES (MAX_PATH - 12) * 2
 // TODO: find better upper bound for command line
 #define COMMAND_LINE_LIMIT 32768
 #define MAX_LOG_MESSAGE 1024
@@ -77,33 +90,34 @@ static const char *level_to_str(Log_Level level) {
 static Log_Level GLOBAL_LOG_LEVEL = LOG_TRACE;
 CRITICAL_SECTION log_lock;
 
+// TODO: also use stack buffer probably like utf8 to utf16
 static char *utf16_to_utf8(const wchar_t *wstr, int len) {
   // https://learn.microsoft.com/en-us/windows/win32/api/stringapiset/nf-stringapiset-widechartomultibyte
-  int convert_result = WideCharToMultiByte(CP_UTF8, 0, wstr, len, NULL, 0, NULL, NULL);
-  if (convert_result <= 0) {
+  int n_bytes = WideCharToMultiByte(CP_UTF8, 0, wstr, len, NULL, 0, NULL, NULL);
+  if (n_bytes <= 0) {
     return NULL;
   }
-  char *str = malloc(convert_result);
+  char *str = malloc(n_bytes);
   if (str == NULL) {
     return NULL;
   }
-  convert_result = WideCharToMultiByte(CP_UTF8, 0, wstr, len, str, convert_result, NULL, NULL);
-  if (convert_result <= 0) {
+  n_bytes = WideCharToMultiByte(CP_UTF8, 0, wstr, len, str, n_bytes, NULL, NULL);
+  if (n_bytes <= 0) {
     return NULL;
   }
   return str;
 }
 
-static int utf8_to_utf16(const char *utf8_str, wchar_t *buf, int buf_size) {
-  if (buf == NULL) {
+static int utf8_to_utf16(const char *utf8_str, wchar_t *buf, int len) {
+  if (buf == NULL || utf8_str == NULL) {
     return -1;
   }
   // https://learn.microsoft.com/en-us/windows/win32/api/stringapiset/nf-stringapiset-multibytetowidechar
-  int convert_result = MultiByteToWideChar(CP_UTF8, 0, utf8_str, -1, NULL, 0);
-  if (convert_result <= 0 || convert_result > buf_size) {
+  int n_chars = MultiByteToWideChar(CP_UTF8, 0, utf8_str, -1, NULL, 0);
+  if (n_chars <= 0 || n_chars > len) {
     return -1;
   }
-  return MultiByteToWideChar(CP_UTF8, 0, utf8_str, -1, buf, buf_size);;
+  return MultiByteToWideChar(CP_UTF8, 0, utf8_str, -1, buf, len);;
 }
 
 static void log_message(Log_Level level, const char *location, const char *message, ...) {
@@ -129,6 +143,8 @@ static void log_wmessage(Log_Level level, const char *location, const wchar_t *w
   va_start(args, wmessage);
   wchar_t formatted_wmsg[MAX_LOG_MESSAGE];
   vswprintf(formatted_wmsg, MAX_LOG_MESSAGE, wmessage, args);
+  // TODO: wchar_t buf
+  char buf[CIN_MAX_PATH];
   char *message_utf8 = utf16_to_utf8(formatted_wmsg, -1);
   fprintf(stderr, "[%s] [%s] %s\n", level_to_str(level), location, message_utf8);
   free(message_utf8);
@@ -158,12 +174,19 @@ static void log_last_error(const char *location, const char *message, ...) {
   LeaveCriticalSection(&log_lock);
 }
 
-static void to_lower_ascii(char *ascii) {
-  for (int i = 0; ascii[i]; ++i) {
-    if (ascii[i] >= 'A' && ascii[i] <= 'Z') {
-      ascii[i] += 32;
-    }
+static int normalize_utf8_str(const char *str, wchar_t *buf) {
+  // uses winapi to lowercase the string and ensure it is not empty
+  int len = utf8_to_utf16(str, buf, CIN_MAX_PATH);
+  if (len <= 1) {
+    log_message(LOG_DEBUG, "normalize", "Converted '%s' to empty string.", str);
+    return 0;
   }
+  int lower = CharLowerBuffW(buf, len - 1); // ignore \0
+  if (len - 1 != lower) {
+    log_message(LOG_ERROR, "normalize", "Processed unexpected n (%d != %d)", lower, len);
+    return 0;
+  }
+  return len;
 }
 
 static char *read_json(const char *filename) {
@@ -444,7 +467,6 @@ static bool setup_directory(wchar_t *path, size_t len) {
       }
     } else {
       char *temp_utf8 = utf16_to_utf8(path, path_len);
-      // need to use strlen to get bytes
       cin_strings_append(temp_utf8, strlen(temp_utf8) + 1);
       free(temp_utf8);
     }
@@ -465,11 +487,11 @@ static bool setup_pattern(const wchar_t *pattern) {
   if (separator == NULL || *(separator + 1) == L'\0') {
     return false;
   }
-  wchar_t dir_buf[CIN_MAX_PATH];
   size_t dir_len = (size_t)(separator - pattern) + 1;
   if (dir_len > CIN_MAX_PATH) {
     return false;
   }
+  wchar_t dir_buf[CIN_MAX_PATH];
   wmemcpy(dir_buf, pattern, dir_len);
   dir_buf[dir_len] = L'\0';
   wchar_t abs_buf[CIN_MAX_PATH];
@@ -509,7 +531,6 @@ static bool setup_pattern(const wchar_t *pattern) {
     }
     wmemcpy(abs_buf + abs_len, file, file_len);
     char *temp_utf8 = utf16_to_utf8(abs_buf, path_len);
-    // need to use strlen to get bytes
     cin_strings_append(temp_utf8, strlen(temp_utf8) + 1);
     free(temp_utf8);
   } while (FindNextFileW(search, &data) != 0);
@@ -521,14 +542,16 @@ static bool setup_pattern(const wchar_t *pattern) {
   return ok;
 }
 
-static bool setup_url(char *url) {
-  to_lower_ascii(url);
-  cin_strings_append(url, strlen(url) + 1);
+static bool setup_url(const wchar_t *url) {
+  char *temp_utf8 = utf16_to_utf8(url, -1);
+  cin_strings_append(temp_utf8, strlen(temp_utf8) + 1);
+  free(temp_utf8);
   return true;
 }
 
-static bool setup_tag(char *tag) {
-  to_lower_ascii(tag);
+static bool setup_tag(const wchar_t *tag) {
+  char *temp_utf8 = utf16_to_utf8(tag, -1);
+  free(temp_utf8);
   return true;
 }
 
@@ -545,26 +568,23 @@ static bool setup_media_library(const cJSON *json) {
     cJSON *cursor = NULL;
     cJSON *directories = setup_entry_collection(entry, "directories");
     cJSON_ArrayForEach(cursor, directories) {
-      int len = utf8_to_utf16(cursor->valuestring, buf, CIN_MAX_PATH);
-      if (len > 1 && len < CIN_MAX_PATH) {
-        int lower = CharLowerBuffW(buf, len - 1); // ignore \0
-        assert(len - 1 == lower);
+      int len = normalize_utf8_str(cursor->valuestring, buf);
+      if (len) {
         setup_directory(buf, len);
       }
     }
     cJSON *patterns = setup_entry_collection(entry, "patterns");
     cJSON_ArrayForEach(cursor, patterns) {
-      int len = utf8_to_utf16(cursor->valuestring, buf, CIN_MAX_PATH);
-      if (len > 1 && len < CIN_MAX_PATH) {
-        int lower = CharLowerBuffW(buf, len - 1); // ignore \0
-        assert(len - 1 == lower);
+      int len = normalize_utf8_str(cursor->valuestring, buf);
+      if (len) {
         setup_pattern(buf);
       }
     }
     cJSON *urls = setup_entry_collection(entry, "urls");
     cJSON_ArrayForEach(cursor, urls) {
-      if (cursor->valuestring != NULL && strlen(cursor->valuestring) > 0) {
-        setup_url(cursor->valuestring);
+      int len = normalize_utf8_str(cursor->valuestring, buf);
+      if (len) {
+        setup_url(buf);
       }
     }
     // TODO: put tags in separate structure
