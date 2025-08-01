@@ -380,6 +380,7 @@ static Cin_String cin_strings_append(const char *utf8, size_t len) {
 }
 
 // TODO: parallelize
+// TODO: check if CIN_MAX_PATH is sufficient
 static char utf8_buf[CIN_MAX_PATH_BYTES];
 
 static cJSON *setup_entry_collection(cJSON *entry, const char *name) {
@@ -682,7 +683,7 @@ static bool setup_layouts(const cJSON *layouts) {
 }
 
 // https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-transactnamedpipe
-// TODO: find better upper bound for transaction (pending 64kb writes can scale very fast)
+// TODO: find better upper bound for transaction (pending 64kb writes can scale very fast, files are maxed to 260)
 #define PIPE_WRITE_BUFFER 65536
 #define PIPE_READ_BUFFER 1024
 #define WRITES_CAPACITY 32
@@ -829,30 +830,36 @@ static bool overlap_write(Instance *instance, cJSON *command) {
     log_message(LOG_ERROR, "write", "Failed to cJSON_PrintUnformatted the mpv command.");
     return false;
   }
-  size_t len = strlen(command_str) + 1;
-  Overlapped_Write *write = malloc(sizeof(*write));
+  size_t len = strlen(command_str);
+  Overlapped_Write *write = calloc(1, sizeof(*write));
   if (write == NULL) {
     log_message(LOG_ERROR, "write", "Failed to allocate memory.");
     return false;
   }
-  // Message needs to be UTF-8
   if (len >= sizeof(write->buffer)) {
     log_message(LOG_ERROR, "write", "Message len '%d' bigger than buffer '%d'", len, sizeof(write->buffer));
     return false;
   }
-  memcpy(write->buffer, command_str, len - 1);
-  write->buffer[len - 1] = '\n';
+  // shift \0 up to insert \n
+  // and include \0 in len (bytes)
+  command_str[len++] = '\n';
+  command_str[len++] = '\0';
+  memcpy(write->buffer, command_str, len);
   write->ovl_context.is_write = true;
   write->bytes = len;
   write->request_id = instance->request_id - 1;
-  // Remove \n when logging
-  log_message(LOG_DEBUG, "write", "Writing message: %.*s", len - 1, write->buffer);
+  log_message(LOG_DEBUG, "write", "Writing message: %.*s", len - 2, write->buffer);
   free(command_str);
   if (!WriteFile(instance->pipe, write->buffer, (DWORD)len, NULL, &write->ovl_context.ovl)) {
-    if (GetLastError() == ERROR_IO_PENDING) {
-      // iocp will free write
-      log_message(LOG_TRACE, "write", "Pending write call, handled by iocp.");
-      return true;
+    switch (GetLastError()) {
+      case ERROR_IO_PENDING:
+        // iocp will free write
+        log_message(LOG_TRACE, "write", "Pending write call, handled by iocp.");
+        return true;
+      case ERROR_INVALID_HANDLE:
+        // Code 6: The handle is invalid
+        log_message(LOG_DEBUG, "write", "\t(ERR_START)\n\t%.*s\n\t(ERR_END)\n", (int)len-2, write->buffer);
+        break;
     }
     log_last_error("write", "Failed to initialize write");
     free(write);
@@ -959,16 +966,16 @@ DWORD WINAPI iocp_listener(LPVOID lp_param) {
     Overlapped_Ctx *ctx = (Overlapped_Ctx *)ovl;
     if (ctx->is_write) {
       Overlapped_Write *write = (Overlapped_Write *)ctx;
-      Pending_Writes *array = &instance->pending_writes;
-      if (array->count >= array->capacity) {
-        array->capacity = array->capacity * 2;
-        array->items = realloc(array->items, sizeof(Overlapped_Write *) * array->capacity);
-        if (array->items == NULL) {
+      Pending_Writes *pending = &instance->pending_writes;
+      if (pending->count >= pending->capacity) {
+        pending->capacity = pending->capacity * 2;
+        pending->items = realloc(pending->items, sizeof(Overlapped_Write *) * pending->capacity);
+        if (pending->items == NULL) {
           log_message(LOG_ERROR, "listener", "Failed to reallocate memory of pending writes");
           break;
         }
       }
-      array->items[array->count++] = write;
+      pending->items[pending->count++] = write;
       if (write->bytes != bytes) {
         log_message(LOG_ERROR, "listener", "Expected '%ld' bytes but received '%ld'", write->bytes, bytes);
         // TODO: when observed, resolve instead of break
