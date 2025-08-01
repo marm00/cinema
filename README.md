@@ -2,7 +2,7 @@
 
 A CLI tool to search and play local and online videos simultaneously, using mpv.
 
-Compiled with `clang cinema.c cJSON.c libsais.c -O3 -march=znver2 -fopenmp -DLIBSAIS_OPENMP -DNDEBUG -luser32 -o cinema.exe`
+Compiled with `clang cinema.c cJSON.c libsais.c -std=c11 -O3 -march=znver2 -fopenmp -DLIBSAIS_OPENMP -DNDEBUG -luser32 -o cinema.exe`
 
 <https://mpv.io/installation/>\
 <https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20250227/mpv-x86_64-20250227-git-5338f4b.7z>

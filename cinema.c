@@ -47,6 +47,8 @@
 // a surrogate pair character can hold 2 wchar_t or
 // (260 * 2 * 2) = 1040 bytes, exceeding the bound
 // if many/all characters need 2 code units
+// The cFileName from winapi use a wchar_t buffer of
+// 260 (MAX_PATH) so surrogate pairs get truncated
 #define CIN_MAX_PATH MAX_PATH
 #define CIN_MAX_PATH_BYTES MAX_PATH * 4
 #define CIN_MAX_WRITABLE_PATH MAX_PATH - 12
@@ -185,15 +187,20 @@ static void log_last_error(const char *location, const char *message, ...) {
   LeaveCriticalSection(&log_lock);
 }
 
+#define CIN_STRERROR_BYTES 95
+
 static char *read_json(const char *filename) {
   if (filename == NULL || filename[0] == '\0') {
     log_message(LOG_ERROR, "json", "Invalid filename provided (empty string)");
     return NULL;
   }
-  FILE *file = fopen(filename, "rb");
-  if (file == NULL) {
-    log_message(LOG_ERROR, "json", "Failed to open config file '%s': %s", filename, strerror(errno));
-    return NULL;
+  FILE *file;
+  int result = fopen_s(&file, filename, "rb");
+  if (result != 0) {
+    char err_buf[CIN_STRERROR_BYTES];
+    strerror_s(err_buf, CIN_STRERROR_BYTES, result);
+    log_message(LOG_ERROR, "json", "Failed to open config file '%s': %s", filename, err_buf);
+    return NULL; 
   }
   // Move pointer to get size in bytes and back
   fseek(file, 0, SEEK_END);
@@ -202,8 +209,10 @@ static char *read_json(const char *filename) {
   // Buffer for file + null terminator
   char *json_content = (char *)malloc(filesize + 1);
   if (json_content == NULL) {
+    char err_buf[CIN_STRERROR_BYTES];
+    _strerror_s(err_buf, CIN_STRERROR_BYTES, NULL);
     log_message(LOG_ERROR, "json", "Failed to allocate memory for file '%s' with size '%ld': %s",
-                filename, filesize + 1, strerror(errno));
+                filename, filesize + 1, err_buf);
     fclose(file);
     return NULL;
   }
@@ -248,13 +257,13 @@ static double parse_percentage(const char *input, double default_val) {
   }
   int chars_read = 0;
   int int_result;
-  int success = sscanf(input, "%d%n", &int_result, &chars_read);
+  int success = sscanf_s(input, "%d%n", &int_result, &chars_read);
   if (success == 1 && input[chars_read] == '\0') {
     return (double)int_result;
   }
   double double_result;
   chars_read = 0;
-  success = sscanf(input, "%lf%n", &double_result, &chars_read);
+  success = sscanf_s(input, "%lf%n", &double_result, &chars_read);
   if (success == 1 && input[chars_read] == '\0') {
     return double_result;
   }
