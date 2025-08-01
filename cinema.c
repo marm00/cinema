@@ -18,6 +18,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+#include <assert.h>
 #include <inttypes.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -25,7 +26,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
-#include <assert.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -89,7 +89,7 @@ static const char *level_to_str(Log_Level level) {
   }
 }
 
-static Log_Level GLOBAL_LOG_LEVEL = LOG_DEBUG;
+static Log_Level GLOBAL_LOG_LEVEL = LOG_TRACE;
 CRITICAL_SECTION log_lock;
 
 static void log_message(Log_Level level, const char *location, const char *message, ...) {
@@ -135,7 +135,7 @@ static int utf8_to_utf16(const char *utf8_str, wchar_t *buf, int len) {
   if (n_chars <= 0 || n_chars > len) {
     return -1;
   }
-  return MultiByteToWideChar(CP_UTF8, 0, utf8_str, -1, buf, len);;
+  return MultiByteToWideChar(CP_UTF8, 0, utf8_str, -1, buf, len);
 }
 
 static int utf8_to_utf16_norm(const char *str, wchar_t *buf) {
@@ -206,7 +206,7 @@ static char *read_json(const char *filename) {
     char err_buf[CIN_STRERROR_BYTES];
     strerror_s(err_buf, CIN_STRERROR_BYTES, result);
     log_message(LOG_ERROR, "json", "Failed to open config file '%s': %s", filename, err_buf);
-    return NULL; 
+    return NULL;
   }
   // Move pointer to get size in bytes and back
   fseek(file, 0, SEEK_END);
@@ -347,7 +347,7 @@ static wchar_t *setup_wstring(const cJSON *json, const char *key, const wchar_t 
 // TODO: the Cin_String approach is probably worse than
 // just storing the offets and building an index of offsets
 // to strlen. This way a string is simply a uint8/16_t and one
-// lookup gives the length to memcpy into write buffer 
+// lookup gives the length to memcpy into write buffer
 
 typedef struct Cin_Strings {
   // Each byte represents a UTF-8 unit
@@ -629,12 +629,12 @@ static bool setup_media_library(const cJSON *json) {
   }
   fprintf(stderr, "\n");
   // TODO: Binary search pattern P in text T
-  // With suffix array SA: O(|P| * log|T|) 
+  // With suffix array SA: O(|P| * log|T|)
   //  and LCP information: O(|P| + log|T|)
   // SA and (P)LCP construction with https://github.com/IlyaGrebnov/libsais
   // TODO: might be better good way to handle surrogate pairs
-  int32_t* gsa = malloc((size_t)cin_strings.count * sizeof(int32_t));
-  int result = libsais_gsa_omp((const uint8_t*)cin_strings.units, gsa, cin_strings.count, 0, NULL, 0);
+  int32_t *gsa = malloc((size_t)cin_strings.count * sizeof(int32_t));
+  int result = libsais_gsa_omp((const uint8_t *)cin_strings.units, gsa, cin_strings.count, 0, NULL, 0);
   if (result != 0) {
     log_message(LOG_ERROR, "media_library", "Failed to build SA");
     return false;
@@ -642,8 +642,8 @@ static bool setup_media_library(const cJSON *json) {
   for (int i = 0; i < cin_strings.count; i++) {
     log_message(LOG_TRACE, "libsais", "SA[%d] = %d (suffix: \"%s\")", i, gsa[i], cin_strings.units + gsa[i]);
   }
-  int32_t* plcp = malloc((size_t)cin_strings.count * sizeof(int32_t));
-  result = libsais_plcp_gsa_omp((const uint8_t*)cin_strings.units, gsa, plcp, cin_strings.count, 0);
+  int32_t *plcp = malloc((size_t)cin_strings.count * sizeof(int32_t));
+  result = libsais_plcp_gsa_omp((const uint8_t *)cin_strings.units, gsa, plcp, cin_strings.count, 0);
   if (result != 0) {
     log_message(LOG_ERROR, "media_library", "Failed to build PLCP array");
     return false;
@@ -651,7 +651,7 @@ static bool setup_media_library(const cJSON *json) {
   for (int i = 0; i < cin_strings.count; i++) {
     log_message(LOG_TRACE, "libsais", "PLCP[%d] = %d", i, plcp[i]);
   }
-  int32_t* lcp = malloc((size_t)cin_strings.count * sizeof(int32_t));
+  int32_t *lcp = malloc((size_t)cin_strings.count * sizeof(int32_t));
   result = libsais_lcp_omp(plcp, gsa, lcp, cin_strings.count, 0);
   if (result != 0) {
     log_message(LOG_ERROR, "media_library", "Failed to build LCP array");
@@ -876,14 +876,14 @@ static bool overlap_write(Instance *instance, cJSON *command) {
   free(command_str);
   if (!WriteFile(instance->pipe, write->buffer, (DWORD)len, NULL, &write->ovl_context.ovl)) {
     switch (GetLastError()) {
-      case ERROR_IO_PENDING:
-        // iocp will free write
-        log_message(LOG_TRACE, "write", "Pending write call, handled by iocp.");
-        return true;
-      case ERROR_INVALID_HANDLE:
-        // Code 6: The handle is invalid
-        log_message(LOG_DEBUG, "write", "\t(ERR_START)\n\t%.*s\n\t(ERR_END)\n", (int)len-2, write->buffer);
-        break;
+    case ERROR_IO_PENDING:
+      // iocp will free write
+      log_message(LOG_TRACE, "write", "Pending write call, handled by iocp.");
+      return true;
+    case ERROR_INVALID_HANDLE:
+      // Code 6: The handle is invalid
+      log_message(LOG_DEBUG, "write", "\t(ERR_START)\n\t%.*s\n\t(ERR_END)\n", (int)len - 2, write->buffer);
+      break;
     }
     log_last_error("write", "Failed to initialize write");
     free(write);
@@ -1093,15 +1093,15 @@ int main(int argc, char **argv) {
   cJSON *command_arg = cJSON_CreateString("D:\\Test\\video ❗.mp4");
   cJSON_AddItemToArray(command_array, command_arg);
   overlap_write(&pipes[0], command);
-  
+
   Sleep(2000);
-  // normalizing backslash probably not worth 
+  // normalizing backslash probably not worth
   cJSON *command2 = mpv_command("normalize-path", pipes[0].request_id++);
   cJSON *command_array2 = cJSON_GetObjectItem(command2, "command");
   cJSON *command_arg2 = cJSON_CreateString("D:/Test/video ❗.mp4");
   cJSON_AddItemToArray(command_array2, command_arg2);
-  overlap_write(&pipes[0], command2);;
-  
+  overlap_write(&pipes[0], command2);
+
   Sleep(2000);
 
   // https://mpv.io/manual/stable/#json-ipc
