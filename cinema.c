@@ -101,7 +101,10 @@ static void log_message(Log_Level level, const char *location, const char *messa
   va_list args;
   va_start(args, message);
   fprintf(stderr, "[%s] [%s] ", level_to_str(level), location);
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wformat-nonliteral"
   vfprintf(stderr, message, args);
+#pragma clang diagnostic pop
   fprintf(stderr, "\n");
   va_end(args);
   LeaveCriticalSection(&log_lock);
@@ -142,8 +145,8 @@ static int utf8_to_utf16_norm(const char *str, wchar_t *buf) {
     log_message(LOG_DEBUG, "normalize", "Converted '%s' to empty string.", str);
     return 0;
   }
-  int lower = CharLowerBuffW(buf, len - 1); // ignore \0
-  if (len - 1 != lower) {
+  DWORD lower = CharLowerBuffW(buf, (DWORD)(len - 1)); // ignore \0
+  if ((DWORD)(len - 1) != lower) {
     log_message(LOG_ERROR, "normalize", "Processed unexpected n (%d != %d)", lower, len);
     return 0;
   }
@@ -180,7 +183,10 @@ static void log_last_error(const char *location, const char *message, ...) {
   va_list args;
   va_start(args, message);
   fprintf(stderr, "[%s] [%s] ", log_level, location);
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wformat-nonliteral"
   vfprintf(stderr, message, args);
+#pragma clang diagnostic pop
   va_end(args);
   fprintf(stderr, " - Code %lu: %s", code, (char *)buffer);
   LocalFree(buffer);
@@ -206,8 +212,13 @@ static char *read_json(const char *filename) {
   fseek(file, 0, SEEK_END);
   long filesize = ftell(file);
   rewind(file);
+  if (filesize < 0L) {
+    log_message(LOG_ERROR, "json", "Failed to get valid file position");
+    fclose(file);
+    return NULL;
+  }
   // Buffer for file + null terminator
-  char *json_content = (char *)malloc(filesize + 1);
+  char *json_content = (char *)malloc((size_t)filesize + 1L);
   if (json_content == NULL) {
     char err_buf[CIN_STRERROR_BYTES];
     _strerror_s(err_buf, CIN_STRERROR_BYTES, NULL);
@@ -217,7 +228,7 @@ static char *read_json(const char *filename) {
     return NULL;
   }
   // Read into buffer with null terminator
-  fread(json_content, 1, filesize, file);
+  fread(json_content, 1, (size_t)filesize, file);
   json_content[filesize] = '\0';
   fclose(file);
   return json_content;
@@ -341,28 +352,30 @@ static wchar_t *setup_wstring(const cJSON *json, const char *key, const wchar_t 
 typedef struct Cin_Strings {
   // Each byte represents a UTF-8 unit
   unsigned char *units;
-  size_t count;
-  size_t capacity;
+  // using int32_t because of libsais,
+  // unsigned variants are pointless
+  int32_t count;
+  int32_t capacity;
 } Cin_Strings;
 
 typedef struct Cin_String {
   // Length-prefixed UTF-8 string in block
-  uint32_t off;
+  int32_t off;
   // TODO: probably change to uint8_t and update max path accordingly
-  uint16_t len;
+  int len;
 } Cin_String;
 
 static Cin_Strings cin_strings = {0};
 
-static Cin_String cin_strings_append(const char *utf8, size_t len) {
+static Cin_String cin_strings_append(const char *utf8, int len) {
   // Geometric growth with clamp, based on 260 max path
-  static const size_t cin_strings_init = 1 << 15;
-  static const size_t cin_strings_clamp = 1 << 26;
+  static const int cin_strings_init = 1 << 15;
+  static const int cin_strings_clamp = 1 << 26;
   void *dst = NULL;
   if (cin_strings.capacity - cin_strings.count >= len) {
     dst = cin_strings.units + cin_strings.count;
   } else {
-    size_t cap = cin_strings.capacity;
+    int32_t cap = cin_strings.capacity;
     if (cap <= 0) {
       cap = cin_strings_init;
     }
@@ -370,7 +383,7 @@ static Cin_String cin_strings_append(const char *utf8, size_t len) {
       cap = cap < cin_strings_clamp ? cap * 2 : cap + cin_strings_clamp;
     }
     cin_strings.capacity = cap;
-    unsigned char *units = realloc(cin_strings.units, cin_strings.capacity);
+    unsigned char *units = realloc(cin_strings.units, (size_t)cin_strings.capacity);
     if (units != NULL) {
       cin_strings.units = units;
       dst = cin_strings.units + cin_strings.count;
@@ -380,9 +393,9 @@ static Cin_String cin_strings_append(const char *utf8, size_t len) {
   if (dst == NULL) {
     log_message(LOG_ERROR, "cin_strings", "Failed to reallocate memory");
   } else {
-    memcpy(dst, utf8, len);
-    cin_string.off = (uint32_t)cin_strings.count;
-    cin_string.len = (uint16_t)len;
+    memcpy(dst, utf8, (size_t)len);
+    cin_string.off = cin_strings.count;
+    cin_string.len = len;
     cin_strings.count += len;
   }
   return cin_string;
@@ -474,8 +487,8 @@ static bool setup_directory(wchar_t *path, size_t len) {
         ok = false;
       }
     } else {
-      int len = utf16_to_utf8(path, utf8_buf, path_len);
-      cin_strings_append(utf8_buf, len);
+      int utf8_len = utf16_to_utf8(path, utf8_buf, (int)path_len);
+      cin_strings_append(utf8_buf, utf8_len);
     }
   } while (FindNextFileW(search, &data) != 0);
   if (GetLastError() != ERROR_NO_MORE_FILES) {
@@ -537,7 +550,7 @@ static bool setup_pattern(const wchar_t *pattern) {
       continue; // skip absolute path (+ NUL) if silently truncated
     }
     wmemcpy(abs_buf + abs_len, file, file_len);
-    int len = utf16_to_utf8(abs_buf, utf8_buf, path_len);
+    int len = utf16_to_utf8(abs_buf, utf8_buf, (int)path_len);
     cin_strings_append(utf8_buf, len);
   } while (FindNextFileW(search, &data) != 0);
   if (GetLastError() != ERROR_NO_MORE_FILES) {
@@ -555,7 +568,7 @@ static bool setup_url(const wchar_t *url) {
 }
 
 static bool setup_tag(const wchar_t *tag) {
-  int len = utf16_to_utf8(tag, utf8_buf, -1);
+  utf16_to_utf8(tag, utf8_buf, -1);
   // cin_strings_append(utf8_buf, len);
   return true;
 }
@@ -575,7 +588,7 @@ static bool setup_media_library(const cJSON *json) {
     cJSON_ArrayForEach(cursor, directories) {
       int len = utf8_to_utf16_norm(cursor->valuestring, buf);
       if (len) {
-        setup_directory(buf, len);
+        setup_directory(buf, (size_t)len);
       }
     }
     cJSON *patterns = setup_entry_collection(entry, "patterns");
@@ -603,15 +616,15 @@ static bool setup_media_library(const cJSON *json) {
     log_message(LOG_INFO, "media_library", "Processing entry: %s", cJSON_PrintUnformatted(entry));
   }
   if (cin_strings.count < cin_strings.capacity) {
-    unsigned char *tight = realloc(cin_strings.units, cin_strings.count);
+    unsigned char *tight = realloc(cin_strings.units, (size_t)cin_strings.count);
     if (tight != NULL) {
       cin_strings.units = tight;
     }
     cin_strings.capacity = cin_strings.count;
   }
   fprintf(stderr, "\n");
-  fprintf(stderr, "count=%zu|capacity=%zu\n", cin_strings.count, cin_strings.capacity);
-  for (size_t i = 0; i < cin_strings.count; ++i) {
+  fprintf(stderr, "count=%d|capacity=%d\n", cin_strings.count, cin_strings.capacity);
+  for (int32_t i = 0; i < cin_strings.count; ++i) {
     fprintf(stderr, cin_strings.units[i] ? "%c" : "\n", cin_strings.units[i]);
   }
   fprintf(stderr, "\n");
@@ -620,7 +633,7 @@ static bool setup_media_library(const cJSON *json) {
   //  and LCP information: O(|P| + log|T|)
   // SA and (P)LCP construction with https://github.com/IlyaGrebnov/libsais
   // TODO: might be better good way to handle surrogate pairs
-  int32_t* gsa = malloc(cin_strings.count * sizeof(int32_t));
+  int32_t* gsa = malloc((size_t)cin_strings.count * sizeof(int32_t));
   int result = libsais_gsa_omp((const uint8_t*)cin_strings.units, gsa, cin_strings.count, 0, NULL, 0);
   if (result != 0) {
     log_message(LOG_ERROR, "media_library", "Failed to build SA");
@@ -629,7 +642,7 @@ static bool setup_media_library(const cJSON *json) {
   for (int i = 0; i < cin_strings.count; i++) {
     log_message(LOG_TRACE, "libsais", "SA[%d] = %d (suffix: \"%s\")", i, gsa[i], cin_strings.units + gsa[i]);
   }
-  int32_t* plcp = malloc(cin_strings.count * sizeof(int32_t));
+  int32_t* plcp = malloc((size_t)cin_strings.count * sizeof(int32_t));
   result = libsais_plcp_gsa_omp((const uint8_t*)cin_strings.units, gsa, plcp, cin_strings.count, 0);
   if (result != 0) {
     log_message(LOG_ERROR, "media_library", "Failed to build PLCP array");
@@ -638,7 +651,7 @@ static bool setup_media_library(const cJSON *json) {
   for (int i = 0; i < cin_strings.count; i++) {
     log_message(LOG_TRACE, "libsais", "PLCP[%d] = %d", i, plcp[i]);
   }
-  int32_t* lcp = malloc(cin_strings.count * sizeof(int32_t));
+  int32_t* lcp = malloc((size_t)cin_strings.count * sizeof(int32_t));
   result = libsais_lcp_omp(plcp, gsa, lcp, cin_strings.count, 0);
   if (result != 0) {
     log_message(LOG_ERROR, "media_library", "Failed to build LCP array");
@@ -822,7 +835,10 @@ static cJSON *mpv_command(const char *command, int64_t request_id) {
   }
   cJSON_AddItemToArray(cmd_array, cmd_element);
   cJSON_AddItemToObject(json, "command", cmd_array);
-  cJSON *cmd_id = cJSON_CreateNumber(request_id);
+  // NOTE: precision loss when request_id is extremely
+  // large (unrealistic), but mostly a problem if the data type
+  // changes from int64_t to something else
+  cJSON *cmd_id = cJSON_CreateNumber((double)request_id);
   cJSON_AddItemToObject(json, "request_id", cmd_id);
   return json;
 end:
@@ -924,7 +940,7 @@ static bool process_layout(size_t count, Instance *instances, const wchar_t *fil
   return true;
 }
 
-Overlapped_Write *find_write(Instance *instance, int64_t request_id) {
+static Overlapped_Write *find_write(Instance *instance, int64_t request_id) {
   // Uses binary search over sorted dynamic array.
   // The request_id should always find a pair in this scenario
   // as the incoming request_id was sent as a targeted response.
@@ -940,14 +956,17 @@ Overlapped_Write *find_write(Instance *instance, int64_t request_id) {
     log_message(LOG_ERROR, "find_write", "Tried to find '%" PRId64 "' on NULL items", request_id);
     return NULL;
   }
-  ptrdiff_t left = 0;
-  ptrdiff_t right = instance->pending_writes.count - 1;
+  size_t left = 0;
+  size_t right = instance->pending_writes.count - 1;
   while (left <= right) {
-    ptrdiff_t middle = left + ((right - left) >> 1);
+    size_t middle = left + ((right - left) >> 1);
     int64_t mid_val = instance->pending_writes.items[middle]->request_id;
     if (mid_val < request_id) {
       left = middle + 1;
     } else if (mid_val > request_id) {
+      if (middle == 0) {
+        break;
+      }
       right = middle - 1;
     } else {
       return instance->pending_writes.items[middle];
@@ -957,7 +976,7 @@ Overlapped_Write *find_write(Instance *instance, int64_t request_id) {
   return NULL;
 }
 
-DWORD WINAPI iocp_listener(LPVOID lp_param) {
+static DWORD WINAPI iocp_listener(LPVOID lp_param) {
   HANDLE iocp = (HANDLE)lp_param;
   for (;;) {
     DWORD bytes;
