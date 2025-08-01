@@ -48,9 +48,9 @@
 // (260 * 2 * 2) = 1040 bytes, exceeding the bound
 // if many/all characters need 2 code units
 #define CIN_MAX_PATH MAX_PATH
-#define CIN_MAX_PATH_BYTES MAX_PATH * 2
+#define CIN_MAX_PATH_BYTES MAX_PATH * 4
 #define CIN_MAX_WRITABLE_PATH MAX_PATH - 12
-#define CIN_MAX_WRITABLE_PATH_BYTES (MAX_PATH - 12) * 2
+#define CIN_MAX_WRITABLE_PATH_BYTES (MAX_PATH - 12) * 4
 // TODO: find better upper bound for command line
 #define COMMAND_LINE_LIMIT 32768
 #define MAX_LOG_MESSAGE 1024
@@ -87,7 +87,7 @@ static const char *level_to_str(Log_Level level) {
   }
 }
 
-static Log_Level GLOBAL_LOG_LEVEL = LOG_TRACE;
+static Log_Level GLOBAL_LOG_LEVEL = LOG_DEBUG;
 CRITICAL_SECTION log_lock;
 
 static void log_message(Log_Level level, const char *location, const char *message, ...) {
@@ -380,7 +380,6 @@ static Cin_String cin_strings_append(const char *utf8, size_t len) {
 }
 
 // TODO: parallelize
-// TODO: check if CIN_MAX_PATH is sufficient
 static char utf8_buf[CIN_MAX_PATH_BYTES];
 
 static cJSON *setup_entry_collection(cJSON *entry, const char *name) {
@@ -619,7 +618,7 @@ static bool setup_media_library(const cJSON *json) {
     return false;
   }
   for (int i = 0; i < cin_strings.count; i++) {
-    printf("SA[%d] = %d (suffix: \"%s\")\n", i, gsa[i], cin_strings.units + gsa[i]);
+    log_message(LOG_TRACE, "libsais", "SA[%d] = %d (suffix: \"%s\")", i, gsa[i], cin_strings.units + gsa[i]);
   }
   int32_t* plcp = malloc(cin_strings.count * sizeof(int32_t));
   result = libsais_plcp_gsa_omp((const uint8_t*)cin_strings.units, gsa, plcp, cin_strings.count, 0);
@@ -628,7 +627,7 @@ static bool setup_media_library(const cJSON *json) {
     return false;
   }
   for (int i = 0; i < cin_strings.count; i++) {
-    printf("PLCP[%d] = %d\n", i, plcp[i]);
+    log_message(LOG_TRACE, "libsais", "PLCP[%d] = %d", i, plcp[i]);
   }
   int32_t* lcp = malloc(cin_strings.count * sizeof(int32_t));
   result = libsais_lcp_omp(plcp, gsa, lcp, cin_strings.count, 0);
@@ -638,7 +637,7 @@ static bool setup_media_library(const cJSON *json) {
   }
   free(plcp);
   for (int i = 0; i < cin_strings.count; i++) {
-    printf("LCP[%d] = %d\n", i, lcp[i]);
+    log_message(LOG_TRACE, "libsais", "LCP[%d] = %d", i, lcp[i]);
   }
   // TODO: dont need to free these if used later
   free(gsa);
