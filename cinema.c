@@ -47,7 +47,7 @@
 // a surrogate pair character can hold 2 wchar_t or
 // (260 * 2 * 2) = 1040 bytes, exceeding the bound
 // if many/all characters need 2 code units
-// The cFileName from winapi use a wchar_t buffer of
+// The cFileName from winapi uses a wchar_t buffer of
 // 260 (MAX_PATH) so surrogate pairs get truncated
 #define CIN_MAX_PATH MAX_PATH
 #define CIN_MAX_PATH_BYTES MAX_PATH * 4
@@ -139,7 +139,7 @@ static int utf8_to_utf16(const char *utf8_str, wchar_t *buf, int len) {
 }
 
 static int utf8_to_utf16_norm(const char *str, wchar_t *buf) {
-  // uses winapi to lowercase the string and ensure it is not empty
+  // uses winapi to lowercase the string, and ensures it is not empty
   int len = utf8_to_utf16(str, buf, CIN_MAX_PATH);
   if (len <= 1) {
     log_message(LOG_DEBUG, "normalize", "Converted '%s' to empty string.", str);
@@ -573,6 +573,33 @@ static bool setup_tag(const wchar_t *tag) {
   return true;
 }
 
+static int **rmqa(const int32_t *lcp, const int32_t n) {
+  // sparse table for range minimum query over lcp
+  // NOTE: can remove space log factor with +-1 RMQ and indirection
+  // but likely not worth in practice
+  int **m = malloc((size_t)n * sizeof(int *));
+  int log_n = 31 - __builtin_clz((unsigned int)n);
+  for (int i = 0; i < n; ++i) {
+    m[i] = malloc((size_t)log_n * sizeof(int *));
+  }
+  for (int i = 0; i < n; ++i) {
+    m[i][0] = lcp[i];
+  }
+  for (int k = 1; k < log_n; ++k) {
+    for (int i = 0; i + (1 << k) - 1 < n; ++i) {
+      m[i][k] = min(m[i][k - 1], m[i + (1 << (k - 1))][k - 1]);
+    }
+  }
+  return m;
+}
+
+static int rmq(int **m, const int left, const int right) {
+  int length = right - left + 1;
+  int k = 31 - __builtin_clz((unsigned int)length);
+  int right_start = right - (1 << k) + 1;
+  return min(m[left][k], m[right_start][k]);
+}
+
 static bool setup_media_library(const cJSON *json) {
   cJSON *lib = cJSON_GetObjectItemCaseSensitive(json, "media_library");
   if (lib == NULL || !cJSON_IsArray(lib)) {
@@ -661,9 +688,10 @@ static bool setup_media_library(const cJSON *json) {
   for (int i = 0; i < cin_strings.count; i++) {
     log_message(LOG_TRACE, "libsais", "LCP[%d] = %d", i, lcp[i]);
   }
-  // TODO: dont need to free these if used later
-  free(gsa);
-  free(lcp);
+  int **m = rmqa(lcp, cin_strings.count);
+  if (m == NULL) {
+    log_message(LOG_ERROR, "media_library", "Failed to build RMQ matrix");
+  }
   return true;
 }
 
