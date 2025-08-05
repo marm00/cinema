@@ -356,6 +356,11 @@ typedef struct Cin_Strings {
   // unsigned variants are pointless
   int32_t count;
   int32_t capacity;
+  // Document boundaries are encapsulated in the GSA
+  // because the lexographical sort puts \0 entries
+  // at the top; the first doc_count entries
+  // represent the start/end positions of each doc
+  int32_t doc_count;
 } Cin_Strings;
 
 typedef struct Cin_String {
@@ -397,6 +402,7 @@ static Cin_String cin_strings_append(const char *utf8, int len) {
     cin_string.off = cin_strings.count;
     cin_string.len = len;
     cin_strings.count += len;
+    cin_strings.doc_count++;
   }
   return cin_string;
 }
@@ -691,6 +697,17 @@ static bool setup_media_library(const cJSON *json) {
   int **m = rmqa(lcp, cin_strings.count);
   if (m == NULL) {
     log_message(LOG_ERROR, "media_library", "Failed to build RMQ matrix");
+  }
+  // document array where suffix at gsa[i]
+  // has document (starting at) da[gsa[i]]
+  int32_t *da = malloc(cin_strings.count * sizeof(int32_t));
+  int right = -1;
+  for (int i = 0; i < cin_strings.doc_count; ++i) {
+    int left = right + 1;
+    for (int pos = left; pos <= gsa[i]; ++pos) {
+      da[pos] = left;
+    }
+    right = gsa[i];
   }
   return true;
 }
