@@ -344,67 +344,51 @@ static wchar_t *setup_wstring(const cJSON *json, const char *key, const wchar_t 
   return result;
 }
 
-// TODO: the Cin_String approach is probably worse than
-// just storing the offets and building an index of offsets
-// to strlen. This way a string is simply a uint8/16_t and one
-// lookup gives the length to memcpy into write buffer
-
-typedef struct Cin_Strings {
+typedef struct Local_Collection {
   // Each byte represents a UTF-8 unit
-  unsigned char *units;
+  uint8_t *text;
   // using int32_t because of libsais,
   // unsigned variants are pointless
-  int32_t count;
-  int32_t capacity;
+  int32_t bytes;
+  int32_t max_bytes;
   // Document boundaries are encapsulated in the GSA
   // because the lexographical sort puts \0 entries
   // at the top; the first doc_count entries
   // represent the start/end positions of each doc
   int32_t doc_count;
-} Cin_Strings;
+} Local_Collection;
 
-typedef struct Cin_String {
-  // Length-prefixed UTF-8 string in block
-  int32_t off;
-  // TODO: probably change to uint8_t and update max path accordingly
-  int len;
-} Cin_String;
+static Local_Collection locals = {0};
 
-static Cin_Strings cin_strings = {0};
-
-static Cin_String cin_strings_append(const char *utf8, int len) {
+static void locals_append(const char *utf8, int len) {
   // Geometric growth with clamp, based on 260 max path
-  static const int cin_strings_init = 1 << 15;
-  static const int cin_strings_clamp = 1 << 26;
+  static const int locals_init = 1 << 15;
+  static const int locals_clamp = 1 << 26;
   void *dst = NULL;
-  if (cin_strings.capacity - cin_strings.count >= len) {
-    dst = cin_strings.units + cin_strings.count;
+  if (locals.max_bytes - locals.bytes >= len) {
+    dst = locals.text + locals.bytes;
   } else {
-    int32_t cap = cin_strings.capacity;
+    int32_t cap = locals.max_bytes;
     if (cap <= 0) {
-      cap = cin_strings_init;
+      cap = locals_init;
     }
-    while (cap - cin_strings.count < len) {
-      cap = cap < cin_strings_clamp ? cap * 2 : cap + cin_strings_clamp;
+    while (cap - locals.bytes < len) {
+      cap = cap < locals_clamp ? cap * 2 : cap + locals_clamp;
     }
-    cin_strings.capacity = cap;
-    unsigned char *units = realloc(cin_strings.units, (size_t)cin_strings.capacity);
+    locals.max_bytes = cap;
+    uint8_t *units = realloc(locals.text, (size_t)locals.max_bytes);
     if (units != NULL) {
-      cin_strings.units = units;
-      dst = cin_strings.units + cin_strings.count;
+      locals.text = units;
+      dst = locals.text + locals.bytes;
     }
   }
-  Cin_String cin_string = {0};
   if (dst == NULL) {
-    log_message(LOG_ERROR, "cin_strings", "Failed to reallocate memory");
+    log_message(LOG_ERROR, "locals", "Failed to reallocate memory");
   } else {
     memcpy(dst, utf8, (size_t)len);
-    cin_string.off = cin_strings.count;
-    cin_string.len = len;
-    cin_strings.count += len;
-    cin_strings.doc_count++;
+    locals.bytes += len;
+    locals.doc_count++;
   }
-  return cin_string;
 }
 
 // TODO: parallelize
@@ -494,7 +478,7 @@ static bool setup_directory(wchar_t *path, size_t len) {
       }
     } else {
       int utf8_len = utf16_to_utf8(path, utf8_buf, (int)path_len);
-      cin_strings_append(utf8_buf, utf8_len);
+      locals_append(utf8_buf, utf8_len);
     }
   } while (FindNextFileW(search, &data) != 0);
   if (GetLastError() != ERROR_NO_MORE_FILES) {
@@ -557,7 +541,7 @@ static bool setup_pattern(const wchar_t *pattern) {
     }
     wmemcpy(abs_buf + abs_len, file, file_len);
     int len = utf16_to_utf8(abs_buf, utf8_buf, (int)path_len);
-    cin_strings_append(utf8_buf, len);
+    locals_append(utf8_buf, len);
   } while (FindNextFileW(search, &data) != 0);
   if (GetLastError() != ERROR_NO_MORE_FILES) {
     log_last_error("directories", "Failed to find next file");
@@ -569,13 +553,13 @@ static bool setup_pattern(const wchar_t *pattern) {
 
 static bool setup_url(const wchar_t *url) {
   int len = utf16_to_utf8(url, utf8_buf, -1);
-  cin_strings_append(utf8_buf, len);
+  locals_append(utf8_buf, len);
   return true;
 }
 
 static bool setup_tag(const wchar_t *tag) {
   utf16_to_utf8(tag, utf8_buf, -1);
-  // cin_strings_append(utf8_buf, len);
+  // locals_append(utf8_buf, len);
   return true;
 }
 
@@ -643,22 +627,22 @@ static bool setup_media_library(const cJSON *json) {
     // cJSON_ArrayForEach(cursor, tags) {
     //   if (cursor->valuestring != NULL && strlen(cursor->valuestring) > 0) {
     //     setup_tag(cursor->valuestring);
-    //     cin_strings_append(cursor->valuestring, strlen(cursor->valuestring));
+    //     locals_append(cursor->valuestring, strlen(cursor->valuestring));
     //   }
     // }
     log_message(LOG_INFO, "media_library", "Processing entry: %s", cJSON_PrintUnformatted(entry));
   }
-  if (cin_strings.count < cin_strings.capacity) {
-    unsigned char *tight = realloc(cin_strings.units, (size_t)cin_strings.count);
+  if (locals.bytes < locals.max_bytes) {
+    uint8_t *tight = realloc(locals.text, (size_t)locals.bytes);
     if (tight != NULL) {
-      cin_strings.units = tight;
+      locals.text = tight;
     }
-    cin_strings.capacity = cin_strings.count;
+    locals.max_bytes = locals.bytes;
   }
   fprintf(stderr, "\n");
-  fprintf(stderr, "count=%d|capacity=%d\n", cin_strings.count, cin_strings.capacity);
-  for (int32_t i = 0; i < cin_strings.count; ++i) {
-    fprintf(stderr, cin_strings.units[i] ? "%c" : "\n", cin_strings.units[i]);
+  fprintf(stderr, "count=%d|capacity=%d\n", locals.bytes, locals.max_bytes);
+  for (int32_t i = 0; i < locals.bytes; ++i) {
+    fprintf(stderr, locals.text[i] ? "%c" : "\n", locals.text[i]);
   }
   fprintf(stderr, "\n");
   // TODO: Binary search pattern P in text T
@@ -666,43 +650,43 @@ static bool setup_media_library(const cJSON *json) {
   //  and LCP information: O(|P| + log|T|)
   // SA and (P)LCP construction with https://github.com/IlyaGrebnov/libsais
   // TODO: might be better good way to handle surrogate pairs
-  int32_t *gsa = malloc((size_t)cin_strings.count * sizeof(int32_t));
-  int result = libsais_gsa_omp((const uint8_t *)cin_strings.units, gsa, cin_strings.count, 0, NULL, 0);
+  int32_t *gsa = malloc((size_t)locals.bytes * sizeof(int32_t));
+  int result = libsais_gsa_omp(locals.text, gsa, locals.bytes, 0, NULL, 0);
   if (result != 0) {
     log_message(LOG_ERROR, "media_library", "Failed to build SA");
     return false;
   }
-  for (int i = 0; i < cin_strings.count; i++) {
-    log_message(LOG_TRACE, "libsais", "SA[%d] = %d (suffix: \"%s\")", i, gsa[i], cin_strings.units + gsa[i]);
+  for (int i = 0; i < locals.bytes; i++) {
+    log_message(LOG_TRACE, "libsais", "SA[%d] = %d (suffix: \"%s\")", i, gsa[i], locals.text + gsa[i]);
   }
-  int32_t *plcp = malloc((size_t)cin_strings.count * sizeof(int32_t));
-  result = libsais_plcp_gsa_omp((const uint8_t *)cin_strings.units, gsa, plcp, cin_strings.count, 0);
+  int32_t *plcp = malloc((size_t)locals.bytes * sizeof(int32_t));
+  result = libsais_plcp_gsa_omp(locals.text, gsa, plcp, locals.bytes, 0);
   if (result != 0) {
     log_message(LOG_ERROR, "media_library", "Failed to build PLCP array");
     return false;
   }
-  for (int i = 0; i < cin_strings.count; i++) {
+  for (int i = 0; i < locals.bytes; i++) {
     log_message(LOG_TRACE, "libsais", "PLCP[%d] = %d", i, plcp[i]);
   }
-  int32_t *lcp = malloc((size_t)cin_strings.count * sizeof(int32_t));
-  result = libsais_lcp_omp(plcp, gsa, lcp, cin_strings.count, 0);
+  int32_t *lcp = malloc((size_t)locals.bytes * sizeof(int32_t));
+  result = libsais_lcp_omp(plcp, gsa, lcp, locals.bytes, 0);
   if (result != 0) {
     log_message(LOG_ERROR, "media_library", "Failed to build LCP array");
     return false;
   }
   free(plcp);
-  for (int i = 0; i < cin_strings.count; i++) {
+  for (int i = 0; i < locals.bytes; i++) {
     log_message(LOG_TRACE, "libsais", "LCP[%d] = %d", i, lcp[i]);
   }
-  int **m = rmqa(lcp, cin_strings.count);
+  int **m = rmqa(lcp, locals.bytes);
   if (m == NULL) {
     log_message(LOG_ERROR, "media_library", "Failed to build RMQ matrix");
   }
   // document array where suffix at gsa[i]
   // has document (starting at) da[gsa[i]]
-  int32_t *da = malloc(cin_strings.count * sizeof(int32_t));
+  int32_t *da = malloc(locals.bytes * sizeof(int32_t));
   int right = -1;
-  for (int i = 0; i < cin_strings.doc_count; ++i) {
+  for (int i = 0; i < locals.doc_count; ++i) {
     int left = right + 1;
     for (int pos = left; pos <= gsa[i]; ++pos) {
       da[pos] = left;
