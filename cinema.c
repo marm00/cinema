@@ -352,7 +352,7 @@ typedef struct Local_Collection {
   int32_t bytes;
   int32_t max_bytes;
   // Document boundaries are encapsulated in the GSA
-  // because the lexographical sort puts \0 entries
+  // because the lexicographical sort puts \0 entries
   // at the top; the first doc_count entries
   // represent the start/end positions of each doc
   int32_t doc_count;
@@ -590,6 +590,120 @@ static int rmq(int **m, const int left, const int right) {
   return min(m[left][k], m[right_start][k]);
 }
 
+static inline int lcps(const uint8_t *a, const uint8_t *b) {
+  static const int CHUNK_SIZE = 1 << 3;
+  const uint8_t *start = a;
+  while ((((uintptr_t)a & 7) != 0 || ((uintptr_t)b & 7) != 0) &&
+         *a == *b && *a != '\0') {
+    a++;
+    b++;
+  }
+  while (((uintptr_t)a & 7) == 0 && ((uintptr_t)b & 7) == 0) {
+    uint64_t wa = *(const uint64_t *)a;
+    uint64_t wb = *(const uint64_t *)b;
+    if (wa != wb || (wa - 0x0101010101010101ULL) & (~wa & 0x8080808080808080ULL)) {
+      break;
+    }
+    a += CHUNK_SIZE;
+    b += CHUNK_SIZE;
+  }
+  while (*a == *b && *a != '\0') {
+    a++;
+    b++;
+  }
+  return a - start;
+}
+
+static void document_listing(const int32_t *gsa, const int32_t *lcp, int **m, int n, const uint8_t *pattern, int len) {
+  int left = locals.doc_count;
+  int right = n - 1;
+  int l_lcp = lcps(pattern, locals.text + gsa[left]);
+  int r_lcp = lcps(pattern, locals.text + gsa[right]);
+  if (l_lcp < len && pattern[l_lcp] < locals.text[gsa[left] + l_lcp]) {
+    // pattern = abc, left = abd
+    // l_lcp = 2, len = 3, 2 < 3
+    // pattern[l_lcp] = c, text[left + l_lcp] = d, c < d
+    log_message(LOG_DEBUG, "documents", "Pattern is smaller than first suffix");
+    return;
+  } else if (r_lcp < len && pattern[r_lcp] > locals.text[gsa[right] + r_lcp]) {
+    // pattern = abd, right = abc
+    // r_lcp = 2, len = 3, 2 < 3
+    // pattern[r_lcp] = d, text[right + r_lcp] = c, d > c
+    log_message(LOG_DEBUG, "documents", "Pattern is larger than last suffix");
+    return;
+  }
+  int tmp_left = left;
+  int tmp_right = right;
+  int tmp_l_lcp = l_lcp;
+  int tmp_r_lcp = r_lcp;
+  while (left < right) {
+    int mid = left + ((right - left) >> 1);
+    int m_lcp = 0;
+    if (l_lcp >= r_lcp) {
+      if (l_lcp == 0 || left >= mid) {
+        m_lcp = 0;
+      } else {
+        m_lcp = min(l_lcp, rmq(m, left + 1, mid));
+      }
+    } else {
+      if (mid >= right) {
+        m_lcp = 0;
+      } else {
+        m_lcp = min(r_lcp, rmq(m, mid + 1, right));
+      }
+    }
+    int p_lcp = lcps(pattern, locals.text + gsa[mid] + m_lcp);
+    int t_lcp = m_lcp + p_lcp;
+    if (t_lcp == len ||
+        locals.text[gsa[mid] + t_lcp] == '\0' ||
+        pattern[t_lcp] < locals.text[gsa[mid] + t_lcp]) {
+      right = mid;
+      r_lcp = t_lcp;
+    } else {
+      left = mid + 1;
+      l_lcp = t_lcp;
+    }
+  }
+  int l_bound = left;
+  int l_bound_lcp = max(l_lcp, r_lcp);
+  if (l_bound_lcp < len) {
+    log_message(LOG_DEBUG, "documents", "No suffix has pattern as prefix");
+    return;
+  }
+  right = tmp_right;
+  l_lcp = len;
+  r_lcp = tmp_r_lcp;
+  while (left < right) {
+    int mid = left + ((right - left + 1) >> 1);
+    int m_lcp = 0;
+    if (l_lcp >= r_lcp) {
+      if (l_lcp == 0 || left >= mid) {
+        m_lcp = 0;
+      } else {
+        m_lcp = min(l_lcp, rmq(m, left + 1, mid));
+      }
+    } else {
+      if (mid >= right) {
+        m_lcp = 0;
+      } else {
+        m_lcp = min(r_lcp, rmq(m, mid + 1, right));
+      }
+    }
+    int p_lcp = lcps(pattern, locals.text + gsa[mid] + m_lcp);
+    int t_lcp = m_lcp + p_lcp;
+    if (t_lcp == len) {
+      left = mid;
+      l_lcp = len;
+    } else {
+      right = mid - 1;
+      r_lcp = t_lcp;
+    }
+  }
+  int r_bound = left;
+  printf("left is %d or %s\n", l_bound, locals.text + gsa[l_bound]);
+  printf("right is %d or %s\n", r_bound, locals.text + gsa[r_bound]);
+}
+
 static bool setup_media_library(const cJSON *json) {
   cJSON *lib = cJSON_GetObjectItemCaseSensitive(json, "media_library");
   if (lib == NULL || !cJSON_IsArray(lib)) {
@@ -693,6 +807,8 @@ static bool setup_media_library(const cJSON *json) {
     }
     right = gsa[i];
   }
+  uint8_t pattern[] = "/";
+  document_listing(gsa, lcp, m, locals.bytes, pattern, strlen((const char *)pattern));
   return true;
 }
 
