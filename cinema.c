@@ -570,7 +570,7 @@ static int **rmqa(const int32_t *lcp, const int32_t n) {
   int **m = malloc((size_t)n * sizeof(int *));
   int log_n = 31 - __builtin_clz((unsigned int)n);
   for (int i = 0; i < n; ++i) {
-    m[i] = malloc((size_t)log_n * sizeof(int *));
+    m[i] = malloc((size_t)log_n * sizeof(int));
   }
   for (int i = 0; i < n; ++i) {
     m[i][0] = lcp[i];
@@ -632,10 +632,9 @@ static void document_listing(const int32_t *gsa, const int32_t *lcp, int **m, in
     log_message(LOG_DEBUG, "documents", "Pattern is larger than last suffix");
     return;
   }
-  int tmp_left = left;
   int tmp_right = right;
-  int tmp_l_lcp = l_lcp;
   int tmp_r_lcp = r_lcp;
+  bool found = false;
   while (left < right) {
     int mid = left + ((right - left) >> 1);
     int m_lcp = 0;
@@ -652,11 +651,14 @@ static void document_listing(const int32_t *gsa, const int32_t *lcp, int **m, in
         m_lcp = min(r_lcp, rmq(m, mid + 1, right));
       }
     }
-    int p_lcp = lcps(pattern, locals.text + gsa[mid] + m_lcp);
+    int p_lcp = lcps(pattern + m_lcp, locals.text + gsa[mid] + m_lcp);
     int t_lcp = m_lcp + p_lcp;
-    if (t_lcp == len ||
-        locals.text[gsa[mid] + t_lcp] == '\0' ||
-        pattern[t_lcp] < locals.text[gsa[mid] + t_lcp]) {
+    if (t_lcp == len) {
+      found = true;
+      right = mid;
+      r_lcp = t_lcp;
+    } else if (locals.text[gsa[mid] + t_lcp] == '\0' ||
+               pattern[t_lcp] < locals.text[gsa[mid] + t_lcp]) {
       right = mid;
       r_lcp = t_lcp;
     } else {
@@ -664,12 +666,11 @@ static void document_listing(const int32_t *gsa, const int32_t *lcp, int **m, in
       l_lcp = t_lcp;
     }
   }
-  int l_bound = left;
-  int l_bound_lcp = max(l_lcp, r_lcp);
-  if (l_bound_lcp < len) {
+  if (!found && lcps(pattern, locals.text + gsa[left]) < len) {
     log_message(LOG_DEBUG, "documents", "No suffix has pattern as prefix");
     return;
   }
+  int l_bound = left;
   right = tmp_right;
   l_lcp = len;
   r_lcp = tmp_r_lcp;
@@ -689,7 +690,7 @@ static void document_listing(const int32_t *gsa, const int32_t *lcp, int **m, in
         m_lcp = min(r_lcp, rmq(m, mid + 1, right));
       }
     }
-    int p_lcp = lcps(pattern, locals.text + gsa[mid] + m_lcp);
+    int p_lcp = lcps(pattern + m_lcp, locals.text + gsa[mid] + m_lcp);
     int t_lcp = m_lcp + p_lcp;
     if (t_lcp == len) {
       left = mid;
@@ -700,8 +701,8 @@ static void document_listing(const int32_t *gsa, const int32_t *lcp, int **m, in
     }
   }
   int r_bound = left;
-  printf("left is %d or %s\n", l_bound, locals.text + gsa[l_bound]);
-  printf("right is %d or %s\n", r_bound, locals.text + gsa[r_bound]);
+  log_message(LOG_DEBUG, "documents", "Boundaries are [%d, %d] or [%s, %s]", l_bound, r_bound,
+              locals.text + gsa[l_bound], locals.text + gsa[r_bound]);
 }
 
 static bool setup_media_library(const cJSON *json) {
