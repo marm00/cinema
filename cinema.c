@@ -736,10 +736,10 @@ static void document_listing(const int32_t *gsa, const int32_t *lcp, int **m, in
   int r_bound = left;
   log_message(LOG_DEBUG, "documents", "Boundaries are [%d, %d] or [%s, %s]", l_bound, r_bound,
               locals.text + gsa[l_bound], locals.text + gsa[r_bound]);
-  printf("%d\n", rmq_positional(m_da, l_bound, r_bound).value);
   for (int i = l_bound; i <= r_bound; ++i) {
     printf("gsa[%3d] = %-25.25s (%3d)| (%3d) = %s\n", i, locals.text + gsa[i], gsa[i], da[i], locals.text + da[i]);
   }
+  printf("%d\n", rmq_positional(m_da, l_bound, r_bound).value);
 }
 
 static bool setup_media_library(const cJSON *json) {
@@ -838,10 +838,14 @@ static bool setup_media_library(const cJSON *json) {
   // document array where suffix at gsa[i]
   // has document (starting at) da[i] in text
   int32_t *da = malloc(locals.bytes * sizeof(int32_t));
+  int32_t *doc_runs = malloc(locals.bytes * sizeof(int32_t));
   da[0] = 0;
+  doc_runs[0] = 0;
   for (int i = 1; i < locals.doc_count; ++i) {
     da[i] = gsa[i - 1] + 1;
+    doc_runs[i] = 0;
   }
+  int32_t doc_run = 1;
   for (int i = locals.doc_count; i < locals.bytes; ++i) {
     int left = -1;
     int right = locals.doc_count - 1;
@@ -855,9 +859,20 @@ static bool setup_media_library(const cJSON *json) {
       }
     }
     da[i] = (left == -1) ? 0 : gsa[left] + 1;
+    doc_run--;
+    if (da[i] != da[i - 1]) {
+      doc_runs[i + doc_run] = doc_run ? -doc_run - 1 : 0;
+      doc_run = 0;
+    } else {
+      doc_runs[i] = doc_run; 
+    }
+  }
+  if (doc_run) {
+    doc_runs[locals.bytes + doc_run - 1] = -doc_run;
   }
   for (int i = 0; i < locals.bytes; ++i) {
-    printf("da[%d]=%d\n", i, da[i]);
+    // printf("da[%d]=%d\n", i, da[i]);
+    printf("doc_runs[%d]=%d\n", i, doc_runs[i]);
   }
   RMQPosition **m_da = rmqa_positional(da, gsa, locals.bytes);
   uint8_t pattern[] = "s";
