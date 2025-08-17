@@ -843,19 +843,18 @@ static bool setup_media_library(const cJSON *json) {
     da[i] = gsa[i - 1] + 1;
   }
   for (int i = locals.doc_count; i < locals.bytes; ++i) {
-    int left = 0;
+    int left = -1;
     int right = locals.doc_count - 1;
     int curr = gsa[i];
     while (left < right) {
       int mid = left + ((right - left + 1) >> 1);
-      int doc = gsa[mid];
-      if (doc <= curr) {
+      if (gsa[mid] < curr) {
         left = mid;
       } else {
         right = mid - 1;
       }
     }
-    da[i] = gsa[left] + 1;
+    da[i] = (left == -1) ? 0 : gsa[left] + 1;
   }
   for (int i = 0; i < locals.bytes; ++i) {
     printf("da[%d]=%d\n", i, da[i]);
