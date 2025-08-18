@@ -563,6 +563,43 @@ static bool setup_tag(const wchar_t *tag) {
   return true;
 }
 
+typedef struct Hash_Table_I32 {
+  int32_t *keys;
+  int32_t *values;
+  int32_t len;
+  int32_t a;
+  int32_t shift;
+  int32_t universe_len;
+} Hash_Table_I32;
+
+static Hash_Table_I32 *hash_table_i32(const int32_t *universe, int32_t universe_len) {
+  // universal integer hashing with 50% load factor,
+  // open addressing with linear probing
+  Hash_Table_I32 *table = malloc(sizeof(Hash_Table_I32));
+  int32_t len = 1;
+  while (len < universe_len * 2) {
+    len <<= 1;
+  }
+  table->shift = 32 - __builtin_clz(len - 1);
+  table->a = (rand() * 2) | 1;
+  table->keys = malloc(len * sizeof(int32_t));
+  table->values = malloc(len * sizeof(int32_t));
+  for (int32_t i = 0; i < len; ++i) {
+    table->keys[i] = -1;
+    table->values[i] = -1;
+  }
+  for (int32_t i = 0; i < universe_len; ++i) {
+    int32_t hash = (table->a * universe[i]) >> table->shift;
+    while (table->keys[hash] != -1) {
+      hash = (hash + 1) & (len - 1);
+    }
+    table->keys[hash] = universe[i];
+    table->values[hash] = i;
+  }
+  table->len = len;
+  return table;
+}
+
 static int **rmqa(const int32_t *a, const int32_t n) {
   // sparse table for range minimum query over a
   // NOTE: can remove space log factor with +-1 RMQ and indirection
@@ -647,7 +684,7 @@ static inline int lcps(const uint8_t *a, const uint8_t *b) {
   return a - start;
 }
 
-static void document_listing(const int32_t *gsa, const int32_t *lcp, int **m, int n, const uint8_t *pattern, int len, const int32_t *da, RMQPosition **m_da) {
+static void document_listing(const int32_t *gsa, const int32_t *lcp, int **m, int n, const uint8_t *pattern, int len, const int32_t *da, const int32_t *doc_positions) {
   int left = locals.doc_count;
   int right = n - 1;
   int l_lcp = lcps(pattern, locals.text + gsa[left]);
@@ -736,10 +773,15 @@ static void document_listing(const int32_t *gsa, const int32_t *lcp, int **m, in
   int r_bound = left;
   log_message(LOG_DEBUG, "documents", "Boundaries are [%d, %d] or [%s, %s]", l_bound, r_bound,
               locals.text + gsa[l_bound], locals.text + gsa[r_bound]);
+  Hash_Table_I32 *table = hash_table_i32(doc_positions, locals.doc_count);
+  // TODO: deduplicate
   for (int i = l_bound; i <= r_bound; ++i) {
-    printf("gsa[%3d] = %-25.25s (%3d)| (%3d) = %s\n", i, locals.text + gsa[i], gsa[i], da[i], locals.text + da[i]);
+    int32_t hash = (table->a * da[i]) >> table->shift;
+    while (table->keys[hash] != da[i]) {
+      hash = (hash + 1) & (table->len - 1);
+    }
+    printf("gsa[%3d] = %-25.25s (%3d)| (%3d) = %-30.30s id=%d\n", i, locals.text + gsa[i], gsa[i], da[i], locals.text + da[i], table->values[hash]);
   }
-  printf("%d\n", rmq_positional(m_da, l_bound, r_bound).value);
 }
 
 static bool setup_media_library(const cJSON *json) {
@@ -835,48 +877,34 @@ static bool setup_media_library(const cJSON *json) {
   if (m == NULL) {
     log_message(LOG_ERROR, "media_library", "Failed to build RMQ matrix");
   }
+  int32_t *doc_positions = malloc(locals.doc_count * sizeof(int32_t));
+  doc_positions[0] = 0;
+  for (int i = 0; i < locals.doc_count - 1; ++i) {
+    doc_positions[i + 1] = gsa[i] + 1;
+  }
   // document array where suffix at gsa[i]
   // has document (starting at) da[i] in text
   int32_t *da = malloc(locals.bytes * sizeof(int32_t));
-  int32_t *doc_runs = malloc(locals.bytes * sizeof(int32_t));
-  da[0] = 0;
-  doc_runs[0] = 0;
-  for (int i = 1; i < locals.doc_count; ++i) {
-    da[i] = gsa[i - 1] + 1;
-    doc_runs[i] = 0;
+  for (int i = 0; i < locals.doc_count; ++i) {
+    da[i] = doc_positions[i];
   }
   int32_t doc_run = 1;
   for (int i = locals.doc_count; i < locals.bytes; ++i) {
-    int left = -1;
+    int left = 0;
     int right = locals.doc_count - 1;
     int curr = gsa[i];
     while (left < right) {
       int mid = left + ((right - left + 1) >> 1);
-      if (gsa[mid] < curr) {
+      if (doc_positions[mid] < curr) {
         left = mid;
       } else {
         right = mid - 1;
       }
     }
-    da[i] = (left == -1) ? 0 : gsa[left] + 1;
-    doc_run--;
-    if (da[i] != da[i - 1]) {
-      doc_runs[i + doc_run] = doc_run ? -doc_run - 1 : 0;
-      doc_run = 0;
-    } else {
-      doc_runs[i] = doc_run; 
-    }
+    da[i] = doc_positions[left];
   }
-  if (doc_run) {
-    doc_runs[locals.bytes + doc_run - 1] = -doc_run;
-  }
-  for (int i = 0; i < locals.bytes; ++i) {
-    // printf("da[%d]=%d\n", i, da[i]);
-    printf("doc_runs[%d]=%d\n", i, doc_runs[i]);
-  }
-  RMQPosition **m_da = rmqa_positional(da, gsa, locals.bytes);
-  uint8_t pattern[] = "s";
-  document_listing(gsa, lcp, m, locals.bytes, pattern, strlen((const char *)pattern), da, m_da);
+  uint8_t pattern[] = "t";
+  document_listing(gsa, lcp, m, locals.bytes, pattern, strlen((const char *)pattern), da, doc_positions);
   return true;
 }
 
