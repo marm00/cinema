@@ -572,6 +572,8 @@ typedef struct Hash_Table_I32 {
   int32_t universe_len;
 } Hash_Table_I32;
 
+static int dedup_counter = 0;
+
 static Hash_Table_I32 *hash_table_i32(const int32_t *universe, int32_t universe_len) {
   // universal integer hashing with 50% load factor,
   // open addressing with linear probing
@@ -594,7 +596,6 @@ static Hash_Table_I32 *hash_table_i32(const int32_t *universe, int32_t universe_
       hash = (hash + 1) & (len - 1);
     }
     table->keys[hash] = universe[i];
-    table->values[hash] = i;
   }
   table->len = len;
   return table;
@@ -776,10 +777,14 @@ static void document_listing(const int32_t *gsa, const int32_t *lcp, int **m, in
   // TODO: deduplicate
   for (int i = l_bound; i <= r_bound; ++i) {
     int32_t hash = da[i];
-    int32_t key = table->keys[hash];
-    int32_t val = table->values[hash];
-    printf("gsa[%3d] = %-25.25s (%3d)| (%3d) = %-30.30s id=%d\n", i, locals.text + gsa[i], gsa[i], key, locals.text + key, val);
+    if (table->values[hash] != dedup_counter) {
+      table->values[hash] = dedup_counter;
+      int32_t key = table->keys[hash];
+      int32_t val = table->values[hash];
+      printf("gsa[%3d] = %-25.25s (%3d)| (%3d) = %-30.30s counter=%d\n", i, locals.text + gsa[i], gsa[i], key, locals.text + key, val);
+    }
   }
+  dedup_counter++;
 }
 
 static bool setup_media_library(const cJSON *json) {
@@ -907,7 +912,7 @@ static bool setup_media_library(const cJSON *json) {
     }
     da[i] = hash;
   }
-  uint8_t pattern[] = "t";
+  uint8_t pattern[] = "e";
   document_listing(gsa, lcp, m, locals.bytes, pattern, strlen((const char *)pattern), da, doc_positions, table);
   return true;
 }
