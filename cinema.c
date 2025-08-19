@@ -703,13 +703,18 @@ static void document_listing(const uint8_t *pattern, int pattern_len) {
   int right = locals.bytes - 1;
   int l_lcp = lcps(pattern, locals.text + gsa[left]);
   int r_lcp = lcps(pattern, locals.text + gsa[right]);
-  if (l_lcp < pattern_len && pattern[l_lcp] < locals.text[gsa[left] + l_lcp]) {
+  if (l_lcp < pattern_len &&
+      (locals.text[gsa[left] + l_lcp] == '\0' ||
+       pattern[l_lcp] < locals.text[gsa[left] + l_lcp])) {
     // pattern = abc, left = abd
     // l_lcp = 2, pattern_len = 3, 2 < 3
     // pattern[l_lcp] = c, text[left + l_lcp] = d, c < d
     log_message(LOG_DEBUG, "documents", "Pattern is smaller than first suffix");
     return;
-  } else if (r_lcp < pattern_len && pattern[r_lcp] > locals.text[gsa[right] + r_lcp]) {
+  }
+  if (r_lcp < pattern_len &&
+      locals.text[gsa[right] + r_lcp] != '\0' &&
+      pattern[r_lcp] > locals.text[gsa[right] + r_lcp]) {
     // pattern = abd, right = abc
     // r_lcp = 2, pattern_len = 3, 2 < 3
     // pattern[r_lcp] = d, text[right + r_lcp] = c, d > c
@@ -722,17 +727,15 @@ static void document_listing(const uint8_t *pattern, int pattern_len) {
   while (left < right) {
     int mid = left + ((right - left) >> 1);
     int m_lcp = 0;
-    if (l_lcp >= r_lcp) {
-      if (l_lcp == 0 || left >= mid) {
-        m_lcp = 0;
+    if (right - left > (1 << 5)) {
+      if (l_lcp >= r_lcp) {
+        if (l_lcp > 0 && left + 1 <= mid) {
+          m_lcp = min(l_lcp, rmq(lcp_matrix, left + 1, mid));
+        }
       } else {
-        m_lcp = min(l_lcp, rmq(lcp_matrix, left + 1, mid));
-      }
-    } else {
-      if (mid >= right) {
-        m_lcp = 0;
-      } else {
-        m_lcp = min(r_lcp, rmq(lcp_matrix, mid + 1, right));
+        if (r_lcp > 0 && mid + 1 <= right) {
+          m_lcp = min(r_lcp, rmq(lcp_matrix, mid + 1, right));
+        }
       }
     }
     int p_lcp = lcps(pattern + m_lcp, locals.text + gsa[mid] + m_lcp);
@@ -741,8 +744,10 @@ static void document_listing(const uint8_t *pattern, int pattern_len) {
       found = true;
       right = mid;
       r_lcp = t_lcp;
-    } else if (locals.text[gsa[mid] + t_lcp] == '\0' ||
-               pattern[t_lcp] < locals.text[gsa[mid] + t_lcp]) {
+    } else if (locals.text[gsa[mid] + t_lcp] == '\0') {
+      left = mid + 1;
+      l_lcp = t_lcp;
+    } else if (pattern[t_lcp] < locals.text[gsa[mid] + t_lcp]) {
       right = mid;
       r_lcp = t_lcp;
     } else {
@@ -755,23 +760,22 @@ static void document_listing(const uint8_t *pattern, int pattern_len) {
     return;
   }
   int l_bound = left;
+  int r_bound = left;
   right = tmp_right;
   l_lcp = pattern_len;
   r_lcp = tmp_r_lcp;
   while (left < right) {
     int mid = left + ((right - left + 1) >> 1);
     int m_lcp = 0;
-    if (l_lcp >= r_lcp) {
-      if (l_lcp == 0 || left >= mid) {
-        m_lcp = 0;
+    if (right - left > (1 << 5)) {
+      if (l_lcp >= r_lcp) {
+        if (l_lcp > 0 && left + 1 <= mid) {
+          m_lcp = min(l_lcp, rmq(lcp_matrix, left + 1, mid));
+        }
       } else {
-        m_lcp = min(l_lcp, rmq(lcp_matrix, left + 1, mid));
-      }
-    } else {
-      if (mid >= right) {
-        m_lcp = 0;
-      } else {
-        m_lcp = min(r_lcp, rmq(lcp_matrix, mid + 1, right));
+        if (r_lcp > 0 && mid + 1 <= right) {
+          m_lcp = min(r_lcp, rmq(lcp_matrix, mid + 1, right));
+        }
       }
     }
     int p_lcp = lcps(pattern + m_lcp, locals.text + gsa[mid] + m_lcp);
@@ -779,15 +783,18 @@ static void document_listing(const uint8_t *pattern, int pattern_len) {
     if (t_lcp == pattern_len) {
       left = mid;
       l_lcp = pattern_len;
+    } else if (locals.text[gsa[mid] + t_lcp] == '\0') {
+      right = mid - 1;
+      r_lcp = t_lcp;
     } else {
       right = mid - 1;
       r_lcp = t_lcp;
     }
+    r_bound = left;
   }
-  int r_bound = left;
   log_message(LOG_DEBUG, "documents", "Boundaries are [%d, %d] or [%s, %s]", l_bound, r_bound,
               locals.text + gsa[l_bound], locals.text + gsa[r_bound]);
-  static int dedup_counter = 0;
+  static int dedup_counter = 1;
   for (int i = l_bound; i <= r_bound; ++i) {
     int32_t doc = doc_ids[i];
     if (dedup_counters[doc] != dedup_counter) {
@@ -796,6 +803,10 @@ static void document_listing(const uint8_t *pattern, int pattern_len) {
     }
   }
   dedup_counter++;
+  if (dedup_counter == 0) {
+    memset(dedup_counters, 0, locals.doc_count * sizeof(dedup_counters[0]));
+    dedup_counter = 1;
+  }
 }
 
 static bool setup_locals(const cJSON *json) {
@@ -890,6 +901,7 @@ static bool setup_substring_search() {
   for (int i = 0; i < locals.doc_count; ++i) {
     doc_ids[i] = i;
   }
+  // TODO: slow with binary search for large locals
   for (int i = locals.doc_count; i < locals.bytes; ++i) {
     int left = 0;
     int right = locals.doc_count - 1;
