@@ -493,6 +493,7 @@ static int32_t *doc_positions = NULL;
 static int32_t *doc_ids = NULL;
 static int **lcp_matrix = NULL;
 static Hash_Table_I32 *doc_dedup = NULL;
+static int32_t *dedup_counters = NULL;
 
 static void locals_append(const char *utf8, int len) {
   // Geometric growth with clamp, based on 260 max path
@@ -788,12 +789,10 @@ static void document_listing(const uint8_t *pattern, int pattern_len) {
               locals.text + gsa[l_bound], locals.text + gsa[r_bound]);
   static int dedup_counter = 0;
   for (int i = l_bound; i <= r_bound; ++i) {
-    int32_t hash = doc_ids[i];
-    if (doc_dedup->values[hash] != dedup_counter) {
-      doc_dedup->values[hash] = dedup_counter;
-      int32_t key = doc_dedup->keys[hash];
-      int32_t val = doc_dedup->values[hash];
-      log_message(LOG_TRACE, "documents", "gsa[%3d] = %-25.25s (%3d)| (%3d) = %-30.30s counter=%d", i, locals.text + gsa[i], gsa[i], key, locals.text + key, val);
+    int32_t doc = doc_ids[i];
+    if (dedup_counters[doc] != dedup_counter) {
+      dedup_counters[doc] = dedup_counter;
+      log_message(LOG_TRACE, "documents", "gsa[%3d] = %-25.25s (%3d)| (%3d) = %-30.30s counter=%d", i, locals.text + gsa[i], gsa[i], doc, locals.text + doc_positions[doc], dedup_counter);
     }
   }
   dedup_counter++;
@@ -881,14 +880,15 @@ static bool setup_substring_search() {
     return false;
   }
   doc_positions = malloc(locals.doc_count * sizeof(int32_t));
+  dedup_counters = malloc(locals.doc_count * sizeof(int32_t));
   doc_positions[0] = 0;
   for (int i = 0; i < locals.doc_count - 1; ++i) {
     doc_positions[i + 1] = gsa[i] + 1;
+    dedup_counters[i] = -1;
   }
-  doc_dedup = hash_table_i32(doc_positions, locals.doc_count);
   doc_ids = malloc(locals.bytes_mul32);
   for (int i = 0; i < locals.doc_count; ++i) {
-    doc_ids[i] = hash_i32(doc_dedup, doc_positions[i]);
+    doc_ids[i] = i;
   }
   for (int i = locals.doc_count; i < locals.bytes; ++i) {
     int left = 0;
@@ -902,7 +902,7 @@ static bool setup_substring_search() {
         right = mid - 1;
       }
     }
-    doc_ids[i] = hash_i32(doc_dedup, doc_positions[left]);
+    doc_ids[i] = left;
   }
   return true;
 }
