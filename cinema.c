@@ -89,8 +89,8 @@ static const char *level_to_str(Log_Level level) {
   }
 }
 
-static Log_Level GLOBAL_LOG_LEVEL = LOG_TRACE;
-CRITICAL_SECTION log_lock;
+static const Log_Level GLOBAL_LOG_LEVEL = LOG_TRACE;
+static CRITICAL_SECTION log_lock;
 
 static void log_message(Log_Level level, const char *location, const char *message, ...) {
   EnterCriticalSection(&log_lock);
@@ -191,6 +191,134 @@ static void log_last_error(const char *location, const char *message, ...) {
   fprintf(stderr, " - Code %lu: %s", code, (char *)buffer);
   LocalFree(buffer);
   LeaveCriticalSection(&log_lock);
+}
+
+typedef struct Hash_Table_I32 {
+  int32_t *keys;
+  int32_t *values;
+  int32_t len;
+  int32_t a;
+  int32_t shift;
+  int32_t universe_len;
+} Hash_Table_I32;
+
+static Hash_Table_I32 *hash_table_i32(const int32_t *universe, int32_t universe_len) {
+  // universal integer hashing with 50% load factor,
+  // open addressing with linear probing
+  Hash_Table_I32 *table = malloc(sizeof(Hash_Table_I32));
+  int32_t len = 1;
+  while (len < universe_len * 2) {
+    len <<= 1;
+  }
+  table->shift = 32 - __builtin_clz(len - 1);
+  table->a = (rand() * 2) | 1;
+  table->keys = malloc(len * sizeof(int32_t));
+  table->values = malloc(len * sizeof(int32_t));
+  for (int32_t i = 0; i < len; ++i) {
+    table->keys[i] = -1;
+    table->values[i] = -1;
+  }
+  for (int32_t i = 0; i < universe_len; ++i) {
+    int32_t hash = (table->a * universe[i]) >> table->shift;
+    while (table->keys[hash] != -1) {
+      hash = (hash + 1) & (len - 1);
+    }
+    table->keys[hash] = universe[i];
+  }
+  table->len = len;
+  return table;
+}
+
+static int32_t hash_i32(const Hash_Table_I32 *table, const int32_t value) {
+  int32_t hash = (table->a * value) >> table->shift;
+  while (table->keys[hash] != value) {
+    hash = (hash + 1) & (table->len - 1);
+  }
+  return hash;
+}
+
+static int **rmqa(const int32_t *a, const int32_t n) {
+  // sparse table for range minimum query over a
+  // NOTE: can remove space log factor with +-1 RMQ and indirection
+  // but likely not worth in practice
+  int **m = malloc((size_t)n * sizeof(int *));
+  int log_n = 31 - __builtin_clz((unsigned int)n);
+  for (int i = 0; i < n; ++i) {
+    m[i] = malloc((size_t)log_n * sizeof(int));
+  }
+  for (int i = 0; i < n; ++i) {
+    m[i][0] = a[i];
+  }
+  for (int k = 1; k < log_n; ++k) {
+    for (int i = 0; i + (1 << k) - 1 < n; ++i) {
+      m[i][k] = min(m[i][k - 1], m[i + (1 << (k - 1))][k - 1]);
+    }
+  }
+  return m;
+}
+
+static int rmq(int **m, const int left, const int right) {
+  int length = right - left + 1;
+  int k = 31 - __builtin_clz((unsigned int)length);
+  int right_start = right - (1 << k) + 1;
+  return min(m[left][k], m[right_start][k]);
+}
+
+typedef struct RMQPosition {
+  int32_t value;
+  int32_t index;
+} RMQPosition;
+
+static RMQPosition **rmqa_positional(const int32_t *a, const int32_t *gsa, const int32_t n) {
+  RMQPosition **m = malloc((size_t)n * sizeof(RMQPosition *));
+  int log_n = 31 - __builtin_clz((unsigned int)n);
+  for (int i = 0; i < n; ++i) {
+    m[i] = malloc((size_t)log_n * sizeof(RMQPosition));
+  }
+  for (int i = 0; i < n; ++i) {
+    m[i][0] = (RMQPosition){.value = a[i], .index = i};
+  }
+  for (int k = 1; k < log_n; ++k) {
+    for (int i = 0; i + (1 << k) - 1 < n; ++i) {
+      RMQPosition left = m[i][k - 1];
+      RMQPosition right = m[i + (1 << (k - 1))][k - 1];
+      m[i][k] = left.value < right.value ? left : right;
+    }
+  }
+  return m;
+}
+
+static RMQPosition rmq_positional(RMQPosition **m, const int left, const int right) {
+  int length = right - left + 1;
+  int k = 31 - __builtin_clz((unsigned int)length);
+  int right_start = right - (1 << k) + 1;
+  RMQPosition min_left = m[left][k];
+  RMQPosition min_right = m[right_start][k];
+  return min_left.value < min_right.value ? min_left : min_right;
+}
+
+static int lcps(const uint8_t *a, const uint8_t *b) {
+  static const int CHUNK_SIZE = 1 << 3;
+  const uint8_t *start = a;
+  while ((((uintptr_t)a & 7) != 0 || ((uintptr_t)b & 7) != 0) &&
+         *a == *b && *a != '\0') {
+    a++;
+    b++;
+  }
+  while (((uintptr_t)a & 7) == 0 && ((uintptr_t)b & 7) == 0) {
+    uint64_t wa = *(const uint64_t *)a;
+    uint64_t wb = *(const uint64_t *)b;
+    if (wa != wb || (wa - 0x0101010101010101ULL) & (~wa & 0x8080808080808080ULL)) {
+      break;
+    }
+    a += CHUNK_SIZE;
+    b += CHUNK_SIZE;
+  }
+  while (*a == *b && *a != '\0') {
+    a++;
+    b++;
+  }
+  return a - start;
 }
 
 #define CIN_STRERROR_BYTES 95
@@ -343,7 +471,6 @@ static wchar_t *setup_wstring(const cJSON *json, const char *key, const wchar_t 
   }
   return result;
 }
-
 typedef struct Local_Collection {
   // Each byte represents a UTF-8 unit
   uint8_t *text;
@@ -351,6 +478,7 @@ typedef struct Local_Collection {
   // unsigned variants are pointless
   int32_t bytes;
   int32_t max_bytes;
+  size_t bytes_mul32;
   // Document boundaries are encapsulated in the GSA
   // because the lexicographical sort puts \0 entries
   // at the top; the first doc_count entries
@@ -359,6 +487,12 @@ typedef struct Local_Collection {
 } Local_Collection;
 
 static Local_Collection locals = {0};
+static int32_t *gsa = NULL;
+static int32_t *lcp = NULL;
+static int32_t *doc_positions = NULL;
+static int32_t *doc_ids = NULL;
+static int **lcp_matrix = NULL;
+static Hash_Table_I32 *doc_dedup = NULL;
 
 static void locals_append(const char *utf8, int len) {
   // Geometric growth with clamp, based on 260 max path
@@ -563,142 +697,20 @@ static bool setup_tag(const wchar_t *tag) {
   return true;
 }
 
-typedef struct Hash_Table_I32 {
-  int32_t *keys;
-  int32_t *values;
-  int32_t len;
-  int32_t a;
-  int32_t shift;
-  int32_t universe_len;
-} Hash_Table_I32;
-
-static int dedup_counter = 0;
-
-static Hash_Table_I32 *hash_table_i32(const int32_t *universe, int32_t universe_len) {
-  // universal integer hashing with 50% load factor,
-  // open addressing with linear probing
-  Hash_Table_I32 *table = malloc(sizeof(Hash_Table_I32));
-  int32_t len = 1;
-  while (len < universe_len * 2) {
-    len <<= 1;
-  }
-  table->shift = 32 - __builtin_clz(len - 1);
-  table->a = (rand() * 2) | 1;
-  table->keys = malloc(len * sizeof(int32_t));
-  table->values = malloc(len * sizeof(int32_t));
-  for (int32_t i = 0; i < len; ++i) {
-    table->keys[i] = -1;
-    table->values[i] = -1;
-  }
-  for (int32_t i = 0; i < universe_len; ++i) {
-    int32_t hash = (table->a * universe[i]) >> table->shift;
-    while (table->keys[hash] != -1) {
-      hash = (hash + 1) & (len - 1);
-    }
-    table->keys[hash] = universe[i];
-  }
-  table->len = len;
-  return table;
-}
-
-static int **rmqa(const int32_t *a, const int32_t n) {
-  // sparse table for range minimum query over a
-  // NOTE: can remove space log factor with +-1 RMQ and indirection
-  // but likely not worth in practice
-  int **m = malloc((size_t)n * sizeof(int *));
-  int log_n = 31 - __builtin_clz((unsigned int)n);
-  for (int i = 0; i < n; ++i) {
-    m[i] = malloc((size_t)log_n * sizeof(int));
-  }
-  for (int i = 0; i < n; ++i) {
-    m[i][0] = a[i];
-  }
-  for (int k = 1; k < log_n; ++k) {
-    for (int i = 0; i + (1 << k) - 1 < n; ++i) {
-      m[i][k] = min(m[i][k - 1], m[i + (1 << (k - 1))][k - 1]);
-    }
-  }
-  return m;
-}
-
-static int rmq(int **m, const int left, const int right) {
-  int length = right - left + 1;
-  int k = 31 - __builtin_clz((unsigned int)length);
-  int right_start = right - (1 << k) + 1;
-  return min(m[left][k], m[right_start][k]);
-}
-
-typedef struct RMQPosition {
-  int32_t value;
-  int32_t index;
-} RMQPosition;
-
-static RMQPosition **rmqa_positional(const int32_t *a, const int32_t *gsa, const int32_t n) {
-  RMQPosition **m = malloc((size_t)n * sizeof(RMQPosition *));
-  int log_n = 31 - __builtin_clz((unsigned int)n);
-  for (int i = 0; i < n; ++i) {
-    m[i] = malloc((size_t)log_n * sizeof(RMQPosition));
-  }
-  for (int i = 0; i < n; ++i) {
-    m[i][0] = (RMQPosition){.value = a[i], .index = i};
-  }
-  for (int k = 1; k < log_n; ++k) {
-    for (int i = 0; i + (1 << k) - 1 < n; ++i) {
-      RMQPosition left = m[i][k - 1];
-      RMQPosition right = m[i + (1 << (k - 1))][k - 1];
-      m[i][k] = left.value < right.value ? left : right;
-    }
-  }
-  return m;
-}
-
-static RMQPosition rmq_positional(RMQPosition **m, const int left, const int right) {
-  int length = right - left + 1;
-  int k = 31 - __builtin_clz((unsigned int)length);
-  int right_start = right - (1 << k) + 1;
-  RMQPosition min_left = m[left][k];
-  RMQPosition min_right = m[right_start][k];
-  return min_left.value < min_right.value ? min_left : min_right;
-}
-
-static inline int lcps(const uint8_t *a, const uint8_t *b) {
-  static const int CHUNK_SIZE = 1 << 3;
-  const uint8_t *start = a;
-  while ((((uintptr_t)a & 7) != 0 || ((uintptr_t)b & 7) != 0) &&
-         *a == *b && *a != '\0') {
-    a++;
-    b++;
-  }
-  while (((uintptr_t)a & 7) == 0 && ((uintptr_t)b & 7) == 0) {
-    uint64_t wa = *(const uint64_t *)a;
-    uint64_t wb = *(const uint64_t *)b;
-    if (wa != wb || (wa - 0x0101010101010101ULL) & (~wa & 0x8080808080808080ULL)) {
-      break;
-    }
-    a += CHUNK_SIZE;
-    b += CHUNK_SIZE;
-  }
-  while (*a == *b && *a != '\0') {
-    a++;
-    b++;
-  }
-  return a - start;
-}
-
-static void document_listing(const int32_t *gsa, const int32_t *lcp, int **m, int n, const uint8_t *pattern, int len, const int32_t *da, const int32_t *doc_positions, const Hash_Table_I32 *table) {
+static void document_listing(const uint8_t *pattern, int pattern_len) {
   int left = locals.doc_count;
-  int right = n - 1;
+  int right = locals.bytes - 1;
   int l_lcp = lcps(pattern, locals.text + gsa[left]);
   int r_lcp = lcps(pattern, locals.text + gsa[right]);
-  if (l_lcp < len && pattern[l_lcp] < locals.text[gsa[left] + l_lcp]) {
+  if (l_lcp < pattern_len && pattern[l_lcp] < locals.text[gsa[left] + l_lcp]) {
     // pattern = abc, left = abd
-    // l_lcp = 2, len = 3, 2 < 3
+    // l_lcp = 2, pattern_len = 3, 2 < 3
     // pattern[l_lcp] = c, text[left + l_lcp] = d, c < d
     log_message(LOG_DEBUG, "documents", "Pattern is smaller than first suffix");
     return;
-  } else if (r_lcp < len && pattern[r_lcp] > locals.text[gsa[right] + r_lcp]) {
+  } else if (r_lcp < pattern_len && pattern[r_lcp] > locals.text[gsa[right] + r_lcp]) {
     // pattern = abd, right = abc
-    // r_lcp = 2, len = 3, 2 < 3
+    // r_lcp = 2, pattern_len = 3, 2 < 3
     // pattern[r_lcp] = d, text[right + r_lcp] = c, d > c
     log_message(LOG_DEBUG, "documents", "Pattern is larger than last suffix");
     return;
@@ -713,18 +725,18 @@ static void document_listing(const int32_t *gsa, const int32_t *lcp, int **m, in
       if (l_lcp == 0 || left >= mid) {
         m_lcp = 0;
       } else {
-        m_lcp = min(l_lcp, rmq(m, left + 1, mid));
+        m_lcp = min(l_lcp, rmq(lcp_matrix, left + 1, mid));
       }
     } else {
       if (mid >= right) {
         m_lcp = 0;
       } else {
-        m_lcp = min(r_lcp, rmq(m, mid + 1, right));
+        m_lcp = min(r_lcp, rmq(lcp_matrix, mid + 1, right));
       }
     }
     int p_lcp = lcps(pattern + m_lcp, locals.text + gsa[mid] + m_lcp);
     int t_lcp = m_lcp + p_lcp;
-    if (t_lcp == len) {
+    if (t_lcp == pattern_len) {
       found = true;
       right = mid;
       r_lcp = t_lcp;
@@ -737,13 +749,13 @@ static void document_listing(const int32_t *gsa, const int32_t *lcp, int **m, in
       l_lcp = t_lcp;
     }
   }
-  if (!found && lcps(pattern, locals.text + gsa[left]) < len) {
+  if (!found && lcps(pattern, locals.text + gsa[left]) < pattern_len) {
     log_message(LOG_DEBUG, "documents", "No suffix has pattern as prefix");
     return;
   }
   int l_bound = left;
   right = tmp_right;
-  l_lcp = len;
+  l_lcp = pattern_len;
   r_lcp = tmp_r_lcp;
   while (left < right) {
     int mid = left + ((right - left + 1) >> 1);
@@ -752,20 +764,20 @@ static void document_listing(const int32_t *gsa, const int32_t *lcp, int **m, in
       if (l_lcp == 0 || left >= mid) {
         m_lcp = 0;
       } else {
-        m_lcp = min(l_lcp, rmq(m, left + 1, mid));
+        m_lcp = min(l_lcp, rmq(lcp_matrix, left + 1, mid));
       }
     } else {
       if (mid >= right) {
         m_lcp = 0;
       } else {
-        m_lcp = min(r_lcp, rmq(m, mid + 1, right));
+        m_lcp = min(r_lcp, rmq(lcp_matrix, mid + 1, right));
       }
     }
     int p_lcp = lcps(pattern + m_lcp, locals.text + gsa[mid] + m_lcp);
     int t_lcp = m_lcp + p_lcp;
-    if (t_lcp == len) {
+    if (t_lcp == pattern_len) {
       left = mid;
-      l_lcp = len;
+      l_lcp = pattern_len;
     } else {
       right = mid - 1;
       r_lcp = t_lcp;
@@ -774,20 +786,20 @@ static void document_listing(const int32_t *gsa, const int32_t *lcp, int **m, in
   int r_bound = left;
   log_message(LOG_DEBUG, "documents", "Boundaries are [%d, %d] or [%s, %s]", l_bound, r_bound,
               locals.text + gsa[l_bound], locals.text + gsa[r_bound]);
-  // TODO: deduplicate
+  static int dedup_counter = 0;
   for (int i = l_bound; i <= r_bound; ++i) {
-    int32_t hash = da[i];
-    if (table->values[hash] != dedup_counter) {
-      table->values[hash] = dedup_counter;
-      int32_t key = table->keys[hash];
-      int32_t val = table->values[hash];
-      printf("gsa[%3d] = %-25.25s (%3d)| (%3d) = %-30.30s counter=%d\n", i, locals.text + gsa[i], gsa[i], key, locals.text + key, val);
+    int32_t hash = doc_ids[i];
+    if (doc_dedup->values[hash] != dedup_counter) {
+      doc_dedup->values[hash] = dedup_counter;
+      int32_t key = doc_dedup->keys[hash];
+      int32_t val = doc_dedup->values[hash];
+      log_message(LOG_TRACE, "documents", "gsa[%3d] = %-25.25s (%3d)| (%3d) = %-30.30s counter=%d", i, locals.text + gsa[i], gsa[i], key, locals.text + key, val);
     }
   }
   dedup_counter++;
 }
 
-static bool setup_media_library(const cJSON *json) {
+static bool setup_locals(const cJSON *json) {
   // TODO: deduplicate while setting up
   cJSON *lib = cJSON_GetObjectItemCaseSensitive(json, "media_library");
   if (lib == NULL || !cJSON_IsArray(lib)) {
@@ -836,63 +848,47 @@ static bool setup_media_library(const cJSON *json) {
       locals.text = tight;
     }
     locals.max_bytes = locals.bytes;
+    locals.bytes_mul32 = locals.bytes * sizeof(int32_t);
   }
-  fprintf(stderr, "\n");
-  fprintf(stderr, "count=%d|capacity=%d\n", locals.bytes, locals.max_bytes);
-  for (int32_t i = 0; i < locals.bytes; ++i) {
-    fprintf(stderr, locals.text[i] ? "%c" : "\n", locals.text[i]);
-  }
-  fprintf(stderr, "\n");
-  // TODO: Binary search pattern P in text T
-  // With suffix array SA: O(|P| * log|T|)
-  //  and LCP information: O(|P| + log|T|)
-  // SA and (P)LCP construction with https://github.com/IlyaGrebnov/libsais
-  // TODO: might be better good way to handle surrogate pairs
-  int32_t *gsa = malloc((size_t)locals.bytes * sizeof(int32_t));
+  log_message(LOG_INFO, "media_library", "Setup media library with %d items (%d bytes)",
+              locals.doc_count, locals.bytes);
+  return true;
+}
+
+static bool setup_substring_search() {
+  gsa = malloc(locals.bytes_mul32);
   int result = libsais_gsa_omp(locals.text, gsa, locals.bytes, 0, NULL, 0);
   if (result != 0) {
     log_message(LOG_ERROR, "media_library", "Failed to build SA");
     return false;
   }
-  for (int i = 0; i < locals.bytes; i++) {
-    // log_message(LOG_TRACE, "libsais", "SA[%d] = %d (suffix: \"%s\")", i, gsa[i], locals.text + gsa[i]);
-  }
-  int32_t *plcp = malloc((size_t)locals.bytes * sizeof(int32_t));
+  int32_t *plcp = malloc(locals.bytes_mul32);
   result = libsais_plcp_gsa_omp(locals.text, gsa, plcp, locals.bytes, 0);
   if (result != 0) {
     log_message(LOG_ERROR, "media_library", "Failed to build PLCP array");
     return false;
   }
-  for (int i = 0; i < locals.bytes; i++) {
-    // log_message(LOG_TRACE, "libsais", "PLCP[%d] = %d", i, plcp[i]);
-  }
-  int32_t *lcp = malloc((size_t)locals.bytes * sizeof(int32_t));
+  lcp = malloc(locals.bytes_mul32);
   result = libsais_lcp_omp(plcp, gsa, lcp, locals.bytes, 0);
   if (result != 0) {
     log_message(LOG_ERROR, "media_library", "Failed to build LCP array");
     return false;
   }
   free(plcp);
-  for (int i = 0; i < locals.bytes; i++) {
-    // log_message(LOG_TRACE, "libsais", "LCP[%d] = %d", i, lcp[i]);
-  }
-  int **m = rmqa(lcp, locals.bytes);
-  if (m == NULL) {
+  lcp_matrix = rmqa(lcp, locals.bytes);
+  if (lcp_matrix == NULL) {
     log_message(LOG_ERROR, "media_library", "Failed to build RMQ matrix");
+    return false;
   }
-  int32_t *doc_positions = malloc(locals.doc_count * sizeof(int32_t));
+  doc_positions = malloc(locals.doc_count * sizeof(int32_t));
   doc_positions[0] = 0;
   for (int i = 0; i < locals.doc_count - 1; ++i) {
     doc_positions[i + 1] = gsa[i] + 1;
   }
-  Hash_Table_I32 *table = hash_table_i32(doc_positions, locals.doc_count);
-  int32_t *da = malloc(locals.bytes * sizeof(int32_t));
+  doc_dedup = hash_table_i32(doc_positions, locals.doc_count);
+  doc_ids = malloc(locals.bytes_mul32);
   for (int i = 0; i < locals.doc_count; ++i) {
-    int32_t hash = (table->a * doc_positions[i]) >> table->shift;
-    while (table->keys[hash] != doc_positions[i]) {
-      hash = (hash + 1) & (table->len - 1);
-    }
-    da[i] = hash;
+    doc_ids[i] = hash_i32(doc_dedup, doc_positions[i]);
   }
   for (int i = locals.doc_count; i < locals.bytes; ++i) {
     int left = 0;
@@ -906,14 +902,8 @@ static bool setup_media_library(const cJSON *json) {
         right = mid - 1;
       }
     }
-    int32_t hash = (table->a * doc_positions[left]) >> table->shift;
-    while (table->keys[hash] != doc_positions[left]) {
-      hash = (hash + 1) & (table->len - 1);
-    }
-    da[i] = hash;
+    doc_ids[i] = hash_i32(doc_dedup, doc_positions[left]);
   }
-  uint8_t pattern[] = "e";
-  document_listing(gsa, lcp, m, locals.bytes, pattern, strlen((const char *)pattern), da, doc_positions, table);
   return true;
 }
 
@@ -977,7 +967,7 @@ typedef struct Pending_Writes {
   size_t capacity;
 } Pending_Writes;
 
-typedef struct {
+typedef struct Instance {
   // NOTE: currently, we use a single overlapped read per instance
   // (unlike multiple writes). This could lead to gaps in incoming
   // data if the OS buffer does not preserve it fully for the next
@@ -1307,7 +1297,10 @@ int main(int argc, char **argv) {
     // log_message(LOG_INFO, "main", string);
   }
 
-  setup_media_library(json);
+  setup_locals(json);
+  setup_substring_search();
+  uint8_t pattern[] = "e";
+  document_listing(pattern, strlen((const char *)pattern));
   return 0;
 
   wchar_t *name = setup_wstring(json, "path", NULL);
