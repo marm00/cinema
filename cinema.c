@@ -918,7 +918,11 @@ static bool setup_substring_search(void) {
   for (int i = 0; i < locals.doc_count; ++i) {
     doc_ids[i] = i;
   }
-  // TODO: slow with binary search for large locals
+  // TODO: probably faster approach than binary search,
+  // althought with omp it is extremely fast anyways
+#if defined(CIN_OPENMP)
+#pragma omp parallel for if (locals.bytes >= (1 << 16))
+#endif
   for (int i = locals.doc_count; i < locals.bytes; ++i) {
     int left = 0;
     int right = locals.doc_count - 1;
