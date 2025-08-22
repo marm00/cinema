@@ -248,6 +248,9 @@ static int **rmqa(const int *a, const int n) {
     m[i] = data + i * log_n;
     m[i][0] = a[i];
   }
+#if defined(CIN_OPENMP)
+  #pragma omp parallel for if(n >= (1 << 16))
+#endif
   for (int k = 1; k < log_n; ++k) {
     int step = 1 << (k - 1);
     int limit = n - (1 << k) + 1;
