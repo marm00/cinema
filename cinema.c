@@ -94,10 +94,10 @@ static const Log_Level GLOBAL_LOG_LEVEL = LOG_TRACE;
 static CRITICAL_SECTION log_lock;
 
 static void log_message(Log_Level level, const char *location, const char *message, ...) {
-  EnterCriticalSection(&log_lock);
   if (level > GLOBAL_LOG_LEVEL) {
     return;
   }
+  EnterCriticalSection(&log_lock);
   // Process variadic args
   va_list args;
   va_start(args, message);
@@ -155,9 +155,10 @@ static int utf8_to_utf16_norm(const char *str, wchar_t *buf) {
 }
 
 static void log_wmessage(Log_Level level, const char *location, const wchar_t *wmessage, ...) {
-  EnterCriticalSection(&log_lock);
-  if (level > GLOBAL_LOG_LEVEL)
+  if (level > GLOBAL_LOG_LEVEL) {
     return;
+  }
+  EnterCriticalSection(&log_lock);
   va_list args;
   va_start(args, wmessage);
   wchar_t formatted_wmsg[MAX_LOG_MESSAGE];
@@ -1302,13 +1303,12 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
 }
 
 int main(int argc, char **argv) {
-  // TODO: check if critical_section is best
-  InitializeCriticalSectionAndSpinCount(&log_lock, 0);
 #ifndef _WIN32
   log_message(LOG_ERROR, "main", "Error: Your operating system is not supported, Windows-only currently.");
   return 1;
 #endif
-  SetConsoleOutputCP(CP_UTF8); // Enable UTF-8 console output for Windows
+  InitializeCriticalSectionAndSpinCount(&log_lock, 0);
+  SetConsoleOutputCP(CP_UTF8);
   char *config_filename = "config.json";
   cJSON *json = parse_json(config_filename);
   if (json == NULL) {
@@ -1320,7 +1320,6 @@ int main(int argc, char **argv) {
   } else {
     // log_message(LOG_INFO, "main", string);
   }
-
   setup_locals(json);
   setup_substring_search();
   uint8_t pattern[] = "test";
