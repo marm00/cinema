@@ -32,10 +32,11 @@
 #endif
 
 #include "cJSON.h"
-
-// TODO: conditional openmp include
-#define LIBSAIS_OPENMP 1
 #include "libsais.h"
+
+#if defined(CIN_OPENMP)
+  #include <omp.h>
+#endif
 
 // https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
 // A path can have 248 "characters" (260 - 12 = 248)
@@ -866,19 +867,31 @@ static bool setup_locals(const cJSON *json) {
 
 static bool setup_substring_search() {
   gsa = malloc(locals.bytes_mul32);
+#if defined(LIBSAIS_OPENMP)
   int result = libsais_gsa_omp(locals.text, gsa, locals.bytes, 0, NULL, 0);
+#else
+  int result = libsais_gsa(locals.text, gsa, locals.bytes, 0, NULL);
+#endif
   if (result != 0) {
     log_message(LOG_ERROR, "media_library", "Failed to build SA");
     return false;
   }
   int32_t *plcp = malloc(locals.bytes_mul32);
+#if defined(LIBSAIS_OPENMP)
   result = libsais_plcp_gsa_omp(locals.text, gsa, plcp, locals.bytes, 0);
+#else
+  result = libsais_plcp_gsa(locals.text, gsa, plcp, locals.bytes);
+#endif
   if (result != 0) {
     log_message(LOG_ERROR, "media_library", "Failed to build PLCP array");
     return false;
   }
   lcp = malloc(locals.bytes_mul32);
+#if defined(LIBSAIS_OPENMP)
   result = libsais_lcp_omp(plcp, gsa, lcp, locals.bytes, 0);
+#else
+  result = libsais_lcp(plcp, gsa, lcp, locals.bytes);
+#endif
   if (result != 0) {
     log_message(LOG_ERROR, "media_library", "Failed to build LCP array");
     return false;
