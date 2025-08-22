@@ -237,21 +237,20 @@ static int32_t hash_i32(const Hash_Table_I32 *table, const int32_t value) {
   return hash;
 }
 
-static int **rmqa(const int32_t *a, const int32_t n) {
+static int **rmqa(const int *a, const int n) {
   // sparse table for range minimum query over a
-  // NOTE: can remove space log factor with +-1 RMQ and indirection
-  // but likely not worth in practice
+  int log_n = 32 - __builtin_clz((unsigned int)(n - 1));
+  int *data = malloc((size_t)n * (size_t)log_n * sizeof(int));
   int **m = malloc((size_t)n * sizeof(int *));
-  int log_n = 31 - __builtin_clz((unsigned int)n);
   for (int i = 0; i < n; ++i) {
-    m[i] = malloc((size_t)log_n * sizeof(int));
-  }
-  for (int i = 0; i < n; ++i) {
+    m[i] = data + i * log_n;
     m[i][0] = a[i];
   }
   for (int k = 1; k < log_n; ++k) {
-    for (int i = 0; i + (1 << k) - 1 < n; ++i) {
-      m[i][k] = min(m[i][k - 1], m[i + (1 << (k - 1))][k - 1]);
+    int step = 1 << (k - 1);
+    int limit = n - (1 << k) + 1;
+    for (int i = 0; i < limit; ++i) {
+      m[i][k] = min(m[i][k - 1], m[i + step][k - 1]);
     }
   }
   return m;
@@ -799,7 +798,7 @@ static void document_listing(const uint8_t *pattern, int pattern_len) {
     int32_t doc = doc_ids[i];
     if (dedup_counters[doc] != dedup_counter) {
       dedup_counters[doc] = dedup_counter;
-      log_message(LOG_TRACE, "documents", "gsa[%3d] = %-25.25s (%3d)| (%3d) = %-30.30s counter=%d", i, locals.text + gsa[i], gsa[i], doc, locals.text + doc_positions[doc], dedup_counter);
+      log_message(LOG_TRACE, "documents", "gsa[%7d] = %-25.25s (%7d)| (%7d) = %-30.30s counter=%d", i, locals.text + gsa[i], gsa[i], doc, locals.text + doc_positions[doc], dedup_counter);
     }
   }
   dedup_counter++;
@@ -895,7 +894,7 @@ static bool setup_substring_search() {
   doc_positions[0] = 0;
   for (int i = 0; i < locals.doc_count - 1; ++i) {
     doc_positions[i + 1] = gsa[i] + 1;
-    dedup_counters[i] = -1;
+    dedup_counters[i] = 0;
   }
   doc_ids = malloc(locals.bytes_mul32);
   for (int i = 0; i < locals.doc_count; ++i) {
@@ -1311,7 +1310,7 @@ int main(int argc, char **argv) {
 
   setup_locals(json);
   setup_substring_search();
-  uint8_t pattern[] = "e";
+  uint8_t pattern[] = "test";
   document_listing(pattern, strlen((const char *)pattern));
   return 0;
 
