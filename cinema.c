@@ -495,7 +495,7 @@ static Local_Collection locals = {0};
 static int32_t *gsa = NULL;
 static int32_t *lcp = NULL;
 static int32_t *doc_positions = NULL;
-static int32_t *doc_ids = NULL;
+static int32_t *suffix_to_doc = NULL;
 static int **lcp_matrix = NULL;
 static int32_t *dedup_counters = NULL;
 
@@ -800,7 +800,7 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len) {
               locals.text + gsa[l_bound], locals.text + gsa[r_bound]);
   static int32_t dedup_counter = 1;
   for (int32_t i = l_bound; i <= r_bound; ++i) {
-    int32_t doc = doc_ids[i];
+    int32_t doc = suffix_to_doc[i];
     if (dedup_counters[doc] != dedup_counter) {
       dedup_counters[doc] = dedup_counter;
       log_message(LOG_TRACE, "documents", "gsa[%7d] = %-25.25s (%7d)| (%7d) = %-30.30s counter=%d", i, locals.text + gsa[i], gsa[i], doc, locals.text + doc_positions[doc], dedup_counter);
@@ -908,18 +908,18 @@ static bool setup_substring_search(void) {
     return false;
   }
   doc_positions = malloc(locals.doc_mul32);
+  suffix_to_doc = malloc(locals.bytes_mul32);
   dedup_counters = malloc(locals.doc_mul32);
   doc_positions[0] = 0;
-  for (int i = 0; i < locals.doc_count - 1; ++i) {
-    doc_positions[i + 1] = gsa[i] + 1;
+  suffix_to_doc[0] = 0;
+  dedup_counters[0] = 0;
+  for (int i = 1; i < locals.doc_count; ++i) {
+    doc_positions[i] = gsa[i - 1] + 1;
+    suffix_to_doc[i] = i;
     dedup_counters[i] = 0;
   }
-  doc_ids = malloc(locals.bytes_mul32);
-  for (int i = 0; i < locals.doc_count; ++i) {
-    doc_ids[i] = i;
-  }
-  // TODO: probably faster approach than binary search,
-  // althought with omp it is extremely fast anyways
+  // TODO: there is probably a faster approach than 
+  // binary search, but with omp it is very fast
 #if defined(CIN_OPENMP)
 #pragma omp parallel for if (locals.bytes >= (1 << 16))
 #endif
@@ -935,7 +935,7 @@ static bool setup_substring_search(void) {
         right = mid - 1;
       }
     }
-    doc_ids[i] = left;
+    suffix_to_doc[i] = left;
   }
   return true;
 }
