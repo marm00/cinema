@@ -496,7 +496,7 @@ static int32_t *gsa = NULL;
 static int32_t *lcp = NULL;
 static int32_t *suffix_to_doc = NULL;
 static int **lcp_matrix = NULL;
-static int32_t *dedup_counters = NULL;
+static uint16_t *dedup_counters = NULL;
 
 static void locals_append(const char *utf8, int len) {
   // Geometric growth with clamp, based on 260 max path
@@ -797,7 +797,7 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len) {
   }
   log_message(LOG_DEBUG, "documents", "Boundaries are [%d, %d] or [%s, %s]", l_bound, r_bound,
               locals.text + gsa[l_bound], locals.text + gsa[r_bound]);
-  static int32_t dedup_counter = 1;
+  static uint16_t dedup_counter = 1;
   for (int32_t i = l_bound; i <= r_bound; ++i) {
     int32_t doc = suffix_to_doc[i];
     if (dedup_counters[doc] != dedup_counter) {
@@ -807,7 +807,7 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len) {
   }
   dedup_counter++;
   if (dedup_counter == 0) {
-    memset(dedup_counters, 0, locals.doc_mul32);
+    memset(dedup_counters, 0, (size_t)locals.bytes * sizeof(uint16_t));
     dedup_counter = 1;
   }
 }
@@ -907,7 +907,7 @@ static bool setup_substring_search(void) {
     return false;
   }
   suffix_to_doc = malloc(locals.bytes_mul32);
-  dedup_counters = calloc((size_t)locals.bytes, sizeof(int32_t));
+  dedup_counters = calloc((size_t)locals.bytes, sizeof(uint16_t));
   suffix_to_doc[0] = 0;
   for (int32_t i = 1; i < locals.doc_count; ++i) {
     suffix_to_doc[i] = gsa[i - 1] + 1;
