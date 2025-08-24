@@ -495,7 +495,6 @@ static Local_Collection locals = {0};
 static int32_t *gsa = NULL;
 static int32_t *lcp = NULL;
 static int32_t *suffix_to_doc = NULL;
-static int **lcp_matrix = NULL;
 static uint16_t *dedup_counters = NULL;
 
 static void locals_append(const char *utf8, int len) {
@@ -729,20 +728,7 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len) {
   bool found = false;
   while (left < right) {
     int32_t mid = left + ((right - left) >> 1);
-    int32_t m_lcp = 0;
-    if (right - left > (1 << 5)) {
-      if (l_lcp >= r_lcp) {
-        if (l_lcp > 0 && left + 1 <= mid) {
-          m_lcp = min(l_lcp, rmq(lcp_matrix, left + 1, mid));
-        }
-      } else {
-        if (r_lcp > 0 && mid + 1 <= right) {
-          m_lcp = min(r_lcp, rmq(lcp_matrix, mid + 1, right));
-        }
-      }
-    }
-    int32_t p_lcp = lcps(pattern + m_lcp, locals.text + gsa[mid] + m_lcp);
-    int32_t t_lcp = m_lcp + p_lcp;
+    int32_t t_lcp = lcps(pattern, locals.text + gsa[mid]);
     if (t_lcp == pattern_len) {
       found = true;
       right = mid;
@@ -769,20 +755,7 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len) {
   r_lcp = tmp_r_lcp;
   while (left < right) {
     int32_t mid = left + ((right - left + 1) >> 1);
-    int32_t m_lcp = 0;
-    if (right - left > (1 << 5)) {
-      if (l_lcp >= r_lcp) {
-        if (l_lcp > 0 && left + 1 <= mid) {
-          m_lcp = min(l_lcp, rmq(lcp_matrix, left + 1, mid));
-        }
-      } else {
-        if (r_lcp > 0 && mid + 1 <= right) {
-          m_lcp = min(r_lcp, rmq(lcp_matrix, mid + 1, right));
-        }
-      }
-    }
-    int32_t p_lcp = lcps(pattern + m_lcp, locals.text + gsa[mid] + m_lcp);
-    int32_t t_lcp = m_lcp + p_lcp;
+    int32_t t_lcp = lcps(pattern, locals.text + gsa[mid]);
     if (t_lcp == pattern_len) {
       left = mid;
       l_lcp = pattern_len;
@@ -901,11 +874,6 @@ static bool setup_substring_search(void) {
     return false;
   }
   free(plcp);
-  lcp_matrix = rmqa(lcp, locals.bytes);
-  if (lcp_matrix == NULL) {
-    log_message(LOG_ERROR, "media_library", "Failed to build RMQ matrix");
-    return false;
-  }
   suffix_to_doc = malloc(locals.bytes_mul32);
   dedup_counters = calloc((size_t)locals.bytes, sizeof(uint16_t));
   suffix_to_doc[0] = 0;
