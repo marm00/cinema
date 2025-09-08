@@ -1082,6 +1082,7 @@ end:
 }
 
 static bool overlap_write(Instance *instance, cJSON *command) {
+  // TODO: dont use cjson, use static buffer
   log_message(LOG_TRACE, "write", "Initializing write on PID %lu", instance->pi.dwProcessId);
   char *command_str = cJSON_PrintUnformatted(command);
   cJSON_Delete(command);
@@ -1278,7 +1279,6 @@ int main(int argc, char **argv) {
   return 1;
 #endif
   InitializeCriticalSectionAndSpinCount(&log_lock, 0);
-  SetConsoleOutputCP(CP_UTF8);
   char *config_filename = "config.json";
   cJSON *json = parse_json(config_filename);
   if (json == NULL) {
@@ -1293,7 +1293,44 @@ int main(int argc, char **argv) {
   setup_locals(json);
   setup_substring_search();
   uint8_t pattern[] = "test";
-  document_listing(pattern, (int32_t)strlen((const char *)pattern));
+  // document_listing(pattern, (int32_t)strlen((const char *)pattern));
+
+  if (!SetConsoleCP(CP_UTF8)) {
+    log_last_error("input", "Failed to set console code page");
+    return 1;
+  }
+  if (!SetConsoleOutputCP(CP_UTF8)) {
+    log_last_error("input", "Failed to set console output code page");
+    return 1;
+  }
+  HANDLE console = GetStdHandle(STD_INPUT_HANDLE);
+  if (console == INVALID_HANDLE_VALUE) {
+    log_last_error("input", "Failed to get stdin handle");
+    return 1;
+  }
+  DWORD mode;
+  if (!GetConsoleMode(console, &mode)) {
+    log_last_error("input", "Failed to get console mode");
+    return 1;
+  }
+  if (!SetConsoleMode(console, mode | ENABLE_PROCESSED_INPUT  | ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING)) {
+    log_last_error("input", "Failed to set console mode");
+    return 1;
+  }
+  DWORD read;
+  INPUT_RECORD input;
+  for (;;) {
+    if (!ReadConsoleInputW(console, &input, 1, &read)) {
+      log_last_error("input", "Failed to read console input");
+    }
+    if (input.EventType == KEY_EVENT && !input.Event.KeyEvent.bKeyDown) {
+      wprintf(L"char=%zu, v=%zu\n", input.Event.KeyEvent.uChar, input.Event.KeyEvent.wVirtualKeyCode);
+    }
+  }
+  if (!SetConsoleMode(console, mode)) {
+    log_last_error("input", "Failed to reset console mode");
+    return 1;
+  }
   return 0;
 
   wchar_t *name = setup_wstring(json, "path", NULL);
