@@ -1313,6 +1313,11 @@ int main(int argc, char **argv) {
     log_last_error("input", "Failed to set console output code page");
     return 1;
   }
+  HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+  if (out == INVALID_HANDLE_VALUE) {
+    log_last_error("input", "Failed to get stdin handle");
+    return 1;
+  }
   HANDLE console = GetStdHandle(STD_INPUT_HANDLE);
   if (console == INVALID_HANDLE_VALUE) {
     log_last_error("input", "Failed to get stdin handle");
@@ -1376,11 +1381,16 @@ int main(int argc, char **argv) {
       break;
     case CIN_ESCAPE:
       printf("CIN_ESCAPE=");
+      cursor = input_len = 0;
       break;
     case CIN_NUL:
       switch (vk) {
       case VK_DELETE:
         printf("VK_DELETE=");
+        if (cursor < input_len) {
+          memmove(&input_buf[cursor], &input_buf[cursor + 1], (input_len - cursor) * sizeof(wchar_t));
+          input_len--;
+        }
         break;
       case VK_LEFT:
         if (cursor) {
@@ -1431,6 +1441,8 @@ int main(int argc, char **argv) {
       log_message(LOG_ERROR, "input", "Non key event");
       return 1;
     }
+    // TODO: writeconsoleoutputw
+    WriteConsoleW(out, input_buf, input_len, NULL, NULL);
   }
   if (!SetConsoleMode(console, mode)) {
     log_last_error("input", "Failed to reset console mode");
