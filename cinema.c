@@ -1273,6 +1273,12 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
   return 0;
 }
 
+#define CIN_NUL 0x00
+#define CIN_BACK 0x08
+#define CIN_ENTER 0x0D
+#define CIN_CONTROL_BACK 0x17
+#define CIN_ESCAPE 0x1B
+
 int main(int argc, char **argv) {
 #ifndef _WIN32
   log_message(LOG_ERROR, "main", "Error: Your operating system is not supported, Windows-only currently.");
@@ -1313,18 +1319,54 @@ int main(int argc, char **argv) {
     log_last_error("input", "Failed to get console mode");
     return 1;
   }
-  if (!SetConsoleMode(console, mode | ENABLE_PROCESSED_INPUT  | ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING)) {
+  if (!SetConsoleMode(console, mode | ENABLE_PROCESSED_INPUT | ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING)) {
     log_last_error("input", "Failed to set console mode");
     return 1;
   }
   DWORD read;
   INPUT_RECORD input;
+  wchar_t c;
+  wchar_t vk;
   for (;;) {
     if (!ReadConsoleInputW(console, &input, 1, &read)) {
       log_last_error("input", "Failed to read console input");
+      return 1;
     }
-    if (input.EventType == KEY_EVENT && !input.Event.KeyEvent.bKeyDown) {
-      wprintf(L"char=%zu, v=%zu\n", input.Event.KeyEvent.uChar, input.Event.KeyEvent.wVirtualKeyCode);
+    c = input.Event.KeyEvent.uChar.UnicodeChar;
+    vk = input.Event.KeyEvent.wVirtualKeyCode;
+    if (input.Event.KeyEvent.bKeyDown) {
+      continue;
+    }
+    switch (c) {
+    case CIN_BACK:
+      printf("CIN_BACK=");
+      break;
+    case CIN_ENTER:
+      printf("CIN_ENTER=");
+      break;
+    case CIN_CONTROL_BACK:
+      printf("CIN_CONTROL_BACK=");
+      break;
+    case CIN_ESCAPE:
+      printf("CIN_ESCAPE=");
+      break;
+    case CIN_NUL:
+      switch (vk) {
+      case VK_DELETE:
+        printf("VK_DELETE=");
+        break;
+      default:
+        // Unsupported and/or control key release
+        continue;
+      }
+    default:
+      break;
+    }
+    if (input.EventType == KEY_EVENT) {
+      wprintf(L"char=%zu, v=%zu, down=%d\n", input.Event.KeyEvent.uChar.UnicodeChar, input.Event.KeyEvent.wVirtualKeyCode, input.Event.KeyEvent.bKeyDown);
+    } else {
+      log_message(LOG_ERROR, "input", "Non key event");
+      return 1;
     }
   }
   if (!SetConsoleMode(console, mode)) {
