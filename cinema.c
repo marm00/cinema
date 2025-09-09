@@ -1278,6 +1278,10 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
 #define CIN_ENTER 0x0D
 #define CIN_CONTROL_BACK 0x17
 #define CIN_ESCAPE 0x1B
+#define CIN_VK_0 0x30
+#define CIN_VK_9 0x39
+#define CIN_VK_A 0x41
+#define CIN_VK_Z 0x5A
 
 int main(int argc, char **argv) {
 #ifndef _WIN32
@@ -1327,6 +1331,9 @@ int main(int argc, char **argv) {
   INPUT_RECORD input;
   wchar_t c;
   wchar_t vk;
+  wchar_t input_buf[512];
+  int32_t cursor = 0;
+  int32_t input_len = 0;
   for (;;) {
     if (!ReadConsoleInputW(console, &input, 1, &read)) {
       log_last_error("input", "Failed to read console input");
@@ -1334,18 +1341,38 @@ int main(int argc, char **argv) {
     }
     c = input.Event.KeyEvent.uChar.UnicodeChar;
     vk = input.Event.KeyEvent.wVirtualKeyCode;
+    bool ctrl = input.Event.KeyEvent.dwControlKeyState & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED);
     if (input.Event.KeyEvent.bKeyDown) {
       continue;
     }
     switch (c) {
     case CIN_BACK:
       printf("CIN_BACK=");
+      if (cursor) {
+        memmove(&input_buf[cursor - 1], &input_buf[cursor], (input_len - cursor) * sizeof(wchar_t));
+        cursor--;
+        input_len--;
+      }
       break;
     case CIN_ENTER:
       printf("CIN_ENTER=");
+      cursor = input_len = 0;
       break;
     case CIN_CONTROL_BACK:
       printf("CIN_CONTROL_BACK=");
+      if (cursor) {
+        bool is_space = input_buf[cursor - 1] == VK_SPACE;
+        int32_t i = cursor - 1;
+        while (i && is_space == (input_buf[i - 1] == VK_SPACE)) {
+          --i;
+        }
+        if (i < cursor) {
+          int32_t diff = cursor - i;
+          memmove(&input_buf[i], &input_buf[cursor], (input_len - cursor) * sizeof(wchar_t));
+          input_len -= diff;
+          cursor = i;
+        }
+      }
       break;
     case CIN_ESCAPE:
       printf("CIN_ESCAPE=");
@@ -1355,11 +1382,47 @@ int main(int argc, char **argv) {
       case VK_DELETE:
         printf("VK_DELETE=");
         break;
+      case VK_LEFT:
+        if (cursor) {
+          if (ctrl) {
+            bool is_space = input_buf[--cursor] == VK_SPACE;
+            while (cursor && is_space == (input_buf[cursor - 1] == VK_SPACE)) {
+              cursor--;
+            }
+          } else {
+            cursor--;
+          }
+        }
+        break;
+      case VK_RIGHT:
+        if (cursor < input_len) {
+          if (ctrl) {
+            bool is_space = input_buf[++cursor] == VK_SPACE;
+            while (cursor < input_len && is_space == (input_buf[cursor + 1] == VK_SPACE)) {
+              ++cursor;
+            }
+          } else {
+            ++cursor;
+          }
+        }
+        break;
       default:
         // Unsupported and/or control key release
-        continue;
+        log_message(LOG_TRACE, "input", "c=%d, vk=%d", c, vk);
+        break;
       }
+      break;
     default:
+      if (vk >= CIN_VK_0 && vk <= CIN_VK_9) {
+        printf("numeric=");
+      } else if (vk >= CIN_VK_A && vk <= CIN_VK_Z) {
+        printf("alpha=");
+      }
+      if (cursor < input_len) {
+        memmove(&input_buf[cursor + 1], &input_buf[cursor], (input_len - cursor) * sizeof(wchar_t));
+      }
+      input_buf[cursor++] = vk;
+      input_len++;
       break;
     }
     if (input.EventType == KEY_EVENT) {
