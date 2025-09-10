@@ -1411,20 +1411,23 @@ int main(int argc, char **argv) {
       case VK_LEFT:
         if (cursor) {
           if (ctrl) {
-            bool is_space = input_buf[--cursor] == VK_SPACE;
-            while (cursor && is_space == (input_buf[cursor - 1] == VK_SPACE)) {
-              cursor--;
+            while (cursor && input_buf[--cursor] == VK_SPACE) {
+            }
+            while (cursor && input_buf[cursor - 1] != VK_SPACE) {
+              --cursor;
             }
           } else {
-            cursor--;
+            --cursor;
           }
         }
         break;
       case VK_RIGHT:
         if (cursor < input_len) {
           if (ctrl) {
-            bool is_space = input_buf[++cursor] == VK_SPACE;
-            while (cursor < input_len && is_space == (input_buf[++cursor] == VK_SPACE)) {
+            while (cursor < input_len && input_buf[cursor] != VK_SPACE) {
+              ++cursor;
+            }
+            while (cursor < input_len && input_buf[++cursor] == VK_SPACE) {
             }
           } else {
             ++cursor;
