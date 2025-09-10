@@ -1424,8 +1424,7 @@ int main(int argc, char **argv) {
         if (cursor < input_len) {
           if (ctrl) {
             bool is_space = input_buf[++cursor] == VK_SPACE;
-            while (cursor < input_len && is_space == (input_buf[cursor + 1] == VK_SPACE)) {
-              ++cursor;
+            while (cursor < input_len && is_space == (input_buf[++cursor] == VK_SPACE)) {
             }
           } else {
             ++cursor;
@@ -1458,8 +1457,10 @@ int main(int argc, char **argv) {
       return 1;
     }
     WriteConsoleW(console_out, input_buf, input_len, NULL, NULL);
-    // TODO: window resizing Y update, virtual terminal sequences for cursor instead
-    SetConsoleCursorPosition(console_out, (COORD){.X = cursor, .Y = console_cursor.Y});
+    // TODO: move/optimize
+    wchar_t buff_z[16];
+    int len = swprintf(buff_z, 16, L"\x1B[%dG", cursor + 1);
+    WriteConsoleW(console_out, buff_z, len, NULL, NULL);
   }
   if (!SetConsoleMode(console_in, console_mode_in)) {
     log_last_error("input", "Failed to reset in console mode");
