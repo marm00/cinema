@@ -1381,18 +1381,16 @@ int main(int argc, char **argv) {
       break;
     case CIN_CONTROL_BACK:
       printf("CIN_CONTROL_BACK=");
-      if (cursor) {
-        bool is_space = input_buf[cursor - 1] == VK_SPACE;
-        int32_t i = cursor - 1;
-        while (i && is_space == (input_buf[i - 1] == VK_SPACE)) {
-          --i;
-        }
-        if (i < cursor) {
-          int32_t diff = cursor - i;
-          memmove(&input_buf[i], &input_buf[cursor], (input_len - cursor) * sizeof(wchar_t));
-          input_len -= diff;
-          cursor = i;
-        }
+      int32_t i = cursor;
+      while (i && input_buf[--i] == VK_SPACE) {
+      }
+      while (i && input_buf[i - 1] != VK_SPACE) {
+        --i;
+      }
+      if (i < cursor) {
+        memmove(&input_buf[i], &input_buf[cursor], (input_len - cursor) * sizeof(wchar_t));
+        input_len -= (cursor - i);
+        cursor = i;
       }
       break;
     case CIN_ESCAPE:
