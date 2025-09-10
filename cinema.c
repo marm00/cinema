@@ -1313,37 +1313,53 @@ int main(int argc, char **argv) {
     log_last_error("input", "Failed to set console output code page");
     return 1;
   }
-  HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
-  if (out == INVALID_HANDLE_VALUE) {
+  HANDLE console_in = GetStdHandle(STD_INPUT_HANDLE);
+  if (console_in == INVALID_HANDLE_VALUE) {
     log_last_error("input", "Failed to get stdin handle");
     return 1;
   }
-  HANDLE console = GetStdHandle(STD_INPUT_HANDLE);
-  if (console == INVALID_HANDLE_VALUE) {
-    log_last_error("input", "Failed to get stdin handle");
+  DWORD console_mode_in;
+  if (!GetConsoleMode(console_in, &console_mode_in)) {
+    log_last_error("input", "Failed to get in console mode");
     return 1;
   }
-  DWORD mode;
-  if (!GetConsoleMode(console, &mode)) {
-    log_last_error("input", "Failed to get console mode");
+  if (!SetConsoleMode(console_in, console_mode_in | ENABLE_PROCESSED_INPUT)) {
+    log_last_error("input", "Failed to set in console mode");
     return 1;
   }
-  if (!SetConsoleMode(console, mode | ENABLE_PROCESSED_INPUT | ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING)) {
-    log_last_error("input", "Failed to set console mode");
+  HANDLE console_out = GetStdHandle(STD_OUTPUT_HANDLE);
+  if (console_out == INVALID_HANDLE_VALUE) {
+    log_last_error("input", "Failed to get stdout handle");
     return 1;
   }
-  DWORD read;
-  INPUT_RECORD input;
-  wchar_t c;
-  wchar_t vk;
+  DWORD console_mode_out;
+  if (!GetConsoleMode(console_out, &console_mode_out)) {
+    log_last_error("input", "Failed to get out console mode");
+    return 1;
+  }
+  if (!SetConsoleMode(console_out, console_mode_out | ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING | ENABLE_WRAP_AT_EOL_OUTPUT | DISABLE_NEWLINE_AUTO_RETURN)) {
+    log_last_error("input", "Failed to set out console mode");
+    return 1;
+  }
+  CONSOLE_SCREEN_BUFFER_INFO console_info = {0};
+  COORD console_cursor = {0};
+  DWORD read = 0;
+  INPUT_RECORD input = {0};
+  wchar_t c = 0;
+  wchar_t vk = 0;
   wchar_t input_buf[512];
   int32_t cursor = 0;
   int32_t input_len = 0;
   for (;;) {
-    if (!ReadConsoleInputW(console, &input, 1, &read)) {
+    if (!ReadConsoleInputW(console_in, &input, 1, &read)) {
       log_last_error("input", "Failed to read console input");
       return 1;
     }
+    if (!GetConsoleScreenBufferInfo(console_out, &console_info)) {
+      log_last_error("input", "Failed to get console screen buffer info");
+      return 1;
+    }
+    console_cursor = console_info.dwCursorPosition;
     c = input.Event.KeyEvent.uChar.UnicodeChar;
     vk = input.Event.KeyEvent.wVirtualKeyCode;
     bool ctrl = input.Event.KeyEvent.dwControlKeyState & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED);
@@ -1431,7 +1447,7 @@ int main(int argc, char **argv) {
       if (cursor < input_len) {
         memmove(&input_buf[cursor + 1], &input_buf[cursor], (input_len - cursor) * sizeof(wchar_t));
       }
-      input_buf[cursor++] = vk;
+      input_buf[cursor++] = c;
       input_len++;
       break;
     }
@@ -1441,11 +1457,16 @@ int main(int argc, char **argv) {
       log_message(LOG_ERROR, "input", "Non key event");
       return 1;
     }
-    // TODO: writeconsoleoutputw
-    WriteConsoleW(out, input_buf, input_len, NULL, NULL);
+    WriteConsoleW(console_out, input_buf, input_len, NULL, NULL);
+    // TODO: window resizing Y update, virtual terminal sequences for cursor instead
+    SetConsoleCursorPosition(console_out, (COORD){.X = cursor, .Y = console_cursor.Y});
   }
-  if (!SetConsoleMode(console, mode)) {
-    log_last_error("input", "Failed to reset console mode");
+  if (!SetConsoleMode(console_in, console_mode_in)) {
+    log_last_error("input", "Failed to reset in console mode");
+    return 1;
+  }
+  if (!SetConsoleMode(console_out, console_mode_out)) {
+    log_last_error("input", "Failed to reset out console mode");
     return 1;
   }
   return 0;
