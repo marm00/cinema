@@ -1278,10 +1278,15 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
 #define CIN_ENTER 0x0D
 #define CIN_CONTROL_BACK 0x17
 #define CIN_ESCAPE 0x1B
+#define CIN_SPACE 0x20
 #define CIN_VK_0 0x30
 #define CIN_VK_9 0x39
 #define CIN_VK_A 0x41
 #define CIN_VK_Z 0x5A
+
+// https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences
+#define ESC "\x1b"
+#define CSI "\x1b["
 
 int main(int argc, char **argv) {
 #ifndef _WIN32
@@ -1366,9 +1371,9 @@ int main(int argc, char **argv) {
     if (input.Event.KeyEvent.bKeyDown) {
       continue;
     }
+    bool is_dirty = true;
     switch (c) {
     case CIN_BACK:
-      printf("CIN_BACK=");
       if (cursor) {
         memmove(&input_buf[cursor - 1], &input_buf[cursor], (input_len - cursor) * sizeof(wchar_t));
         cursor--;
@@ -1376,15 +1381,13 @@ int main(int argc, char **argv) {
       }
       break;
     case CIN_ENTER:
-      printf("CIN_ENTER=");
       cursor = input_len = 0;
       break;
     case CIN_CONTROL_BACK:
-      printf("CIN_CONTROL_BACK=");
       int32_t i = cursor;
-      while (i && input_buf[--i] == VK_SPACE) {
+      while (i && input_buf[--i] == CIN_SPACE) {
       }
-      while (i && input_buf[i - 1] != VK_SPACE) {
+      while (i && input_buf[i - 1] != CIN_SPACE) {
         --i;
       }
       if (i < cursor) {
@@ -1394,24 +1397,23 @@ int main(int argc, char **argv) {
       }
       break;
     case CIN_ESCAPE:
-      printf("CIN_ESCAPE=");
       cursor = input_len = 0;
       break;
     case CIN_NUL:
       switch (vk) {
       case VK_DELETE:
-        printf("VK_DELETE=");
         if (cursor < input_len) {
           memmove(&input_buf[cursor], &input_buf[cursor + 1], (input_len - cursor) * sizeof(wchar_t));
           input_len--;
         }
         break;
       case VK_LEFT:
+        is_dirty = false;
         if (cursor) {
           if (ctrl) {
-            while (cursor && input_buf[--cursor] == VK_SPACE) {
+            while (cursor && input_buf[--cursor] == CIN_SPACE) {
             }
-            while (cursor && input_buf[cursor - 1] != VK_SPACE) {
+            while (cursor && input_buf[cursor - 1] != CIN_SPACE) {
               --cursor;
             }
           } else {
@@ -1420,12 +1422,13 @@ int main(int argc, char **argv) {
         }
         break;
       case VK_RIGHT:
+      is_dirty = false;
         if (cursor < input_len) {
           if (ctrl) {
-            while (cursor < input_len && input_buf[cursor] != VK_SPACE) {
+            while (cursor < input_len && input_buf[cursor] != CIN_SPACE) {
               ++cursor;
             }
-            while (cursor < input_len && input_buf[++cursor] == VK_SPACE) {
+            while (cursor < input_len && input_buf[++cursor] == CIN_SPACE) {
             }
           } else {
             ++cursor;
@@ -1434,15 +1437,14 @@ int main(int argc, char **argv) {
         break;
       default:
         // Unsupported and/or control key release
-        log_message(LOG_TRACE, "input", "c=%d, vk=%d", c, vk);
+        // log_message(LOG_TRACE, "input", "c=%d, vk=%d", c, vk);
+        // is_dirty = false;
         break;
       }
       break;
     default:
       if (vk >= CIN_VK_0 && vk <= CIN_VK_9) {
-        printf("numeric=");
       } else if (vk >= CIN_VK_A && vk <= CIN_VK_Z) {
-        printf("alpha=");
       }
       if (cursor < input_len) {
         memmove(&input_buf[cursor + 1], &input_buf[cursor], (input_len - cursor) * sizeof(wchar_t));
@@ -1452,16 +1454,19 @@ int main(int argc, char **argv) {
       break;
     }
     if (input.EventType == KEY_EVENT) {
-      wprintf(L"char=%zu, v=%zu, down=%d\n", input.Event.KeyEvent.uChar.UnicodeChar, input.Event.KeyEvent.wVirtualKeyCode, input.Event.KeyEvent.bKeyDown);
+      // wprintf(L"char=%zu, v=%zu, down=%d\n", input.Event.KeyEvent.uChar.UnicodeChar, input.Event.KeyEvent.wVirtualKeyCode, input.Event.KeyEvent.bKeyDown);
     } else {
       log_message(LOG_ERROR, "input", "Non key event");
       return 1;
     }
-    WriteConsoleW(console_out, input_buf, input_len, NULL, NULL);
-    // TODO: move/optimize
+    wchar_t *str = ESC L"[K";
     wchar_t buff_z[16];
-    int len = swprintf(buff_z, 16, L"\x1B[%dG", cursor + 1);
+    int len = swprintf(buff_z, 16, L"\x1B[%dG", max(cursor, 0));
     WriteConsoleW(console_out, buff_z, len, NULL, NULL);
+    if (is_dirty) {
+      WriteConsoleW(console_out, str, wcslen(str), NULL, NULL);
+      WriteConsoleW(console_out, input_buf + cursor - 1, input_len - cursor + 1, NULL, NULL);
+    }
   }
   if (!SetConsoleMode(console_in, console_mode_in)) {
     log_last_error("input", "Failed to reset in console mode");
