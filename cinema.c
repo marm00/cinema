@@ -1275,7 +1275,7 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
 #define CIN_NUL 0x00
 #define CIN_BACK 0x08
 #define CIN_ENTER 0x0D
-#define CIN_CONTROL_BACK 0x17
+#define CIN_CONTROL_BACK 0x7F
 #define CIN_ESCAPE 0x1B
 #define CIN_SPACE 0x20
 #define CIN_VK_0 0x30
@@ -1387,7 +1387,7 @@ int main(int argc, char **argv) {
   wchar_t c = 0;
   wchar_t vk = 0;
   Console_Message *msg = create_console_message();
-  size_t cursor = CM_PREFIX_LEN - 1;
+  size_t cursor = CM_PREFIX_LEN;
   size_t prev_count = 0;
   for (;;) {
     if (!ReadConsoleInputW(console_in, &input, 1, &read)) {
@@ -1402,7 +1402,7 @@ int main(int argc, char **argv) {
     c = input.Event.KeyEvent.uChar.UnicodeChar;
     vk = input.Event.KeyEvent.wVirtualKeyCode;
     bool ctrl = input.Event.KeyEvent.dwControlKeyState & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED);
-    if (input.Event.KeyEvent.bKeyDown) {
+    if (!input.Event.KeyEvent.bKeyDown) {
       continue;
     }
     bool is_dirty = true;
@@ -1438,7 +1438,7 @@ int main(int argc, char **argv) {
     case CIN_NUL:
       switch (vk) {
       case VK_DELETE:
-        if (cursor < msg->count) {
+        if (!ctrl && cursor < msg->count) {
           memmove(&msg->wchars[cursor], &msg->wchars[cursor + 1], (msg->count - cursor) * sizeof(wchar_t));
           msg->count--;
         }
