@@ -54,8 +54,7 @@
 #define CIN_MAX_PATH_BYTES MAX_PATH * 4
 #define CIN_MAX_WRITABLE_PATH MAX_PATH - 12
 #define CIN_MAX_WRITABLE_PATH_BYTES (MAX_PATH - 12) * 4
-// TODO: find better upper bound for command line
-#define COMMAND_LINE_LIMIT 32768
+#define COMMAND_PROMPT_LIMIT 8191
 #define MAX_LOG_MESSAGE 1024
 
 typedef struct {
@@ -977,8 +976,8 @@ typedef struct Instance {
 } Instance;
 
 static bool create_process(Instance *instance, const wchar_t *pipe_name, const wchar_t *file_name) {
-  static wchar_t command[COMMAND_LINE_LIMIT];
-  swprintf(command, COMMAND_LINE_LIMIT,
+  static wchar_t command[COMMAND_PROMPT_LIMIT];
+  swprintf(command, COMMAND_PROMPT_LIMIT,
            L"mpv"
            L" \"%ls\"" // filename
            L" --input-ipc-server=%ls",
@@ -1288,6 +1287,41 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
 #define ESC "\x1b"
 #define CSI "\x1b["
 
+typedef struct Console_Message {
+  struct Console_Message *next;
+  struct Console_Message *prev;
+  wchar_t *wchars;
+  size_t count;
+  size_t capacity;
+} Console_Message;
+
+static const wchar_t *CM_PREFIX = L"\r> ";
+static const size_t CM_PREFIX_LEN = (sizeof(&CM_PREFIX) / sizeof(wchar_t) - 1);
+// TODO: start at 256, do bounds checks, grow like da
+static const size_t CM_INITIAL_CAPACITY = 256 << 6;
+
+static Console_Message *create_console_message() {
+  Console_Message *msg = malloc(sizeof(Console_Message));
+  if (msg == NULL) {
+    log_message(LOG_ERROR, "create_console_message", "Failed to allocate memory for msg");
+    return NULL;
+  }
+  wchar_t *wchars = malloc(CM_INITIAL_CAPACITY * sizeof(wchar_t));
+  if (wchars == NULL) {
+    log_message(LOG_ERROR, "create_console_message", "Failed to allocate memory for wchars");
+    return NULL;
+  }
+  for (int i = 0; i < CM_PREFIX_LEN; ++i) {
+    wchars[i] = CM_PREFIX[i];
+  }
+  msg->next = NULL;
+  msg->prev = NULL;
+  msg->wchars = wchars;
+  msg->count = CM_PREFIX_LEN;
+  msg->capacity = CM_INITIAL_CAPACITY;
+  return msg;
+}
+
 int main(int argc, char **argv) {
 #ifndef _WIN32
   log_message(LOG_ERROR, "main", "Error: Your operating system is not supported, Windows-only currently.");
@@ -1352,9 +1386,9 @@ int main(int argc, char **argv) {
   INPUT_RECORD input = {0};
   wchar_t c = 0;
   wchar_t vk = 0;
-  wchar_t input_buf[512];
-  int32_t cursor = 0;
-  int32_t input_len = 0;
+  Console_Message *msg = create_console_message();
+  size_t cursor = CM_PREFIX_LEN - 1;
+  size_t prev_count = 0;
   for (;;) {
     if (!ReadConsoleInputW(console_in, &input, 1, &read)) {
       log_last_error("input", "Failed to read console input");
@@ -1374,46 +1408,48 @@ int main(int argc, char **argv) {
     bool is_dirty = true;
     switch (c) {
     case CIN_BACK:
-      if (cursor) {
-        memmove(&input_buf[cursor - 1], &input_buf[cursor], (input_len - cursor) * sizeof(wchar_t));
+      if (cursor > CM_PREFIX_LEN) {
+        memmove(&msg->wchars[cursor - 1], &msg->wchars[cursor], (msg->count - cursor) * sizeof(wchar_t));
         cursor--;
-        input_len--;
+        msg->count--;
       }
       break;
     case CIN_ENTER:
-      cursor = input_len = 0;
+      cursor = CM_PREFIX_LEN;
+      msg->count = CM_PREFIX_LEN;
       break;
     case CIN_CONTROL_BACK:
-      int32_t i = cursor;
-      while (i && input_buf[--i] == CIN_SPACE) {
+      size_t i = cursor;
+      while (i > CM_PREFIX_LEN && msg->wchars[--i] == CIN_SPACE) {
       }
-      while (i && input_buf[i - 1] != CIN_SPACE) {
+      while (i > CM_PREFIX_LEN && msg->wchars[i - 1] != CIN_SPACE) {
         --i;
       }
       if (i < cursor) {
-        memmove(&input_buf[i], &input_buf[cursor], (input_len - cursor) * sizeof(wchar_t));
-        input_len -= (cursor - i);
+        memmove(&msg->wchars[i], &msg->wchars[cursor], (msg->count - cursor) * sizeof(wchar_t));
+        msg->count -= (cursor - i);
         cursor = i;
       }
       break;
     case CIN_ESCAPE:
-      cursor = input_len = 0;
+      cursor = CM_PREFIX_LEN;
+      msg->count = CM_PREFIX_LEN;
       break;
     case CIN_NUL:
       switch (vk) {
       case VK_DELETE:
-        if (cursor < input_len) {
-          memmove(&input_buf[cursor], &input_buf[cursor + 1], (input_len - cursor) * sizeof(wchar_t));
-          input_len--;
+        if (cursor < msg->count) {
+          memmove(&msg->wchars[cursor], &msg->wchars[cursor + 1], (msg->count - cursor) * sizeof(wchar_t));
+          msg->count--;
         }
         break;
       case VK_LEFT:
         is_dirty = false;
-        if (cursor) {
+        if (cursor > CM_PREFIX_LEN) {
           if (ctrl) {
-            while (cursor && input_buf[--cursor] == CIN_SPACE) {
+            while (cursor > CM_PREFIX_LEN && msg->wchars[--cursor] == CIN_SPACE) {
             }
-            while (cursor && input_buf[cursor - 1] != CIN_SPACE) {
+            while (cursor > CM_PREFIX_LEN && msg->wchars[cursor - 1] != CIN_SPACE) {
               --cursor;
             }
           } else {
@@ -1422,13 +1458,13 @@ int main(int argc, char **argv) {
         }
         break;
       case VK_RIGHT:
-      is_dirty = false;
-        if (cursor < input_len) {
+        is_dirty = false;
+        if (cursor < msg->count) {
           if (ctrl) {
-            while (cursor < input_len && input_buf[cursor] != CIN_SPACE) {
+            while (cursor < msg->count && msg->wchars[cursor] != CIN_SPACE) {
               ++cursor;
             }
-            while (cursor < input_len && input_buf[++cursor] == CIN_SPACE) {
+            while (cursor < msg->count && msg->wchars[++cursor] == CIN_SPACE) {
             }
           } else {
             ++cursor;
@@ -1446,11 +1482,11 @@ int main(int argc, char **argv) {
       if (vk >= CIN_VK_0 && vk <= CIN_VK_9) {
       } else if (vk >= CIN_VK_A && vk <= CIN_VK_Z) {
       }
-      if (cursor < input_len) {
-        memmove(&input_buf[cursor + 1], &input_buf[cursor], (input_len - cursor) * sizeof(wchar_t));
+      if (cursor < msg->count) {
+        memmove(&msg->wchars[cursor + 1], &msg->wchars[cursor], (msg->count - cursor) * sizeof(wchar_t));
       }
-      input_buf[cursor++] = c;
-      input_len++;
+      msg->wchars[cursor++] = c;
+      msg->count++;
       break;
     }
     if (input.EventType == KEY_EVENT) {
@@ -1459,14 +1495,31 @@ int main(int argc, char **argv) {
       log_message(LOG_ERROR, "input", "Non key event");
       return 1;
     }
-    wchar_t *str = ESC L"[K";
-    wchar_t buff_z[16];
-    int len = swprintf(buff_z, 16, L"\x1B[%dG", max(cursor, 0));
-    WriteConsoleW(console_out, buff_z, len, NULL, NULL);
-    if (is_dirty) {
-      WriteConsoleW(console_out, str, wcslen(str), NULL, NULL);
-      WriteConsoleW(console_out, input_buf + cursor - 1, input_len - cursor + 1, NULL, NULL);
+    if (msg->count < prev_count) {
+      prev_count = msg->count;
+      msg->wchars[msg->count++] = L'\x1B';
+      msg->wchars[msg->count++] = L'[';
+      msg->wchars[msg->count++] = L'K';
+    } else {
+      prev_count = msg->count;
     }
+    msg->wchars[msg->count++] = L'\r';
+    msg->wchars[msg->count++] = L'\x1B';
+    msg->wchars[msg->count++] = L'[';
+    size_t x = cursor - 1;
+    size_t digits;
+    // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#cursor-positioning
+    // <n> cannot be larger than 32,767 (maximum short value) - 5 digits
+    msg->count += 5;
+    for (size_t i = 0; i < 5; ++i) {
+      msg->wchars[msg->count - i - 1] = L'0' + (x % 10);
+      if (x) {
+        x /= 10;
+      }
+    }
+    msg->wchars[msg->count++] = L'C';
+    WriteConsoleW(console_out, msg->wchars, msg->count, NULL, NULL);
+    msg->count = prev_count;
   }
   if (!SetConsoleMode(console_in, console_mode_in)) {
     log_last_error("input", "Failed to reset in console mode");
