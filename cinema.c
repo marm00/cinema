@@ -1406,79 +1406,78 @@ int main(int argc, char **argv) {
       continue;
     }
     bool is_dirty = true;
-    switch (c) {
-    case CIN_BACK:
+    switch (vk) {
+    case VK_BACK:
       if (cursor > CM_PREFIX_LEN) {
-        memmove(&msg->wchars[cursor - 1], &msg->wchars[cursor], (msg->count - cursor) * sizeof(wchar_t));
-        cursor--;
+        if (ctrl) {
+          size_t i = cursor;
+          while (i > CM_PREFIX_LEN && msg->wchars[--i] == CIN_SPACE) {
+          }
+          while (i > CM_PREFIX_LEN && msg->wchars[i - 1] != CIN_SPACE) {
+            --i;
+          }
+          if (i < cursor) {
+            memmove(&msg->wchars[i], &msg->wchars[cursor], (msg->count - cursor) * sizeof(wchar_t));
+            msg->count -= (cursor - i);
+            cursor = i;
+          }
+        } else {
+          memmove(&msg->wchars[cursor - 1], &msg->wchars[cursor], (msg->count - cursor) * sizeof(wchar_t));
+          cursor--;
+          msg->count--;
+        }
+      }
+      break;
+    case VK_RETURN:
+      cursor = CM_PREFIX_LEN;
+      msg->count = CM_PREFIX_LEN;
+      break;
+    case VK_ESCAPE:
+      cursor = CM_PREFIX_LEN;
+      msg->count = CM_PREFIX_LEN;
+      break;
+    case VK_DELETE:
+      if (!ctrl && cursor < msg->count) {
+        memmove(&msg->wchars[cursor], &msg->wchars[cursor + 1], (msg->count - cursor) * sizeof(wchar_t));
         msg->count--;
       }
       break;
-    case CIN_ENTER:
-      cursor = CM_PREFIX_LEN;
-      msg->count = CM_PREFIX_LEN;
+    case VK_UP:
       break;
-    case CIN_CONTROL_BACK:
-      size_t i = cursor;
-      while (i > CM_PREFIX_LEN && msg->wchars[--i] == CIN_SPACE) {
-      }
-      while (i > CM_PREFIX_LEN && msg->wchars[i - 1] != CIN_SPACE) {
-        --i;
-      }
-      if (i < cursor) {
-        memmove(&msg->wchars[i], &msg->wchars[cursor], (msg->count - cursor) * sizeof(wchar_t));
-        msg->count -= (cursor - i);
-        cursor = i;
-      }
+    case VK_DOWN:
       break;
-    case CIN_ESCAPE:
-      cursor = CM_PREFIX_LEN;
-      msg->count = CM_PREFIX_LEN;
-      break;
-    case CIN_NUL:
-      switch (vk) {
-      case VK_DELETE:
-        if (!ctrl && cursor < msg->count) {
-          memmove(&msg->wchars[cursor], &msg->wchars[cursor + 1], (msg->count - cursor) * sizeof(wchar_t));
-          msg->count--;
-        }
-        break;
-      case VK_LEFT:
-        is_dirty = false;
-        if (cursor > CM_PREFIX_LEN) {
-          if (ctrl) {
-            while (cursor > CM_PREFIX_LEN && msg->wchars[--cursor] == CIN_SPACE) {
-            }
-            while (cursor > CM_PREFIX_LEN && msg->wchars[cursor - 1] != CIN_SPACE) {
-              --cursor;
-            }
-          } else {
+    case VK_LEFT:
+      is_dirty = false;
+      if (cursor > CM_PREFIX_LEN) {
+        if (ctrl) {
+          while (cursor > CM_PREFIX_LEN && msg->wchars[--cursor] == CIN_SPACE) {
+          }
+          while (cursor > CM_PREFIX_LEN && msg->wchars[cursor - 1] != CIN_SPACE) {
             --cursor;
           }
+        } else {
+          --cursor;
         }
-        break;
-      case VK_RIGHT:
-        is_dirty = false;
-        if (cursor < msg->count) {
-          if (ctrl) {
-            while (cursor < msg->count && msg->wchars[cursor] != CIN_SPACE) {
-              ++cursor;
-            }
-            while (cursor < msg->count && msg->wchars[++cursor] == CIN_SPACE) {
-            }
-          } else {
+      }
+      break;
+    case VK_RIGHT:
+      is_dirty = false;
+      if (cursor < msg->count) {
+        if (ctrl) {
+          while (cursor < msg->count && msg->wchars[cursor] != CIN_SPACE) {
             ++cursor;
           }
+          while (cursor < msg->count && msg->wchars[++cursor] == CIN_SPACE) {
+          }
+        } else {
+          ++cursor;
         }
-        break;
-      default:
-        // Unsupported and/or control key release
-        // log_message(LOG_TRACE, "input", "c=%d, vk=%d", c, vk);
-        // is_dirty = false;
-        break;
       }
       break;
     default:
+      if (!c) {
+        continue;
+      }
       if (vk >= CIN_VK_0 && vk <= CIN_VK_9) {
       } else if (vk >= CIN_VK_A && vk <= CIN_VK_Z) {
       }
@@ -1490,10 +1489,9 @@ int main(int argc, char **argv) {
       break;
     }
     if (input.EventType == KEY_EVENT) {
-      // wprintf(L"char=%zu, v=%zu, down=%d\n", input.Event.KeyEvent.uChar.UnicodeChar, input.Event.KeyEvent.wVirtualKeyCode, input.Event.KeyEvent.bKeyDown);
+      // wprintf(L"\rchar=%zu, v=%zu, down=%d\r\n", input.Event.KeyEvent.uChar.UnicodeChar, input.Event.KeyEvent.wVirtualKeyCode, input.Event.KeyEvent.bKeyDown);
     } else {
-      log_message(LOG_ERROR, "input", "Non key event");
-      return 1;
+      log_message(LOG_ERROR, "input", "\rNon key event: 0x%.4x", input.EventType);
     }
     if (msg->count < prev_count) {
       prev_count = msg->count;
