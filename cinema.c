@@ -1387,6 +1387,7 @@ int main(int argc, char **argv) {
   wchar_t c = 0;
   wchar_t vk = 0;
   Console_Message *msg = create_console_message();
+  Console_Message *msg_tail = NULL;
   size_t cursor = CM_PREFIX_LEN;
   size_t prev_count = 0;
   for (;;) {
@@ -1417,18 +1418,27 @@ int main(int argc, char **argv) {
             --i;
           }
           if (i < cursor) {
-            memmove(&msg->wchars[i], &msg->wchars[cursor], (msg->count - cursor) * sizeof(wchar_t));
+            wmemmove(&msg->wchars[i], &msg->wchars[cursor], msg->count - cursor);
             msg->count -= (cursor - i);
             cursor = i;
           }
         } else {
-          memmove(&msg->wchars[cursor - 1], &msg->wchars[cursor], (msg->count - cursor) * sizeof(wchar_t));
+          wmemmove(&msg->wchars[cursor - 1], &msg->wchars[cursor], msg->count - cursor);
           cursor--;
           msg->count--;
         }
       }
       break;
     case VK_RETURN:
+      Console_Message *next = create_console_message();
+      if (msg_tail) {
+        msg_tail->next = msg;
+        msg->prev = msg_tail;
+      }
+      msg->next = NULL;
+      msg_tail = msg;
+      msg = next;
+      msg->prev = msg_tail;
       cursor = CM_PREFIX_LEN;
       msg->count = CM_PREFIX_LEN;
       break;
@@ -1438,13 +1448,35 @@ int main(int argc, char **argv) {
       break;
     case VK_DELETE:
       if (!ctrl && cursor < msg->count) {
-        memmove(&msg->wchars[cursor], &msg->wchars[cursor + 1], (msg->count - cursor) * sizeof(wchar_t));
+        wmemmove(&msg->wchars[cursor], &msg->wchars[cursor + 1], msg->count - cursor);
         msg->count--;
       }
       break;
     case VK_UP:
+      if (msg->prev) {
+        if (msg->capacity < msg->prev->capacity) {
+          // TODO: grow
+        }
+        msg->capacity = msg->prev->capacity;
+        msg->count = msg->prev->count;
+        wmemcpy(msg->wchars, msg->prev->wchars, msg->prev->count);
+        cursor = msg->count;
+        msg->next = msg->prev->next;
+        msg->prev = msg->prev->prev;
+      }
       break;
     case VK_DOWN:
+      if (msg->next) {
+        msg->capacity = msg->next->capacity;
+        msg->count = msg->next->count;
+        wmemcpy(msg->wchars, msg->next->wchars, msg->next->count);
+        msg->prev = msg->next->prev;
+        msg->next = msg->next->next;
+      } else {
+        msg->prev = msg_tail;
+        msg->count = CM_PREFIX_LEN;
+      }
+      cursor = msg->count;
       break;
     case VK_LEFT:
       is_dirty = false;
@@ -1482,7 +1514,7 @@ int main(int argc, char **argv) {
       } else if (vk >= CIN_VK_A && vk <= CIN_VK_Z) {
       }
       if (cursor < msg->count) {
-        memmove(&msg->wchars[cursor + 1], &msg->wchars[cursor], (msg->count - cursor) * sizeof(wchar_t));
+        wmemmove(&msg->wchars[cursor + 1], &msg->wchars[cursor], msg->count - cursor);
       }
       msg->wchars[cursor++] = c;
       msg->count++;
