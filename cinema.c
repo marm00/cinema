@@ -194,6 +194,50 @@ static void log_last_error(const char *location, const char *message, ...) {
   LeaveCriticalSection(&log_lock);
 }
 
+#define CIN_ARRAY_CAP 256
+#define CIN_ARRAY_GROWTH 2
+
+#define array_ensure_capacity(a, total)                                      \
+  do {                                                                       \
+    if ((total) > (a)->capacity) {                                           \
+      if (!(a)->capacity)                                                    \
+        (a)->capacity = CIN_ARRAY_CAP;                                       \
+      while ((total) > (a)->capacity)                                        \
+        (a)->capacity *= CIN_ARRAY_GROWTH;                                   \
+      (a)->items = realloc((a)->items, (a)->capacity * sizeof(*(a)->items)); \
+      assert((a)->items && "Memory limit exceeded");                         \
+    }                                                                        \
+  } while (0)
+
+#define array_reserve(a, n) array_ensure_capacity((a), (a)->count + (n))
+
+#define array_push(a, item)            \
+  do {                                 \
+    array_reserve((a), 1);             \
+    (a)->items[(a)->count++] = (item); \
+  } while (0)
+
+#define array_extend(a, b, n)                                        \
+  do {                                                               \
+    array_reserve((a), (n));                                         \
+    memcpy((a)->items + (a)->count, (b), (n) * sizeof(*(a)->items)); \
+    (a)->count += (n);                                               \
+  } while (0)
+
+#define wsarray_extend(a, s) array_extend((a), (s), wcslen((s)))
+
+#define array_grow(a, n)     \
+  do {                       \
+    array_reserve((a), (n)); \
+    (a)->count += (n);       \
+  } while (0)
+
+#define array_resize(a, total)           \
+  do {                                   \
+    array_ensure_capacity((a), (total)); \
+    (a)->count = (total);                \
+  } while (0)
+
 typedef struct Hash_Table_I32 {
   int32_t *keys;
   int32_t *values;
@@ -1290,35 +1334,29 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
 typedef struct Console_Message {
   struct Console_Message *next;
   struct Console_Message *prev;
-  wchar_t *wchars;
+  wchar_t *items;
   size_t count;
   size_t capacity;
 } Console_Message;
 
 static const wchar_t *CM_PREFIX = L"\r> ";
 static const size_t CM_PREFIX_LEN = (sizeof(&CM_PREFIX) / sizeof(wchar_t) - 1);
-// TODO: start at 256, do bounds checks, grow like da
-static const size_t CM_INITIAL_CAPACITY = 256 << 6;
+static const size_t CM_INIT_CAP = 256;
 
 static Console_Message *create_console_message() {
+  assert(CM_INIT_CAP > CM_PREFIX_LEN);
   Console_Message *msg = malloc(sizeof(Console_Message));
-  if (msg == NULL) {
-    log_message(LOG_ERROR, "create_console_message", "Failed to allocate memory for msg");
-    return NULL;
-  }
-  wchar_t *wchars = malloc(CM_INITIAL_CAPACITY * sizeof(wchar_t));
-  if (wchars == NULL) {
-    log_message(LOG_ERROR, "create_console_message", "Failed to allocate memory for wchars");
-    return NULL;
-  }
-  for (int i = 0; i < CM_PREFIX_LEN; ++i) {
-    wchars[i] = CM_PREFIX[i];
+  assert(msg);
+  wchar_t *items = malloc(CM_INIT_CAP * sizeof(wchar_t));
+  assert(items);
+  for (size_t i = 0; i < CM_PREFIX_LEN; ++i) {
+    items[i] = CM_PREFIX[i];
   }
   msg->next = NULL;
   msg->prev = NULL;
-  msg->wchars = wchars;
+  msg->items = items;
   msg->count = CM_PREFIX_LEN;
-  msg->capacity = CM_INITIAL_CAPACITY;
+  msg->capacity = CM_INIT_CAP;
   return msg;
 }
 
@@ -1412,33 +1450,42 @@ int main(int argc, char **argv) {
       if (cursor > CM_PREFIX_LEN) {
         if (ctrl) {
           size_t i = cursor;
-          while (i > CM_PREFIX_LEN && msg->wchars[--i] == CIN_SPACE) {
+          while (i > CM_PREFIX_LEN && msg->items[--i] == CIN_SPACE) {
           }
-          while (i > CM_PREFIX_LEN && msg->wchars[i - 1] != CIN_SPACE) {
+          while (i > CM_PREFIX_LEN && msg->items[i - 1] != CIN_SPACE) {
             --i;
           }
           if (i < cursor) {
-            wmemmove(&msg->wchars[i], &msg->wchars[cursor], msg->count - cursor);
+            wmemmove(&msg->items[i], &msg->items[cursor], msg->count - cursor);
             msg->count -= (cursor - i);
             cursor = i;
           }
         } else {
-          wmemmove(&msg->wchars[cursor - 1], &msg->wchars[cursor], msg->count - cursor);
+          wmemmove(&msg->items[cursor - 1], &msg->items[cursor], msg->count - cursor);
           cursor--;
           msg->count--;
         }
       }
       break;
     case VK_RETURN:
-      Console_Message *next = create_console_message();
-      if (msg_tail) {
-        msg_tail->next = msg;
+      // TODO: besides empty, also ignore duplicates
+      bool empty = true;
+      for (size_t i = CM_PREFIX_LEN; i < msg->count; ++i) {
+        if (msg->items[i] != CIN_SPACE) {
+          empty = false;
+          break;
+        }
+      }
+      if (!empty) {
+        if (msg_tail) {
+          msg_tail->next = msg;
+          msg->prev = msg_tail;
+        }
+        msg->next = NULL;
+        msg_tail = msg;
+        msg = create_console_message();
         msg->prev = msg_tail;
       }
-      msg->next = NULL;
-      msg_tail = msg;
-      msg = next;
-      msg->prev = msg_tail;
       cursor = CM_PREFIX_LEN;
       msg->count = CM_PREFIX_LEN;
       break;
@@ -1448,18 +1495,14 @@ int main(int argc, char **argv) {
       break;
     case VK_DELETE:
       if (!ctrl && cursor < msg->count) {
-        wmemmove(&msg->wchars[cursor], &msg->wchars[cursor + 1], msg->count - cursor);
+        wmemmove(&msg->items[cursor], &msg->items[cursor + 1], msg->count - cursor);
         msg->count--;
       }
       break;
     case VK_UP:
       if (msg->prev) {
-        if (msg->capacity < msg->prev->capacity) {
-          // TODO: grow
-        }
-        msg->capacity = msg->prev->capacity;
-        msg->count = msg->prev->count;
-        wmemcpy(msg->wchars, msg->prev->wchars, msg->prev->count);
+        array_resize(msg, msg->prev->count);
+        wmemcpy(msg->items, msg->prev->items, msg->prev->count);
         cursor = msg->count;
         msg->next = msg->prev->next;
         msg->prev = msg->prev->prev;
@@ -1469,7 +1512,7 @@ int main(int argc, char **argv) {
       if (msg->next) {
         msg->capacity = msg->next->capacity;
         msg->count = msg->next->count;
-        wmemcpy(msg->wchars, msg->next->wchars, msg->next->count);
+        wmemcpy(msg->items, msg->next->items, msg->next->count);
         msg->prev = msg->next->prev;
         msg->next = msg->next->next;
       } else {
@@ -1482,9 +1525,9 @@ int main(int argc, char **argv) {
       is_dirty = false;
       if (cursor > CM_PREFIX_LEN) {
         if (ctrl) {
-          while (cursor > CM_PREFIX_LEN && msg->wchars[--cursor] == CIN_SPACE) {
+          while (cursor > CM_PREFIX_LEN && msg->items[--cursor] == CIN_SPACE) {
           }
-          while (cursor > CM_PREFIX_LEN && msg->wchars[cursor - 1] != CIN_SPACE) {
+          while (cursor > CM_PREFIX_LEN && msg->items[cursor - 1] != CIN_SPACE) {
             --cursor;
           }
         } else {
@@ -1496,10 +1539,10 @@ int main(int argc, char **argv) {
       is_dirty = false;
       if (cursor < msg->count) {
         if (ctrl) {
-          while (cursor < msg->count && msg->wchars[cursor] != CIN_SPACE) {
+          while (cursor < msg->count && msg->items[cursor] != CIN_SPACE) {
             ++cursor;
           }
-          while (cursor < msg->count && msg->wchars[++cursor] == CIN_SPACE) {
+          while (cursor < msg->count && msg->items[++cursor] == CIN_SPACE) {
           }
         } else {
           ++cursor;
@@ -1508,15 +1551,18 @@ int main(int argc, char **argv) {
       break;
     default:
       if (!c) {
+        // likely modifier key (shift, ctrl)
         continue;
       }
       if (vk >= CIN_VK_0 && vk <= CIN_VK_9) {
       } else if (vk >= CIN_VK_A && vk <= CIN_VK_Z) {
       }
+      array_reserve(msg, 1);
       if (cursor < msg->count) {
-        wmemmove(&msg->wchars[cursor + 1], &msg->wchars[cursor], msg->count - cursor);
+        // insert inside line instead of at the end
+        wmemmove(&msg->items[cursor + 1], &msg->items[cursor], msg->count - cursor);
       }
-      msg->wchars[cursor++] = c;
+      msg->items[cursor++] = c;
       msg->count++;
       break;
     }
@@ -1527,28 +1573,24 @@ int main(int argc, char **argv) {
     }
     if (msg->count < prev_count) {
       prev_count = msg->count;
-      msg->wchars[msg->count++] = L'\x1B';
-      msg->wchars[msg->count++] = L'[';
-      msg->wchars[msg->count++] = L'K';
+      wsarray_extend(msg, L"\x1B[K");
     } else {
       prev_count = msg->count;
     }
-    msg->wchars[msg->count++] = L'\r';
-    msg->wchars[msg->count++] = L'\x1B';
-    msg->wchars[msg->count++] = L'[';
+    wsarray_extend(msg, L"\r\x1B[");
     size_t x = cursor - 1;
     size_t digits;
     // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#cursor-positioning
     // <n> cannot be larger than 32,767 (maximum short value) - 5 digits
-    msg->count += 5;
+    array_grow(msg, 5);
     for (size_t i = 0; i < 5; ++i) {
-      msg->wchars[msg->count - i - 1] = L'0' + (x % 10);
+      msg->items[msg->count - i - 1] = L'0' + (x % 10);
       if (x) {
         x /= 10;
       }
     }
-    msg->wchars[msg->count++] = L'C';
-    WriteConsoleW(console_out, msg->wchars, msg->count, NULL, NULL);
+    array_push(msg, L'C');
+    WriteConsoleW(console_out, msg->items, msg->count, NULL, NULL);
     msg->count = prev_count;
   }
   if (!SetConsoleMode(console_in, console_mode_in)) {
