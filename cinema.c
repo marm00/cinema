@@ -200,10 +200,8 @@ static void log_last_error(const char *location, const char *message, ...) {
 #define array_ensure_capacity(a, total)                                      \
   do {                                                                       \
     if ((total) > (a)->capacity) {                                           \
-      if (!(a)->capacity)                                                    \
-        (a)->capacity = CIN_ARRAY_CAP;                                       \
-      while ((total) > (a)->capacity)                                        \
-        (a)->capacity *= CIN_ARRAY_GROWTH;                                   \
+      if (!(a)->capacity) (a)->capacity = CIN_ARRAY_CAP;                     \
+      while ((total) > (a)->capacity) (a)->capacity *= CIN_ARRAY_GROWTH;     \
       (a)->items = realloc((a)->items, (a)->capacity * sizeof(*(a)->items)); \
       assert((a)->items && "Memory limit exceeded");                         \
     }                                                                        \
@@ -211,20 +209,11 @@ static void log_last_error(const char *location, const char *message, ...) {
 
 #define array_reserve(a, n) array_ensure_capacity((a), (a)->count + (n))
 
-#define array_push(a, item)            \
-  do {                                 \
-    array_reserve((a), 1);             \
-    (a)->items[(a)->count++] = (item); \
+#define array_resize(a, total)           \
+  do {                                   \
+    array_ensure_capacity((a), (total)); \
+    (a)->count = (total);                \
   } while (0)
-
-#define array_extend(a, b, n)                                        \
-  do {                                                               \
-    array_reserve((a), (n));                                         \
-    memcpy((a)->items + (a)->count, (b), (n) * sizeof(*(a)->items)); \
-    (a)->count += (n);                                               \
-  } while (0)
-
-#define wsarray_extend(a, s) array_extend((a), (s), wcslen((s)))
 
 #define array_grow(a, n)     \
   do {                       \
@@ -232,10 +221,43 @@ static void log_last_error(const char *location, const char *message, ...) {
     (a)->count += (n);       \
   } while (0)
 
-#define array_resize(a, total)           \
-  do {                                   \
-    array_ensure_capacity((a), (total)); \
-    (a)->count = (total);                \
+#define array_push(a, item)            \
+  do {                                 \
+    array_reserve((a), 1);             \
+    (a)->items[(a)->count++] = (item); \
+  } while (0)
+
+#define array_extend(a, new_items, n)                                        \
+  do {                                                                       \
+    array_reserve((a), (n));                                                 \
+    memcpy((a)->items + (a)->count, (new_items), (n) * sizeof(*(a)->items)); \
+    (a)->count += (n);                                                       \
+  } while (0)
+
+#define wsarray_extend(a, s) array_extend((a), (s), wcslen((s)))
+
+#define array_splice(a, i, new_items, n)                              \
+  do {                                                                \
+    assert((i) <= (a)->count);                                        \
+    array_reserve((a), (n));                                          \
+    memmove((a)->items + (i) + (n),                                   \
+            (a)->items + (i),                                         \
+            ((a)->count - (i)) * sizeof(*(a)->items));                \
+    memcpy((a)->items + (i), (new_items), (n) * sizeof(*(a)->items)); \
+    (a)->count += (n);                                                \
+  } while (0)
+
+#define array_insert_at(a, i, new_item)                  \
+  do {                                                   \
+    assert((i) <= (a)->count);                           \
+    array_reserve((a), 1);                               \
+    if ((i) < (a)->count) {                              \
+      memmove((a)->items + (i) + 1,                      \
+              (a)->items + (i),                          \
+              ((a)->count - (i)) * sizeof(*(a)->items)); \
+    }                                                    \
+    (a)->items[(i)] = (new_item);                        \
+    (a)->count++;                                        \
   } while (0)
 
 typedef struct Hash_Table_I32 {
@@ -1339,8 +1361,8 @@ typedef struct Console_Message {
   size_t capacity;
 } Console_Message;
 
-static const wchar_t *CM_PREFIX = L"\r> ";
-static const size_t CM_PREFIX_LEN = (sizeof(&CM_PREFIX) / sizeof(wchar_t) - 1);
+// TODO: change to found upper bound
+static const size_t CM_PREFIX_LEN = 64;
 static const size_t CM_INIT_CAP = 256;
 
 static Console_Message *create_console_message() {
@@ -1349,9 +1371,9 @@ static Console_Message *create_console_message() {
   assert(msg);
   wchar_t *items = malloc(CM_INIT_CAP * sizeof(wchar_t));
   assert(items);
-  for (size_t i = 0; i < CM_PREFIX_LEN; ++i) {
-    items[i] = CM_PREFIX[i];
-  }
+  // for (size_t i = 0; i < CM_PREFIX_LEN; ++i) {
+  //   items[i] = CM_PREFIX[i];
+  // }
   msg->next = NULL;
   msg->prev = NULL;
   msg->items = items;
@@ -1400,7 +1422,7 @@ int main(int argc, char **argv) {
     log_last_error("input", "Failed to get in console mode");
     return 1;
   }
-  if (!SetConsoleMode(console_in, console_mode_in | ENABLE_PROCESSED_INPUT)) {
+  if (!SetConsoleMode(console_in, console_mode_in | ENABLE_PROCESSED_INPUT | ENABLE_WINDOW_INPUT)) {
     log_last_error("input", "Failed to set in console mode");
     return 1;
   }
@@ -1428,6 +1450,9 @@ int main(int argc, char **argv) {
   Console_Message *msg_tail = NULL;
   size_t cursor = CM_PREFIX_LEN;
   size_t prev_count = 0;
+  int16_t console_width = 0;
+  wchar_t prefix[32];
+  size_t prefix_len = 0;
   for (;;) {
     if (!ReadConsoleInputW(console_in, &input, 1, &read)) {
       log_last_error("input", "Failed to read console input");
@@ -1444,7 +1469,20 @@ int main(int argc, char **argv) {
     if (!input.Event.KeyEvent.bKeyDown) {
       continue;
     }
-    bool is_dirty = true;
+    switch (input.EventType) {
+    case KEY_EVENT:
+      // wprintf(L"\rchar=%zu, v=%zu, down=%d\r\n", input.Event.KeyEvent.uChar.UnicodeChar, input.Event.KeyEvent.wVirtualKeyCode, input.Event.KeyEvent.bKeyDown);
+      break;
+    case FOCUS_EVENT:
+      break;
+    case WINDOW_BUFFER_SIZE_EVENT:
+      console_width = input.Event.WindowBufferSizeEvent.dwSize.X;
+      break;
+    default:
+      log_message(LOG_ERROR, "input", "\rUnsupported event: 0x%.4x", input.EventType);
+      break;
+    }
+    bool move_cursor = false;
     switch (vk) {
     case VK_BACK:
       if (cursor > CM_PREFIX_LEN) {
@@ -1522,7 +1560,7 @@ int main(int argc, char **argv) {
       cursor = msg->count;
       break;
     case VK_LEFT:
-      is_dirty = false;
+      move_cursor = true;
       if (cursor > CM_PREFIX_LEN) {
         if (ctrl) {
           while (cursor > CM_PREFIX_LEN && msg->items[--cursor] == CIN_SPACE) {
@@ -1536,7 +1574,7 @@ int main(int argc, char **argv) {
       }
       break;
     case VK_RIGHT:
-      is_dirty = false;
+      move_cursor = true;
       if (cursor < msg->count) {
         if (ctrl) {
           while (cursor < msg->count && msg->items[cursor] != CIN_SPACE) {
@@ -1556,7 +1594,11 @@ int main(int argc, char **argv) {
       }
       if (vk >= CIN_VK_0 && vk <= CIN_VK_9) {
       } else if (vk >= CIN_VK_A && vk <= CIN_VK_Z) {
+      } else {
+        // exit(1);
       }
+      // array_insert_at(msg, cursor, c);
+      // cursor++;
       array_reserve(msg, 1);
       if (cursor < msg->count) {
         // insert inside line instead of at the end
@@ -1566,32 +1608,32 @@ int main(int argc, char **argv) {
       msg->count++;
       break;
     }
-    if (input.EventType == KEY_EVENT) {
-      // wprintf(L"\rchar=%zu, v=%zu, down=%d\r\n", input.Event.KeyEvent.uChar.UnicodeChar, input.Event.KeyEvent.wVirtualKeyCode, input.Event.KeyEvent.bKeyDown);
-    } else {
-      log_message(LOG_ERROR, "input", "\rNon key event: 0x%.4x", input.EventType);
-    }
-    if (msg->count < prev_count) {
-      prev_count = msg->count;
-      wsarray_extend(msg, L"\x1B[K");
-    } else {
-      prev_count = msg->count;
-    }
-    wsarray_extend(msg, L"\r\x1B[");
-    size_t x = cursor - 1;
-    size_t digits;
-    // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#cursor-positioning
-    // <n> cannot be larger than 32,767 (maximum short value) - 5 digits
-    array_grow(msg, 5);
-    for (size_t i = 0; i < 5; ++i) {
-      msg->items[msg->count - i - 1] = L'0' + (x % 10);
-      if (x) {
+    int16_t needed_lines = (msg->count - CM_PREFIX_LEN - 1) / console_width;
+    size_t prefix_pointer = CM_PREFIX_LEN;
+    msg->items[--prefix_pointer] = L'\r';
+    if (needed_lines > 0) {
+      msg->items[--prefix_pointer] = L'A';
+      size_t x = needed_lines;
+      while (x) {
+        msg->items[--prefix_pointer] = L'0' + (x % 10);
         x /= 10;
       }
+      msg->items[--prefix_pointer] = L'[';
+      msg->items[--prefix_pointer] = L'\x1B';
     }
-    array_push(msg, L'C');
-    WriteConsoleW(console_out, msg->items, msg->count, NULL, NULL);
-    msg->count = prev_count;
+    assert(prefix_pointer >= 0 && prefix_pointer <= CM_PREFIX_LEN);
+    size_t original_count = msg->count;
+    if (msg->count < prev_count) {
+      wsarray_extend(msg, L"\x1B[J");
+    }
+    int16_t new_width = (original_count - CM_PREFIX_LEN);
+    int16_t end_col = new_width % console_width;
+    if (!end_col && new_width) {
+      wsarray_extend(msg, L" \b");
+    }
+    WriteConsoleW(console_out, msg->items + prefix_pointer, msg->count - prefix_pointer, NULL, NULL);
+    msg->count = original_count;
+    prev_count = original_count;
   }
   if (!SetConsoleMode(console_in, console_mode_in)) {
     log_last_error("input", "Failed to reset in console mode");
