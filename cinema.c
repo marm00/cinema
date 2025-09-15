@@ -38,6 +38,107 @@
 #include <omp.h>
 #endif
 
+typedef enum {
+  LOG_ERROR,
+  LOG_WARNING,
+  LOG_INFO,
+  LOG_DEBUG,
+  LOG_TRACE
+} Cin_Log_Level;
+
+static const Cin_Log_Level GLOBAL_LOG_LEVEL = LOG_TRACE;
+
+#define CIN_ARRAY_CAP 256
+#define CIN_ARRAY_GROWTH 2
+
+#define array_ensure_capacity(a, total)                                      \
+  do {                                                                       \
+    if ((total) > (a)->capacity) {                                           \
+      if (!(a)->capacity) (a)->capacity = CIN_ARRAY_CAP;                     \
+      while ((total) > (a)->capacity) (a)->capacity *= CIN_ARRAY_GROWTH;     \
+      (a)->items = realloc((a)->items, (a)->capacity * sizeof(*(a)->items)); \
+      assert((a)->items && "Memory limit exceeded");                         \
+    }                                                                        \
+  } while (0)
+
+#define array_reserve(a, n) array_ensure_capacity((a), (a)->count + (n))
+
+#define array_resize(a, total)           \
+  do {                                   \
+    array_ensure_capacity((a), (total)); \
+    (a)->count = (total);                \
+  } while (0)
+
+#define array_grow(a, n)     \
+  do {                       \
+    array_reserve((a), (n)); \
+    (a)->count += (n);       \
+  } while (0)
+
+#define array_push(a, item)            \
+  do {                                 \
+    array_reserve((a), 1);             \
+    (a)->items[(a)->count++] = (item); \
+  } while (0)
+
+#define array_extend(a, new_items, n)                                        \
+  do {                                                                       \
+    array_reserve((a), (n));                                                 \
+    memcpy((a)->items + (a)->count, (new_items), (n) * sizeof(*(a)->items)); \
+    (a)->count += (n);                                                       \
+  } while (0)
+
+#define warray_extend(a, new_items, n)                  \
+  do {                                                  \
+    array_reserve((a), (n));                            \
+    wmemcpy((a)->items + (a)->count, (new_items), (n)); \
+    (a)->count += (n);                                  \
+  } while (0)
+
+#define array_splice(a, i, new_items, n)                              \
+  do {                                                                \
+    assert((i) <= (a)->count);                                        \
+    array_reserve((a), (n));                                          \
+    memmove((a)->items + (i) + (n),                                   \
+            (a)->items + (i),                                         \
+            ((a)->count - (i)) * sizeof(*(a)->items));                \
+    memcpy((a)->items + (i), (new_items), (n) * sizeof(*(a)->items)); \
+    (a)->count += (n);                                                \
+  } while (0)
+
+#define warray_splice(a, i, new_items, n)                                 \
+  do {                                                                    \
+    assert((i) <= (a)->count);                                            \
+    array_reserve((a), (n));                                              \
+    wmemmove((a)->items + (i) + (n), (a)->items + (i), (a)->count - (i)); \
+    wmemcpy((a)->items + (i), (new_items), (n));                          \
+    (a)->count += (n);                                                    \
+  } while (0)
+
+#define array_insert(a, i, new_item)                     \
+  do {                                                   \
+    assert((i) <= (a)->count);                           \
+    array_reserve((a), 1);                               \
+    if ((i) < (a)->count) {                              \
+      memmove((a)->items + (i) + 1,                      \
+              (a)->items + (i),                          \
+              ((a)->count - (i)) * sizeof(*(a)->items)); \
+    }                                                    \
+    (a)->items[(i)] = (new_item);                        \
+    (a)->count++;                                        \
+  } while (0)
+
+#define warray_insert(a, i, new_item)                                     \
+  do {                                                                    \
+    assert((i) <= (a)->count);                                            \
+    array_reserve((a), 1);                                                \
+    if ((i) < (a)->count) {                                               \
+      wmemmove((a)->items + (i) + 1, (a)->items + (i), (a)->count - (i)); \
+    }                                                                     \
+    (a)->items[(i)] = (new_item);                                         \
+    (a)->count++;                                                         \
+  } while (0)
+
 // https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
 // A path can have 248 "characters" (260 - 12 = 248)
 // with 12 reserved for 8.3 file name.
@@ -54,25 +155,10 @@
 #define CIN_MAX_PATH_BYTES MAX_PATH * 4
 #define CIN_MAX_WRITABLE_PATH MAX_PATH - 12
 #define CIN_MAX_WRITABLE_PATH_BYTES (MAX_PATH - 12) * 4
-#define COMMAND_PROMPT_LIMIT 8191
-#define MAX_LOG_MESSAGE 1024
+#define CIN_COMMAND_PROMPT_LIMIT 8191
+#define CIN_MAX_LOG_MESSAGE 1024
 
-typedef struct {
-  int left;
-  int top;
-  int width;
-  int height;
-} Screen;
-
-typedef enum {
-  LOG_ERROR,
-  LOG_WARNING,
-  LOG_INFO,
-  LOG_DEBUG,
-  LOG_TRACE
-} Log_Level;
-
-static const char *level_to_str(Log_Level level) {
+static const char *level_to_str(Cin_Log_Level level) {
   switch (level) {
   case LOG_ERROR:
     return "ERROR";
@@ -88,11 +174,9 @@ static const char *level_to_str(Log_Level level) {
     return "LOG";
   }
 }
-
-static const Log_Level GLOBAL_LOG_LEVEL = LOG_TRACE;
 static CRITICAL_SECTION log_lock;
 
-static void log_message(Log_Level level, const char *location, const char *message, ...) {
+static void log_message(Cin_Log_Level level, const char *location, const char *message, ...) {
   if (level > GLOBAL_LOG_LEVEL) {
     return;
   }
@@ -153,15 +237,15 @@ static int utf8_to_utf16_norm(const char *str, wchar_t *buf) {
   return len;
 }
 
-static void log_wmessage(Log_Level level, const char *location, const wchar_t *wmessage, ...) {
+static void log_wmessage(Cin_Log_Level level, const char *location, const wchar_t *wmessage, ...) {
   if (level > GLOBAL_LOG_LEVEL) {
     return;
   }
   EnterCriticalSection(&log_lock);
   va_list args;
   va_start(args, wmessage);
-  wchar_t formatted_wmsg[MAX_LOG_MESSAGE];
-  vswprintf(formatted_wmsg, MAX_LOG_MESSAGE, wmessage, args);
+  wchar_t formatted_wmsg[CIN_MAX_LOG_MESSAGE];
+  vswprintf(formatted_wmsg, CIN_MAX_LOG_MESSAGE, wmessage, args);
   static char buf[CIN_MAX_PATH_BYTES];
   utf16_to_utf8(formatted_wmsg, buf, -1);
   fprintf(stderr, "[%s] [%s] %s\n", level_to_str(level), location, buf);
@@ -193,72 +277,6 @@ static void log_last_error(const char *location, const char *message, ...) {
   LocalFree(buffer);
   LeaveCriticalSection(&log_lock);
 }
-
-#define CIN_ARRAY_CAP 256
-#define CIN_ARRAY_GROWTH 2
-
-#define array_ensure_capacity(a, total)                                      \
-  do {                                                                       \
-    if ((total) > (a)->capacity) {                                           \
-      if (!(a)->capacity) (a)->capacity = CIN_ARRAY_CAP;                     \
-      while ((total) > (a)->capacity) (a)->capacity *= CIN_ARRAY_GROWTH;     \
-      (a)->items = realloc((a)->items, (a)->capacity * sizeof(*(a)->items)); \
-      assert((a)->items && "Memory limit exceeded");                         \
-    }                                                                        \
-  } while (0)
-
-#define array_reserve(a, n) array_ensure_capacity((a), (a)->count + (n))
-
-#define array_resize(a, total)           \
-  do {                                   \
-    array_ensure_capacity((a), (total)); \
-    (a)->count = (total);                \
-  } while (0)
-
-#define array_grow(a, n)     \
-  do {                       \
-    array_reserve((a), (n)); \
-    (a)->count += (n);       \
-  } while (0)
-
-#define array_push(a, item)            \
-  do {                                 \
-    array_reserve((a), 1);             \
-    (a)->items[(a)->count++] = (item); \
-  } while (0)
-
-#define array_extend(a, new_items, n)                                        \
-  do {                                                                       \
-    array_reserve((a), (n));                                                 \
-    memcpy((a)->items + (a)->count, (new_items), (n) * sizeof(*(a)->items)); \
-    (a)->count += (n);                                                       \
-  } while (0)
-
-#define wsarray_extend(a, s) array_extend((a), (s), wcslen((s)))
-
-#define array_splice(a, i, new_items, n)                              \
-  do {                                                                \
-    assert((i) <= (a)->count);                                        \
-    array_reserve((a), (n));                                          \
-    memmove((a)->items + (i) + (n),                                   \
-            (a)->items + (i),                                         \
-            ((a)->count - (i)) * sizeof(*(a)->items));                \
-    memcpy((a)->items + (i), (new_items), (n) * sizeof(*(a)->items)); \
-    (a)->count += (n);                                                \
-  } while (0)
-
-#define array_insert_at(a, i, new_item)                  \
-  do {                                                   \
-    assert((i) <= (a)->count);                           \
-    array_reserve((a), 1);                               \
-    if ((i) < (a)->count) {                              \
-      memmove((a)->items + (i) + 1,                      \
-              (a)->items + (i),                          \
-              ((a)->count - (i)) * sizeof(*(a)->items)); \
-    }                                                    \
-    (a)->items[(i)] = (new_item);                        \
-    (a)->count++;                                        \
-  } while (0)
 
 typedef struct Hash_Table_I32 {
   int32_t *keys;
@@ -1042,8 +1060,8 @@ typedef struct Instance {
 } Instance;
 
 static bool create_process(Instance *instance, const wchar_t *pipe_name, const wchar_t *file_name) {
-  static wchar_t command[COMMAND_PROMPT_LIMIT];
-  swprintf(command, COMMAND_PROMPT_LIMIT,
+  static wchar_t command[CIN_COMMAND_PROMPT_LIMIT];
+  swprintf(command, CIN_COMMAND_PROMPT_LIMIT,
            L"mpv"
            L" \"%ls\"" // filename
            L" --input-ipc-server=%ls",
@@ -1597,7 +1615,7 @@ int main(int argc, char **argv) {
       } else {
         // exit(1);
       }
-      // array_insert_at(msg, cursor, c);
+      // array_insert(msg, cursor, c);
       // cursor++;
       array_reserve(msg, 1);
       if (cursor < msg->count) {
@@ -1624,12 +1642,14 @@ int main(int argc, char **argv) {
     assert(prefix_pointer >= 0 && prefix_pointer <= CM_PREFIX_LEN);
     size_t original_count = msg->count;
     if (msg->count < prev_count) {
-      wsarray_extend(msg, L"\x1B[J");
+      wchar_t *tmp1 = L"\x1B[J";
+      warray_extend(msg, tmp1, wcslen(tmp1));
     }
     int16_t new_width = (original_count - CM_PREFIX_LEN);
     int16_t end_col = new_width % console_width;
     if (!end_col && new_width) {
-      wsarray_extend(msg, L" \b");
+      wchar_t *tmp2 = L" \b";
+      warray_extend(msg, tmp2, wcslen(tmp2));
     }
     WriteConsoleW(console_out, msg->items + prefix_pointer, msg->count - prefix_pointer, NULL, NULL);
     msg->count = original_count;
