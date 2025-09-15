@@ -1387,7 +1387,11 @@ static Console_Message *create_console_message() {
   assert(CM_INIT_CAP > CM_PREFIX_LEN);
   Console_Message *msg = malloc(sizeof(Console_Message));
   assert(msg);
+#if defined(NDEBUG)
   wchar_t *items = malloc(CM_INIT_CAP * sizeof(wchar_t));
+#else
+  wchar_t *items = calloc(CM_INIT_CAP, sizeof(wchar_t));
+#endif
   assert(items);
   // for (size_t i = 0; i < CM_PREFIX_LEN; ++i) {
   //   items[i] = CM_PREFIX[i];
@@ -1471,6 +1475,12 @@ int main(int argc, char **argv) {
   int16_t console_width = 0;
   wchar_t prefix[32];
   size_t prefix_len = 0;
+  int16_t prev_up = 0;
+  int16_t prev_right = 0;
+  int16_t next_up = 0;
+  int16_t next_right = 0;
+  int16_t curr_up = 0;
+  int16_t curr_right = 0;
   for (;;) {
     if (!ReadConsoleInputW(console_in, &input, 1, &read)) {
       log_last_error("input", "Failed to read console input");
@@ -1626,12 +1636,13 @@ int main(int argc, char **argv) {
       msg->count++;
       break;
     }
-    int16_t needed_lines = (msg->count - CM_PREFIX_LEN - 1) / console_width;
+    next_up = (msg->count - CM_PREFIX_LEN) / console_width;
+    next_right = (msg->count - CM_PREFIX_LEN) % console_width;
     size_t prefix_pointer = CM_PREFIX_LEN;
     msg->items[--prefix_pointer] = L'\r';
-    if (needed_lines > 0) {
+    if (prev_up > 0) {
       msg->items[--prefix_pointer] = L'A';
-      size_t x = needed_lines;
+      size_t x = prev_up;
       while (x) {
         msg->items[--prefix_pointer] = L'0' + (x % 10);
         x /= 10;
@@ -1641,19 +1652,19 @@ int main(int argc, char **argv) {
     }
     assert(prefix_pointer >= 0 && prefix_pointer <= CM_PREFIX_LEN);
     size_t original_count = msg->count;
+    if (next_right == 0 && next_up >= prev_up) {
+      wchar_t *tmp2 = L" \b";
+      warray_extend(msg, tmp2, wcslen(tmp2));
+    }
     if (msg->count < prev_count) {
       wchar_t *tmp1 = L"\x1B[J";
       warray_extend(msg, tmp1, wcslen(tmp1));
     }
-    int16_t new_width = (original_count - CM_PREFIX_LEN);
-    int16_t end_col = new_width % console_width;
-    if (!end_col && new_width) {
-      wchar_t *tmp2 = L" \b";
-      warray_extend(msg, tmp2, wcslen(tmp2));
-    }
     WriteConsoleW(console_out, msg->items + prefix_pointer, msg->count - prefix_pointer, NULL, NULL);
     msg->count = original_count;
     prev_count = original_count;
+    prev_up = next_up;
+    prev_right = next_right;
   }
   if (!SetConsoleMode(console_in, console_mode_in)) {
     log_last_error("input", "Failed to reset in console mode");
