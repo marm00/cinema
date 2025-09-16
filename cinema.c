@@ -1487,6 +1487,8 @@ int main(int argc, char **argv) {
   }
   int16_t home_y = console_info.dwCursorPosition.Y;
   int16_t console_width = console_info.dwSize.X;
+  WriteConsoleW(console_out, L"\r> ", wcslen(L"\r> "), NULL, NULL);
+  static const int PREFIX = 2;
   for (;;) {
     if (!ReadConsoleInputW(console_in, &input, 1, &read)) {
       log_last_error("input", "Failed to read console input");
@@ -1599,7 +1601,7 @@ int main(int argc, char **argv) {
         } else {
           --msg_index;
         }
-        SetConsoleCursorPosition(console_out, (COORD){.X = msg_index % console_width, .Y = home_y + (msg_index / console_width)});
+        SetConsoleCursorPosition(console_out, (COORD){.X = (msg_index + PREFIX) % console_width, .Y = home_y + ((msg_index + PREFIX) / console_width)});
       }
       continue;
       break;
@@ -1614,7 +1616,7 @@ int main(int argc, char **argv) {
         } else {
           ++msg_index;
         }
-        SetConsoleCursorPosition(console_out, (COORD){.X = msg_index % console_width, .Y = home_y + (msg_index / console_width)});
+        SetConsoleCursorPosition(console_out, (COORD){.X = (msg_index + PREFIX) % console_width, .Y = home_y + ((msg_index + PREFIX) / console_width)});
       }
       continue;
       break;
@@ -1628,15 +1630,8 @@ int main(int argc, char **argv) {
       } else {
         // exit(1);
       }
-      // array_insert(msg, msg_index, c);
-      // msg_index++;
-      array_reserve(msg, 1);
-      if (msg_index < msg->count) {
-        // insert inside line instead of at the end
-        wmemmove(&msg->items[msg_index + 1], &msg->items[msg_index], msg->count - msg_index);
-      }
-      msg->items[msg_index++] = c;
-      msg->count++;
+      warray_insert(msg, msg_index, c);
+      ++msg_index;
       break;
     }
     size_t visible_lines = console_info.srWindow.Bottom - console_info.srWindow.Top;
@@ -1649,11 +1644,11 @@ int main(int argc, char **argv) {
     // above or below the visible rows. You can probably work around this with some
     // viewport/scrolling commands, but it seems better to just use other APIs.
     assert(console_width);
-    next_up = (msg->count) / console_width;
-    next_right = (msg->count) % console_width;
+    next_up = (msg->count + PREFIX) / console_width;
+    next_right = (msg->count + PREFIX) % console_width;
     cursor_info.bVisible = false;
     SetConsoleCursorInfo(console_out, &cursor_info);
-    SetConsoleCursorPosition(console_out, (COORD){.X = 0, .Y = home_y});
+    SetConsoleCursorPosition(console_out, (COORD){.X = PREFIX, .Y = home_y});
     size_t original_count = msg->count;
     if (next_right == 0 && next_up >= prev_up) {
       // TODO: fix when delete/insert/backspace/arrow at last index cursor pos
@@ -1669,7 +1664,7 @@ int main(int argc, char **argv) {
     if (msg_index < msg->count) {
       // TODO: fix line wrapping backwards
       SetConsoleCursorPosition(console_out,
-                               (COORD){.X = msg_index % console_width, .Y = home_y + next_up});
+                               (COORD){.X = (msg_index + PREFIX) % console_width, .Y = home_y + next_up});
     }
     cursor_info.bVisible = true;
     SetConsoleCursorInfo(console_out, &cursor_info);
