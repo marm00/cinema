@@ -862,8 +862,7 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len) {
       log_message(LOG_TRACE, "documents", "gsa[%7d] = %-25.25s (%7d)| (%7d) = %-30.30s counter=%d", i, locals.text + gsa[i], gsa[i], doc, locals.text + doc, dedup_counter);
     }
   }
-  dedup_counter++;
-  if (dedup_counter == 0) {
+  if (++dedup_counter == 0) {
     memset(dedup_counters, 0, (size_t)locals.bytes * sizeof(uint16_t));
     dedup_counter = 1;
   }
@@ -1497,13 +1496,15 @@ int main(int argc, char **argv) {
     }
     c = input.Event.KeyEvent.uChar.UnicodeChar;
     vk = input.Event.KeyEvent.wVirtualKeyCode;
+    bool down = input.Event.KeyEvent.bKeyDown;
     bool ctrl = input.Event.KeyEvent.dwControlKeyState & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED);
-    if (!input.Event.KeyEvent.bKeyDown) {
+    bool alt = input.Event.KeyEvent.dwControlKeyState & (LEFT_ALT_PRESSED | RIGHT_ALT_PRESSED);
+    if (!down && (!c || vk != VK_MENU)) {
       continue;
     }
     switch (input.EventType) {
     case KEY_EVENT:
-      // wprintf(L"\rchar=%zu, v=%zu, down=%d\r\n", input.Event.KeyEvent.uChar.UnicodeChar, input.Event.KeyEvent.wVirtualKeyCode, input.Event.KeyEvent.bKeyDown);
+      // wprintf(L"\rchar=%zu, v=%zu, down=%d, alt=%d, ctrl=%d\r\n", c, vk, down, alt, ctrl);
       break;
     case FOCUS_EVENT:
       break;
@@ -1616,7 +1617,6 @@ int main(int argc, char **argv) {
         SetConsoleCursorPosition(console_out, (COORD){.X = (msg_index + PREFIX) % console_width, .Y = home_y + ((msg_index + PREFIX) / console_width)});
       }
       continue;
-      break;
     case VK_RIGHT:
       if (msg_index < msg->count) {
         if (ctrl) {
@@ -1631,12 +1631,12 @@ int main(int argc, char **argv) {
         SetConsoleCursorPosition(console_out, (COORD){.X = (msg_index + PREFIX) % console_width, .Y = home_y + ((msg_index + PREFIX) / console_width)});
       }
       continue;
-      break;
     default:
       if (!c) {
         // likely modifier key (shift, ctrl)
         continue;
       }
+      // wprintf(L"\rchar=%zu, v=%zu, down=%d, alt=%d, ctrl=%d\r\n", c, vk, down, alt, ctrl);
       if (vk >= CIN_VK_0 && vk <= CIN_VK_9) {
       } else if (vk >= CIN_VK_A && vk <= CIN_VK_Z) {
       } else {
