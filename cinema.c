@@ -27,7 +27,7 @@
 #include <string.h>
 #include <wchar.h>
 
-#ifdef _WIN32
+#if defined(_WIN32)
 #include <windows.h>
 #endif
 
@@ -174,6 +174,7 @@ static const char *level_to_str(Cin_Log_Level level) {
     return "LOG";
   }
 }
+
 static CRITICAL_SECTION log_lock;
 
 static void log_message(Cin_Log_Level level, const char *location, const char *message, ...) {
@@ -1380,11 +1381,9 @@ typedef struct Console_Message {
 } Console_Message;
 
 // TODO: change to found upper bound
-static const size_t CM_PREFIX_LEN = 64;
 static const size_t CM_INIT_CAP = 256;
 
 static Console_Message *create_console_message() {
-  assert(CM_INIT_CAP > CM_PREFIX_LEN);
   Console_Message *msg = malloc(sizeof(Console_Message));
   assert(msg);
 #if defined(NDEBUG)
@@ -1393,13 +1392,10 @@ static Console_Message *create_console_message() {
   wchar_t *items = calloc(CM_INIT_CAP, sizeof(wchar_t));
 #endif
   assert(items);
-  // for (size_t i = 0; i < CM_PREFIX_LEN; ++i) {
-  //   items[i] = CM_PREFIX[i];
-  // }
   msg->next = NULL;
   msg->prev = NULL;
   msg->items = items;
-  msg->count = CM_PREFIX_LEN;
+  msg->count = 0;
   msg->capacity = CM_INIT_CAP;
   return msg;
 }
@@ -1470,7 +1466,7 @@ int main(int argc, char **argv) {
   wchar_t vk = 0;
   Console_Message *msg = create_console_message();
   Console_Message *msg_tail = NULL;
-  size_t cursor = CM_PREFIX_LEN;
+  size_t msg_index = 0;
   size_t prev_count = 0;
   int16_t console_width = 0;
   wchar_t prefix[32];
@@ -1481,16 +1477,21 @@ int main(int argc, char **argv) {
   int16_t next_right = 0;
   int16_t curr_up = 0;
   int16_t curr_right = 0;
+  CONSOLE_CURSOR_INFO cursor_info = {0};
+  if (!GetConsoleScreenBufferInfo(console_out, &console_info)) {
+    log_last_error("input", "Failed to get console screen buffer info");
+    return 1;
+  }
+  if (!GetConsoleCursorInfo(console_out, &cursor_info)) {
+    log_last_error("input", "Failed to get console cursor info");
+    return 1;
+  }
+  int16_t home_y = console_info.dwCursorPosition.Y;
   for (;;) {
     if (!ReadConsoleInputW(console_in, &input, 1, &read)) {
       log_last_error("input", "Failed to read console input");
       return 1;
     }
-    if (!GetConsoleScreenBufferInfo(console_out, &console_info)) {
-      log_last_error("input", "Failed to get console screen buffer info");
-      return 1;
-    }
-    console_cursor = console_info.dwCursorPosition;
     c = input.Event.KeyEvent.uChar.UnicodeChar;
     vk = input.Event.KeyEvent.wVirtualKeyCode;
     bool ctrl = input.Event.KeyEvent.dwControlKeyState & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED);
@@ -1513,22 +1514,22 @@ int main(int argc, char **argv) {
     bool move_cursor = false;
     switch (vk) {
     case VK_BACK:
-      if (cursor > CM_PREFIX_LEN) {
+      if (msg_index) {
         if (ctrl) {
-          size_t i = cursor;
-          while (i > CM_PREFIX_LEN && msg->items[--i] == CIN_SPACE) {
+          size_t i = msg_index;
+          while (i && msg->items[--i] == CIN_SPACE) {
           }
-          while (i > CM_PREFIX_LEN && msg->items[i - 1] != CIN_SPACE) {
+          while (i && msg->items[i - 1] != CIN_SPACE) {
             --i;
           }
-          if (i < cursor) {
-            wmemmove(&msg->items[i], &msg->items[cursor], msg->count - cursor);
-            msg->count -= (cursor - i);
-            cursor = i;
+          if (i < msg_index) {
+            wmemmove(&msg->items[i], &msg->items[msg_index], msg->count - msg_index);
+            msg->count -= (msg_index - i);
+            msg_index = i;
           }
         } else {
-          wmemmove(&msg->items[cursor - 1], &msg->items[cursor], msg->count - cursor);
-          cursor--;
+          wmemmove(&msg->items[msg_index - 1], &msg->items[msg_index], msg->count - msg_index);
+          msg_index--;
           msg->count--;
         }
       }
@@ -1536,7 +1537,7 @@ int main(int argc, char **argv) {
     case VK_RETURN:
       // TODO: besides empty, also ignore duplicates
       bool empty = true;
-      for (size_t i = CM_PREFIX_LEN; i < msg->count; ++i) {
+      for (size_t i = 0; i < msg->count; ++i) {
         if (msg->items[i] != CIN_SPACE) {
           empty = false;
           break;
@@ -1552,16 +1553,16 @@ int main(int argc, char **argv) {
         msg = create_console_message();
         msg->prev = msg_tail;
       }
-      cursor = CM_PREFIX_LEN;
-      msg->count = CM_PREFIX_LEN;
+      msg_index = 0;
+      msg->count = 0;
       break;
     case VK_ESCAPE:
-      cursor = CM_PREFIX_LEN;
-      msg->count = CM_PREFIX_LEN;
+      msg_index = 0;
+      msg->count = 0;
       break;
     case VK_DELETE:
-      if (!ctrl && cursor < msg->count) {
-        wmemmove(&msg->items[cursor], &msg->items[cursor + 1], msg->count - cursor);
+      if (!ctrl && msg_index < msg->count) {
+        wmemmove(&msg->items[msg_index], &msg->items[msg_index + 1], msg->count - msg_index);
         msg->count--;
       }
       break;
@@ -1569,7 +1570,7 @@ int main(int argc, char **argv) {
       if (msg->prev) {
         array_resize(msg, msg->prev->count);
         wmemcpy(msg->items, msg->prev->items, msg->prev->count);
-        cursor = msg->count;
+        msg_index = msg->count;
         msg->next = msg->prev->next;
         msg->prev = msg->prev->prev;
       }
@@ -1583,35 +1584,35 @@ int main(int argc, char **argv) {
         msg->next = msg->next->next;
       } else {
         msg->prev = msg_tail;
-        msg->count = CM_PREFIX_LEN;
+        msg->count = 0;
       }
-      cursor = msg->count;
+      msg_index = msg->count;
       break;
     case VK_LEFT:
       move_cursor = true;
-      if (cursor > CM_PREFIX_LEN) {
+      if (msg_index) {
         if (ctrl) {
-          while (cursor > CM_PREFIX_LEN && msg->items[--cursor] == CIN_SPACE) {
+          while (msg_index && msg->items[--msg_index] == CIN_SPACE) {
           }
-          while (cursor > CM_PREFIX_LEN && msg->items[cursor - 1] != CIN_SPACE) {
-            --cursor;
+          while (msg_index && msg->items[msg_index - 1] != CIN_SPACE) {
+            --msg_index;
           }
         } else {
-          --cursor;
+          --msg_index;
         }
       }
       break;
     case VK_RIGHT:
       move_cursor = true;
-      if (cursor < msg->count) {
+      if (msg_index < msg->count) {
         if (ctrl) {
-          while (cursor < msg->count && msg->items[cursor] != CIN_SPACE) {
-            ++cursor;
+          while (msg_index < msg->count && msg->items[msg_index] != CIN_SPACE) {
+            ++msg_index;
           }
-          while (cursor < msg->count && msg->items[++cursor] == CIN_SPACE) {
+          while (msg_index < msg->count && msg->items[++msg_index] == CIN_SPACE) {
           }
         } else {
-          ++cursor;
+          ++msg_index;
         }
       }
       break;
@@ -1625,42 +1626,46 @@ int main(int argc, char **argv) {
       } else {
         // exit(1);
       }
-      // array_insert(msg, cursor, c);
-      // cursor++;
+      // array_insert(msg, msg_index, c);
+      // msg_index++;
       array_reserve(msg, 1);
-      if (cursor < msg->count) {
+      if (msg_index < msg->count) {
         // insert inside line instead of at the end
-        wmemmove(&msg->items[cursor + 1], &msg->items[cursor], msg->count - cursor);
+        wmemmove(&msg->items[msg_index + 1], &msg->items[msg_index], msg->count - msg_index);
       }
-      msg->items[cursor++] = c;
+      msg->items[msg_index++] = c;
       msg->count++;
       break;
     }
-    next_up = (msg->count - CM_PREFIX_LEN) / console_width;
-    next_right = (msg->count - CM_PREFIX_LEN) % console_width;
-    size_t prefix_pointer = CM_PREFIX_LEN;
-    msg->items[--prefix_pointer] = L'\r';
-    if (prev_up > 0) {
-      msg->items[--prefix_pointer] = L'A';
-      size_t x = prev_up;
-      while (x) {
-        msg->items[--prefix_pointer] = L'0' + (x % 10);
-        x /= 10;
-      }
-      msg->items[--prefix_pointer] = L'[';
-      msg->items[--prefix_pointer] = L'\x1B';
-    }
-    assert(prefix_pointer >= 0 && prefix_pointer <= CM_PREFIX_LEN);
+    // NOTE: Console virtual terminal sequences are constrained to the current
+    // viewport into the console buffer (currently visible row/cols).
+    // Because of this, you cannot go up/down beyond the amount of lines currently
+    // visible, which means you cannot reach any of the output (e.g., to clear)
+    // above or below the visible rows. You can probably work around this with some
+    // viewport/scrolling commands, but it seems better to just use other APIs.
+    next_up = (msg->count) / console_width;
+    next_right = (msg->count) % console_width;
+    cursor_info.bVisible = false;
+    SetConsoleCursorInfo(console_out, &cursor_info);
+    SetConsoleCursorPosition(console_out, (COORD){.X = 0, .Y = home_y});
     size_t original_count = msg->count;
     if (next_right == 0 && next_up >= prev_up) {
-      wchar_t *tmp2 = L" \b";
-      warray_extend(msg, tmp2, wcslen(tmp2));
+      // wchar_t *tmp2 = L" \b";
+      // warray_extend(msg, tmp2, wcslen(tmp2));
     }
     if (msg->count < prev_count) {
-      wchar_t *tmp1 = L"\x1B[J";
-      warray_extend(msg, tmp1, wcslen(tmp1));
+      DWORD q;
+      FillConsoleOutputCharacterW(console_out, L' ', prev_count - msg->count,
+                                  (COORD){.X = next_right, .Y = home_y + next_up}, &q);
     }
-    WriteConsoleW(console_out, msg->items + prefix_pointer, msg->count - prefix_pointer, NULL, NULL);
+    WriteConsoleW(console_out, msg->items, msg->count, NULL, NULL);
+    if (msg_index < msg->count) {
+      // TODO: fix line wrapping backwards
+      SetConsoleCursorPosition(console_out,
+                               (COORD){.X = msg_index % console_width, .Y = home_y + next_up});
+    }
+    cursor_info.bVisible = true;
+    SetConsoleCursorInfo(console_out, &cursor_info);
     msg->count = original_count;
     prev_count = original_count;
     prev_up = next_up;
