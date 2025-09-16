@@ -1496,15 +1496,15 @@ int main(int argc, char **argv) {
     }
     c = input.Event.KeyEvent.uChar.UnicodeChar;
     vk = input.Event.KeyEvent.wVirtualKeyCode;
-    bool down = input.Event.KeyEvent.bKeyDown;
+    bool pressed = input.Event.KeyEvent.bKeyDown;
     bool ctrl = input.Event.KeyEvent.dwControlKeyState & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED);
     bool alt = input.Event.KeyEvent.dwControlKeyState & (LEFT_ALT_PRESSED | RIGHT_ALT_PRESSED);
-    if (!down && (!c || vk != VK_MENU)) {
+    if (!pressed && (!c || vk != VK_MENU)) {
       continue;
     }
     switch (input.EventType) {
     case KEY_EVENT:
-      // wprintf(L"\rchar=%zu, v=%zu, down=%d, alt=%d, ctrl=%d\r\n", c, vk, down, alt, ctrl);
+      // wprintf(L"\rchar=%zu, v=%zu, pressed=%d, alt=%d, ctrl=%d\r\n", c, vk, pressed, alt, ctrl);
       break;
     case FOCUS_EVENT:
       break;
@@ -1636,7 +1636,7 @@ int main(int argc, char **argv) {
         // likely modifier key (shift, ctrl)
         continue;
       }
-      // wprintf(L"\rchar=%zu, v=%zu, down=%d, alt=%d, ctrl=%d\r\n", c, vk, down, alt, ctrl);
+      // wprintf(L"\rchar=%zu, v=%zu, pressed=%d, alt=%d, ctrl=%d\r\n", c, vk, pressed, alt, ctrl);
       if (vk >= CIN_VK_0 && vk <= CIN_VK_9) {
       } else if (vk >= CIN_VK_A && vk <= CIN_VK_Z) {
       } else {
