@@ -1487,6 +1487,7 @@ int main(int argc, char **argv) {
   }
   int16_t home_y = console_info.dwCursorPosition.Y;
   int16_t console_width = console_info.dwSize.X;
+  assert(console_width);
   WriteConsoleW(console_out, L"\r> ", wcslen(L"\r> "), NULL, NULL);
   static const int PREFIX = 2;
   for (;;) {
@@ -1563,9 +1564,20 @@ int main(int argc, char **argv) {
       msg->count = 0;
       break;
     case VK_DELETE:
-      if (!ctrl && msg_index < msg->count) {
-        wmemmove(&msg->items[msg_index], &msg->items[msg_index + 1], msg->count - msg_index);
-        msg->count--;
+      if (msg_index < msg->count) {
+        if (ctrl) {
+          size_t i = msg_index;
+          while (i < msg->count && msg->items[i] != CIN_SPACE) {
+            ++i;
+          }
+          while (i < msg->count && msg->items[++i] == CIN_SPACE) {
+          }
+          wmemmove(&msg->items[msg_index], &msg->items[i], msg->count - i);
+          msg->count -= (i - msg_index);
+        } else {
+          wmemmove(&msg->items[msg_index], &msg->items[msg_index + 1], msg->count - msg_index);
+          msg->count--;
+        }
       }
       break;
     case VK_UP:
@@ -1643,7 +1655,6 @@ int main(int argc, char **argv) {
     // visible, which means you cannot reach any of the output (e.g., to clear)
     // above or below the visible rows. You can probably work around this with some
     // viewport/scrolling commands, but it seems better to just use other APIs.
-    assert(console_width);
     next_up = (msg->count + PREFIX) / console_width;
     next_right = (msg->count + PREFIX) % console_width;
     cursor_info.bVisible = false;
