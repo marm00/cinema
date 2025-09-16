@@ -1468,7 +1468,6 @@ int main(int argc, char **argv) {
   Console_Message *msg_tail = NULL;
   size_t msg_index = 0;
   size_t prev_count = 0;
-  int16_t console_width = 0;
   wchar_t prefix[32];
   size_t prefix_len = 0;
   int16_t prev_up = 0;
@@ -1487,6 +1486,7 @@ int main(int argc, char **argv) {
     return 1;
   }
   int16_t home_y = console_info.dwCursorPosition.Y;
+  int16_t console_width = console_info.dwSize.X;
   for (;;) {
     if (!ReadConsoleInputW(console_in, &input, 1, &read)) {
       log_last_error("input", "Failed to read console input");
@@ -1589,7 +1589,6 @@ int main(int argc, char **argv) {
       msg_index = msg->count;
       break;
     case VK_LEFT:
-      move_cursor = true;
       if (msg_index) {
         if (ctrl) {
           while (msg_index && msg->items[--msg_index] == CIN_SPACE) {
@@ -1600,10 +1599,11 @@ int main(int argc, char **argv) {
         } else {
           --msg_index;
         }
+        SetConsoleCursorPosition(console_out, (COORD){.X = msg_index % console_width, .Y = home_y + (msg_index / console_width)});
       }
+      continue;
       break;
     case VK_RIGHT:
-      move_cursor = true;
       if (msg_index < msg->count) {
         if (ctrl) {
           while (msg_index < msg->count && msg->items[msg_index] != CIN_SPACE) {
@@ -1614,7 +1614,9 @@ int main(int argc, char **argv) {
         } else {
           ++msg_index;
         }
+        SetConsoleCursorPosition(console_out, (COORD){.X = msg_index % console_width, .Y = home_y + (msg_index / console_width)});
       }
+      continue;
       break;
     default:
       if (!c) {
@@ -1637,12 +1639,16 @@ int main(int argc, char **argv) {
       msg->count++;
       break;
     }
+    size_t visible_lines = console_info.srWindow.Bottom - console_info.srWindow.Top;
+    // TODO: PowerShell behaves differently when a new line is added
+
     // NOTE: Console virtual terminal sequences are constrained to the current
     // viewport into the console buffer (currently visible row/cols).
     // Because of this, you cannot go up/down beyond the amount of lines currently
     // visible, which means you cannot reach any of the output (e.g., to clear)
     // above or below the visible rows. You can probably work around this with some
     // viewport/scrolling commands, but it seems better to just use other APIs.
+    assert(console_width);
     next_up = (msg->count) / console_width;
     next_right = (msg->count) % console_width;
     cursor_info.bVisible = false;
@@ -1650,6 +1656,7 @@ int main(int argc, char **argv) {
     SetConsoleCursorPosition(console_out, (COORD){.X = 0, .Y = home_y});
     size_t original_count = msg->count;
     if (next_right == 0 && next_up >= prev_up) {
+      // TODO: fix when delete/insert/backspace/arrow at last index cursor pos
       // wchar_t *tmp2 = L" \b";
       // warray_extend(msg, tmp2, wcslen(tmp2));
     }
