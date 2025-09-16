@@ -1588,6 +1588,8 @@ int main(int argc, char **argv) {
         msg_index = msg->count;
         msg->next = msg->prev->next;
         msg->prev = msg->prev->prev;
+      } else {
+        continue;
       }
       break;
     case VK_DOWN:
@@ -1597,9 +1599,11 @@ int main(int argc, char **argv) {
         wmemcpy(msg->items, msg->next->items, msg->next->count);
         msg->prev = msg->next->prev;
         msg->next = msg->next->next;
-      } else {
+      } else if (msg->count) {
         msg->prev = msg_tail;
         msg->count = 0;
+      } else {
+        continue;
       }
       msg_index = msg->count;
       break;
