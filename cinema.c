@@ -1669,18 +1669,15 @@ int main(int argc, char **argv) {
     SetConsoleCursorInfo(console_out, &cursor_info);
     SetConsoleCursorPosition(console_out, (COORD){.X = PREFIX, .Y = home_y});
     size_t original_count = msg->count;
-    if (next_right == 0 && next_up >= prev_up) {
-      // TODO: fix when delete/insert/backspace/arrow at last index cursor pos
-      // wchar_t *tmp2 = L" \b";
-      // warray_extend(msg, tmp2, wcslen(tmp2));
-    }
     if (msg->count < prev_count) {
       DWORD q;
       FillConsoleOutputCharacterW(console_out, L' ', prev_count - msg->count,
                                   (COORD){.X = next_right, .Y = home_y + next_up}, &q);
     }
     WriteConsoleW(console_out, msg->items, msg->count, NULL, NULL);
-    if (msg_index < msg->count) {
+    if (next_right == 0 && next_up > prev_up) {
+      SetConsoleCursorPosition(console_out, (COORD){.X = 0, .Y = home_y + next_up});
+    } else if (msg_index < msg->count) {
       SetConsoleCursorPosition(console_out,
                                (COORD){.X = (msg_index + PREFIX) % console_width,
                                        .Y = home_y + ((msg_index + PREFIX) / console_width)});
