@@ -1484,6 +1484,7 @@ int main(int argc, char **argv) {
     log_last_error("input", "Failed to get console cursor info");
     return 1;
   }
+  // NOTE: console cursor positions (both x/y) are 0-based
   int16_t home_y = console_info.dwCursorPosition.Y;
   int16_t console_width = console_info.dwSize.X;
   assert(console_width);
@@ -1510,7 +1511,14 @@ int main(int argc, char **argv) {
       break;
     case WINDOW_BUFFER_SIZE_EVENT:
       console_width = input.Event.WindowBufferSizeEvent.dwSize.X;
-      break;
+      if (!GetConsoleScreenBufferInfo(console_out, &console_info)) {
+        log_last_error("input", "Failed to get console screen buffer info");
+        return 1;
+      }
+      assert(console_width);
+      int16_t shift = (msg_index + PREFIX) / console_width;
+      home_y = console_info.dwCursorPosition.Y - shift;
+      continue;
     default:
       log_message(LOG_ERROR, "input", "\rUnsupported event: 0x%.4x", input.EventType);
       break;
@@ -1588,8 +1596,6 @@ int main(int argc, char **argv) {
         msg_index = msg->count;
         msg->next = msg->prev->next;
         msg->prev = msg->prev->prev;
-      } else {
-        continue;
       }
       break;
     case VK_DOWN:
@@ -1599,11 +1605,9 @@ int main(int argc, char **argv) {
         wmemcpy(msg->items, msg->next->items, msg->next->count);
         msg->prev = msg->next->prev;
         msg->next = msg->next->next;
-      } else if (msg->count) {
+      } else {
         msg->prev = msg_tail;
         msg->count = 0;
-      } else {
-        continue;
       }
       msg_index = msg->count;
       break;
@@ -1677,9 +1681,9 @@ int main(int argc, char **argv) {
     }
     WriteConsoleW(console_out, msg->items, msg->count, NULL, NULL);
     if (msg_index < msg->count) {
-      // TODO: fix line wrapping backwards
       SetConsoleCursorPosition(console_out,
-                               (COORD){.X = (msg_index + PREFIX) % console_width, .Y = home_y + next_up});
+                               (COORD){.X = (msg_index + PREFIX) % console_width,
+                                       .Y = home_y + ((msg_index + PREFIX) / console_width)});
     }
     cursor_info.bVisible = true;
     SetConsoleCursorInfo(console_out, &cursor_info);
