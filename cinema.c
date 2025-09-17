@@ -1457,6 +1457,22 @@ int main(int argc, char **argv) {
     log_last_error("input", "Failed to set out console mode");
     return 1;
   }
+  bool win_terminal = (bool)GetEnvironmentVariableW(L"WT_SESSION", NULL, 0);
+  if (win_terminal) {
+    log_message(LOG_WARNING, "main", "Command previews are not available in Windows Terminal"
+                                     " (only pure cmd.exe Command Prompt)");
+    // TODO: support windows terminal with ReadConsoleW
+    exit(1);
+    // NOTE: It seems impossible to reach outside the bounds of the viewport
+    // within Windows Terminal using a custom ReadConsoleInput approach. So,
+    // we must use the built-in cooked input mode with ReadConsole, OR modify
+    // the cmd.exe approach using screen clear tricks and partial writes,
+    // but even then the scroll space will surely become confusing at some
+    // point. Therefore, we just use ReadConsoleW and accept we can't do any
+    // intermediate processing with Windows Terminal.
+  } else {
+    log_message(LOG_WARNING, "main", "Program will run as if using Command Prompt");
+  }
   CONSOLE_SCREEN_BUFFER_INFO console_info = {0};
   COORD console_cursor = {0};
   DWORD read = 0;
