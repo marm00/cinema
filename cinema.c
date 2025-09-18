@@ -1399,6 +1399,29 @@ static Console_Message *create_console_message() {
   return msg;
 }
 
+static inline bool bounded_console(HANDLE console) {
+  assert(console);
+  SHORT prev_bot = 0;
+  SHORT next_bot = 0;
+  CONSOLE_CURSOR_INFO cursor_info = {0};
+  GetConsoleCursorInfo(console, &cursor_info);
+  BOOL prev_vis = cursor_info.bVisible;
+  cursor_info.bVisible = false;
+  SetConsoleCursorInfo(console, &cursor_info);
+  CONSOLE_SCREEN_BUFFER_INFO info = {0};
+  GetConsoleScreenBufferInfo(console, &info);
+  prev_bot = info.srWindow.Bottom;
+  COORD prev_pos = info.dwCursorPosition;
+  COORD next_pos = {.X = 0, .Y = prev_bot + 1};
+  SetConsoleCursorPosition(console, next_pos);
+  GetConsoleScreenBufferInfo(console, &info);
+  SetConsoleCursorPosition(console, prev_pos);
+  cursor_info.bVisible = prev_vis;
+  SetConsoleCursorInfo(console, &cursor_info);
+  next_bot = info.srWindow.Bottom;
+  return prev_bot == next_bot;
+}
+
 int main(int argc, char **argv) {
 #ifndef _WIN32
   log_message(LOG_ERROR, "main", "Error: Your operating system is not supported, Windows-only currently.");
@@ -1457,21 +1480,19 @@ int main(int argc, char **argv) {
     log_last_error("input", "Failed to set out console mode");
     return 1;
   }
-  bool win_terminal = (bool)GetEnvironmentVariableW(L"WT_SESSION", NULL, 0);
-  if (win_terminal) {
-    log_message(LOG_WARNING, "main", "Command previews are not available in Windows Terminal"
-                                     " (only pure cmd.exe Command Prompt)");
-    // TODO: support windows terminal with ReadConsoleW
-    exit(1);
-    // NOTE: It seems impossible to reach outside the bounds of the viewport
-    // within Windows Terminal using a custom ReadConsoleInput approach. So,
-    // we must use the built-in cooked input mode with ReadConsole, OR modify
-    // the cmd.exe approach using screen clear tricks and partial writes,
-    // but even then the scroll space will surely become confusing at some
-    // point. Therefore, we just use ReadConsoleW and accept we can't do any
-    // intermediate processing with Windows Terminal.
-  } else {
-    log_message(LOG_WARNING, "main", "Program will run as if using Command Prompt");
+  // NOTE: It seems impossible to reach outside the bounds of the viewport
+  // within Windows Terminal using a custom ReadConsoleInput approach. So,
+  // we must use the built-in cooked input mode with ReadConsole, OR modify
+  // the cmd.exe approach using screen clear tricks and partial writes,
+  // but even then the scroll space will surely become confusing at some
+  // point. We accept the scrollback issues and support relative consoles.
+  // TODO: support bounded viewport (excluding scrollback)
+  bool viewport_bound = bounded_console(console_out);
+  if (viewport_bound) {
+    log_message(LOG_WARNING, "main",
+                "Large inputs can cause minor scrollback issues in your terminal. "
+                "If this is bothersome, you can use vanilla cmd.exe "
+                "(Command Prompt), which works perfectly.");
   }
   CONSOLE_SCREEN_BUFFER_INFO console_info = {0};
   COORD console_cursor = {0};
