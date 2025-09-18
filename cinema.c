@@ -1471,17 +1471,10 @@ int main(int argc, char **argv) {
     log_last_error("input", "Failed to get stdout handle");
     return 1;
   }
-  DWORD console_mode_out;
-  if (!GetConsoleMode(console_out, &console_mode_out)) {
-    log_last_error("input", "Failed to get out console mode");
-    return 1;
-  }
-  if (!SetConsoleMode(console_out, console_mode_out | ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING | ENABLE_WRAP_AT_EOL_OUTPUT | DISABLE_NEWLINE_AUTO_RETURN)) {
-    log_last_error("input", "Failed to set out console mode");
-    return 1;
-  }
+  DWORD console_mode_out = 0;
   // NOTE: It seems impossible to reach outside the bounds of the viewport
-  // within Windows Terminal using a custom ReadConsoleInput approach. So,
+  // within Windows Terminal using a custom ReadConsoleInput approach. Virtual
+  // terminal sequences and related APIs are bound to the viewport. So,
   // we must use the built-in cooked input mode with ReadConsole, OR modify
   // the cmd.exe approach using screen clear tricks and partial writes,
   // but even then the scroll space will surely become confusing at some
@@ -1493,6 +1486,15 @@ int main(int argc, char **argv) {
                 "Large inputs can cause minor scrollback issues in your terminal. "
                 "If this is bothersome, you can use vanilla cmd.exe "
                 "(Command Prompt), which works perfectly.");
+    // TODO: maybe use ENABLE_PROCESSED_OUTPUT & virtual terminal sequences when viewport_bound
+    // if (!GetConsoleMode(console_out, &console_mode_out)) {
+    //   log_last_error("input", "Failed to get out console mode");
+    //   return 1;
+    // }
+    // if (!SetConsoleMode(console_out, console_mode_out | ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING)) {
+    //   log_last_error("input", "Failed to set out console mode");
+    //   return 1;
+    // }
   }
   CONSOLE_SCREEN_BUFFER_INFO console_info = {0};
   COORD console_cursor = {0};
@@ -1513,6 +1515,7 @@ int main(int argc, char **argv) {
   int16_t curr_up = 0;
   int16_t curr_right = 0;
   CONSOLE_CURSOR_INFO cursor_info = {0};
+  size_t visible_lines = console_info.srWindow.Bottom - console_info.srWindow.Top;
   if (!GetConsoleScreenBufferInfo(console_out, &console_info)) {
     log_last_error("input", "Failed to get console screen buffer info");
     return 1;
@@ -1527,6 +1530,8 @@ int main(int argc, char **argv) {
   assert(console_width);
   WriteConsoleW(console_out, L"\r> ", wcslen(L"\r> "), NULL, NULL);
   static const int PREFIX = 2;
+  DWORD filled;
+  COORD home = {.X = PREFIX, .Y = home_y};
   for (;;) {
     if (!ReadConsoleInputW(console_in, &input, 1, &read)) {
       log_last_error("input", "Failed to read console input");
@@ -1564,27 +1569,39 @@ int main(int argc, char **argv) {
     switch (vk) {
     case VK_BACK:
       if (msg_index) {
+        size_t left = msg_index;
+        size_t right = msg_index;
         if (ctrl) {
-          size_t i = msg_index;
-          while (i && msg->items[--i] == CIN_SPACE) {
-          }
-          while (i && msg->items[i - 1] != CIN_SPACE) {
-            --i;
-          }
-          if (i < msg_index) {
-            wmemmove(&msg->items[i], &msg->items[msg_index], msg->count - msg_index);
-            msg->count -= (msg_index - i);
-            msg_index = i;
-          }
+          while (left && msg->items[left - 1] == CIN_SPACE) left--;
+          while (left && msg->items[left - 1] != CIN_SPACE) left--;
         } else {
-          wmemmove(&msg->items[msg_index - 1], &msg->items[msg_index], msg->count - msg_index);
-          msg_index--;
-          msg->count--;
+          left--;
         }
+        size_t deleted = right - left;
+        if (right < msg->count) {
+          wmemmove(&msg->items[left], &msg->items[right], msg->count - right);
+        }
+        msg->count -= deleted;
+        msg_index = left;
+        COORD new_cursor = {
+            .X = (msg_index + PREFIX) % console_width,
+            .Y = home_y + ((msg_index + PREFIX) / console_width)};
+        SetConsoleCursorPosition(console_out, new_cursor);
+        size_t leftover = msg->count - msg_index;
+        if (leftover) {
+          WriteConsoleW(console_out, msg->items + msg_index, leftover, NULL, NULL);
+        }
+        COORD del_cursor = {
+            .X = (msg->count + PREFIX) % console_width,
+            .Y = home_y + ((msg->count + PREFIX) / console_width)};
+        FillConsoleOutputCharacterW(console_out, CIN_SPACE, deleted, del_cursor, &filled);
+        SetConsoleCursorPosition(console_out, new_cursor);
       }
-      break;
+      continue;
     case VK_RETURN:
       // TODO: besides empty, also ignore duplicates
+      SetConsoleCursorPosition(console_out, home);
+      FillConsoleOutputCharacterW(console_out, L' ', msg->count, home, &filled);
       bool empty = true;
       for (size_t i = 0; i < msg->count; ++i) {
         if (msg->items[i] != CIN_SPACE) {
@@ -1604,11 +1621,13 @@ int main(int argc, char **argv) {
       }
       msg_index = 0;
       msg->count = 0;
-      break;
+      continue;
     case VK_ESCAPE:
+      SetConsoleCursorPosition(console_out, home);
+      FillConsoleOutputCharacterW(console_out, L' ', msg->count, home, &filled);
       msg_index = 0;
       msg->count = 0;
-      break;
+      continue;
     case VK_DELETE:
       if (msg_index < msg->count) {
         if (ctrl) {
@@ -1677,41 +1696,22 @@ int main(int argc, char **argv) {
       }
       continue;
     default:
-      if (!c) {
-        // likely modifier key (shift, ctrl)
-        continue;
-      }
+      if (!c) continue;
       // wprintf(L"\rchar=%zu, v=%zu, pressed=%d, alt=%d, ctrl=%d\r\n", c, vk, pressed, alt, ctrl);
-      if (vk >= CIN_VK_0 && vk <= CIN_VK_9) {
-      } else if (vk >= CIN_VK_A && vk <= CIN_VK_Z) {
-      } else {
-        // exit(1);
-      }
       warray_insert(msg, msg_index, c);
       ++msg_index;
       break;
     }
-    size_t visible_lines = console_info.srWindow.Bottom - console_info.srWindow.Top;
-    // TODO: PowerShell behaves differently when a new line is added
-
-    // NOTE: Console virtual terminal sequences are constrained to the current
-    // viewport into the console buffer (currently visible row/cols).
-    // Because of this, you cannot go up/down beyond the amount of lines currently
-    // visible, which means you cannot reach any of the output (e.g., to clear)
-    // above or below the visible rows. You can probably work around this with some
-    // viewport/scrolling commands, but it seems better to just use other APIs.
     next_up = (msg->count + PREFIX) / console_width;
     next_right = (msg->count + PREFIX) % console_width;
     cursor_info.bVisible = false;
     SetConsoleCursorInfo(console_out, &cursor_info);
     SetConsoleCursorPosition(console_out, (COORD){.X = PREFIX, .Y = home_y});
-    size_t original_count = msg->count;
-    if (msg->count < prev_count) {
-      DWORD q;
-      FillConsoleOutputCharacterW(console_out, L' ', prev_count - msg->count,
-                                  (COORD){.X = next_right, .Y = home_y + next_up}, &q);
-    }
     WriteConsoleW(console_out, msg->items, msg->count, NULL, NULL);
+    if (msg->count < prev_count) {
+      FillConsoleOutputCharacterW(console_out, CIN_SPACE, prev_count - msg->count,
+                                  (COORD){.X = next_right, .Y = home_y + next_up}, &filled);
+    }
     if (next_right == 0 && next_up > prev_up) {
       SetConsoleCursorPosition(console_out, (COORD){.X = 0, .Y = home_y + next_up});
     } else if (msg_index < msg->count) {
@@ -1721,18 +1721,19 @@ int main(int argc, char **argv) {
     }
     cursor_info.bVisible = true;
     SetConsoleCursorInfo(console_out, &cursor_info);
-    msg->count = original_count;
-    prev_count = original_count;
+    prev_count = msg->count;
     prev_up = next_up;
-    prev_right = next_right;
   }
   if (!SetConsoleMode(console_in, console_mode_in)) {
     log_last_error("input", "Failed to reset in console mode");
     return 1;
   }
-  if (!SetConsoleMode(console_out, console_mode_out)) {
-    log_last_error("input", "Failed to reset out console mode");
-    return 1;
+  if (viewport_bound) {
+    // TODO: enable if using virtual terminal sequences if viewport_bound
+    // if (!SetConsoleMode(console_out, console_mode_out)) {
+    //   log_last_error("input", "Failed to reset out console mode");
+    //   return 1;
+    // }
   }
   return 0;
 
