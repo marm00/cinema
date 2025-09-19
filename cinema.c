@@ -1587,17 +1587,21 @@ int main(int argc, char **argv) {
     bool move_cursor = false;
     switch (vk) {
     case VK_RETURN:
-      // TODO: besides empty, also ignore duplicates
       SetConsoleCursorPosition(console_out, home);
       FillConsoleOutputCharacterW(console_out, CIN_SPACE, msg->count, home, &filled);
-      bool empty = true;
-      for (size_t i = 0; i < msg->count; ++i) {
-        if (msg->items[i] != CIN_SPACE) {
-          empty = false;
-          break;
-        }
-      }
-      if (!empty) {
+      assert(msg->items);
+      size_t i = msg->count;
+      while (i && iswspace(msg->items[i - 1])) --i;
+      bool empty = !i;
+      bool dup = !empty && msg_tail && msg->count == msg_tail->count &&
+                 !wcsncmp(msg->items, msg_tail->items, msg->count);
+      if (empty || dup) {
+        if (msg_tail) msg->prev = msg_tail;
+        msg->next = NULL;
+        msg_index = 0;
+        msg->count = 0;
+      } else {
+        // commit to history
         if (msg_tail) {
           msg_tail->next = msg;
           msg->prev = msg_tail;
@@ -1606,9 +1610,9 @@ int main(int argc, char **argv) {
         msg_tail = msg;
         msg = create_console_message();
         msg->prev = msg_tail;
+        msg_index = 0;
+        msg->count = 0;
       }
-      msg_index = 0;
-      msg->count = 0;
       break;
     case VK_ESCAPE:
       SetConsoleCursorPosition(console_out, home);
@@ -1728,6 +1732,54 @@ int main(int argc, char **argv) {
         SetConsoleCursorPosition(console_out, home);
         FillConsoleOutputCharacterW(console_out, CIN_SPACE, msg->count, home, &filled);
         msg->prev = msg_tail;
+        msg->count = 0;
+        msg_index = 0;
+      }
+      break;
+    case VK_PRIOR:
+      if (msg->prev) {
+        Console_Message *head = msg->prev;
+        while (head->prev) head = head->prev;
+        size_t prev_count = msg->count;
+        array_resize(msg, head->count);
+        wmemcpy(msg->items, head->items, head->count);
+        msg_index = msg->count;
+        msg->next = head->next;
+        head = head->prev;
+        hide_cursor();
+        SetConsoleCursorPosition(console_out, home);
+        WriteConsoleW(console_out, msg->items, msg->count, NULL, NULL);
+        show_cursor();
+        if (msg->count < prev_count) {
+          COORD del_cursor = {
+              .X = (msg->count + PREFIX) % console_width,
+              .Y = home_y + ((msg->count + PREFIX) / console_width)};
+          FillConsoleOutputCharacterW(console_out, CIN_SPACE, prev_count - msg->count, del_cursor, &filled);
+        }
+      }
+      break;
+    case VK_NEXT:
+      if (msg_tail) {
+        size_t prev_count = msg->count;
+        msg->capacity = msg_tail->capacity;
+        msg->count = msg_tail->count;
+        wmemcpy(msg->items, msg_tail->items, msg_tail->count);
+        hide_cursor();
+        SetConsoleCursorPosition(console_out, home);
+        WriteConsoleW(console_out, msg->items, msg->count, NULL, NULL);
+        show_cursor();
+        if (msg->count < prev_count) {
+          COORD del_cursor = {
+              .X = (msg->count + PREFIX) % console_width,
+              .Y = home_y + ((msg->count + PREFIX) / console_width)};
+          FillConsoleOutputCharacterW(console_out, CIN_SPACE, prev_count - msg->count, del_cursor, &filled);
+        }
+        msg->prev = msg_tail->prev;
+        msg->next = msg_tail->next;
+        msg_index = msg->count;
+      } else {
+        SetConsoleCursorPosition(console_out, home);
+        FillConsoleOutputCharacterW(console_out, CIN_SPACE, msg->count, home, &filled);
         msg->count = 0;
         msg_index = 0;
       }
