@@ -1380,7 +1380,7 @@ typedef struct Console_Message {
 } Console_Message;
 
 // TODO: change to found upper bound
-static const size_t CM_INIT_CAP = 256;
+static const size_t CM_INIT_CAP = 64;
 
 static Console_Message *create_console_message() {
   Console_Message *msg = malloc(sizeof(Console_Message));
@@ -1587,8 +1587,8 @@ int main(int argc, char **argv) {
     bool move_cursor = false;
     switch (vk) {
     case VK_RETURN:
-      SetConsoleCursorPosition(console_out, home);
       FillConsoleOutputCharacterW(console_out, CIN_SPACE, msg->count, home, &filled);
+      SetConsoleCursorPosition(console_out, home);
       assert(msg->items);
       size_t i = msg->count;
       while (i && iswspace(msg->items[i - 1])) --i;
@@ -1615,8 +1615,8 @@ int main(int argc, char **argv) {
       }
       break;
     case VK_ESCAPE:
-      SetConsoleCursorPosition(console_out, home);
       FillConsoleOutputCharacterW(console_out, CIN_SPACE, msg->count, home, &filled);
+      SetConsoleCursorPosition(console_out, home);
       msg_index = 0;
       msg->count = 0;
       break;
@@ -1644,21 +1644,21 @@ int main(int argc, char **argv) {
         size_t deleted = msg_index - left;
         msg->count -= deleted;
         msg_index = left;
+        hide_cursor();
         COORD new_cursor = {
             .X = (msg_index + PREFIX) % console_width,
             .Y = home_y + ((msg_index + PREFIX) / console_width)};
         SetConsoleCursorPosition(console_out, new_cursor);
         size_t leftover = msg->count - msg_index;
-        if (leftover) {
-          hide_cursor();
-          WriteConsoleW(console_out, msg->items + msg_index, leftover, NULL, NULL);
-          SetConsoleCursorPosition(console_out, new_cursor);
-          show_cursor();
-        }
         COORD del_cursor = {
             .X = (msg->count + PREFIX) % console_width,
             .Y = home_y + ((msg->count + PREFIX) / console_width)};
         FillConsoleOutputCharacterW(console_out, CIN_SPACE, deleted, del_cursor, &filled);
+        if (leftover) {
+          WriteConsoleW(console_out, msg->items + msg_index, leftover, NULL, NULL);
+          SetConsoleCursorPosition(console_out, new_cursor);
+        }
+        show_cursor();
       }
       break;
     case VK_DELETE:
@@ -1671,6 +1671,12 @@ int main(int argc, char **argv) {
           ++right;
         }
         size_t leftover = msg->count - right;
+        size_t deleted = right - msg_index;
+        msg->count -= deleted;
+        COORD del_cursor = {
+            .X = (msg->count + PREFIX) % console_width,
+            .Y = home_y + ((msg->count + PREFIX)) / console_width};
+        FillConsoleOutputCharacterW(console_out, CIN_SPACE, deleted, del_cursor, &filled);
         if (leftover) {
           wmemmove(&msg->items[msg_index], &msg->items[right], leftover);
           COORD curr_cursor = {
@@ -1681,12 +1687,6 @@ int main(int argc, char **argv) {
           SetConsoleCursorPosition(console_out, curr_cursor);
           show_cursor();
         }
-        size_t deleted = right - msg_index;
-        msg->count -= deleted;
-        COORD del_cursor = {
-            .X = (msg->count + PREFIX) % console_width,
-            .Y = home_y + ((msg->count + PREFIX)) / console_width};
-        FillConsoleOutputCharacterW(console_out, CIN_SPACE, deleted, del_cursor, &filled);
       }
       break;
     case VK_UP:
@@ -1698,15 +1698,15 @@ int main(int argc, char **argv) {
         msg->next = msg->prev->next;
         msg->prev = msg->prev->prev;
         hide_cursor();
-        SetConsoleCursorPosition(console_out, home);
-        WriteConsoleW(console_out, msg->items, msg->count, NULL, NULL);
-        show_cursor();
         if (msg->count < prev_count) {
           COORD del_cursor = {
               .X = (msg->count + PREFIX) % console_width,
               .Y = home_y + ((msg->count + PREFIX) / console_width)};
           FillConsoleOutputCharacterW(console_out, CIN_SPACE, prev_count - msg->count, del_cursor, &filled);
         }
+        SetConsoleCursorPosition(console_out, home);
+        WriteConsoleW(console_out, msg->items, msg->count, NULL, NULL);
+        show_cursor();
       }
       break;
     case VK_DOWN:
@@ -1716,15 +1716,15 @@ int main(int argc, char **argv) {
         msg->count = msg->next->count;
         wmemcpy(msg->items, msg->next->items, msg->next->count);
         hide_cursor();
-        SetConsoleCursorPosition(console_out, home);
-        WriteConsoleW(console_out, msg->items, msg->count, NULL, NULL);
-        show_cursor();
         if (msg->count < prev_count) {
           COORD del_cursor = {
               .X = (msg->count + PREFIX) % console_width,
               .Y = home_y + ((msg->count + PREFIX) / console_width)};
           FillConsoleOutputCharacterW(console_out, CIN_SPACE, prev_count - msg->count, del_cursor, &filled);
         }
+        SetConsoleCursorPosition(console_out, home);
+        WriteConsoleW(console_out, msg->items, msg->count, NULL, NULL);
+        show_cursor();
         msg->prev = msg->next->prev;
         msg->next = msg->next->next;
         msg_index = msg->count;
@@ -1747,15 +1747,15 @@ int main(int argc, char **argv) {
         msg->next = head->next;
         head = head->prev;
         hide_cursor();
-        SetConsoleCursorPosition(console_out, home);
-        WriteConsoleW(console_out, msg->items, msg->count, NULL, NULL);
-        show_cursor();
         if (msg->count < prev_count) {
           COORD del_cursor = {
               .X = (msg->count + PREFIX) % console_width,
               .Y = home_y + ((msg->count + PREFIX) / console_width)};
           FillConsoleOutputCharacterW(console_out, CIN_SPACE, prev_count - msg->count, del_cursor, &filled);
         }
+        SetConsoleCursorPosition(console_out, home);
+        WriteConsoleW(console_out, msg->items, msg->count, NULL, NULL);
+        show_cursor();
       }
       break;
     case VK_NEXT:
@@ -1765,15 +1765,15 @@ int main(int argc, char **argv) {
         msg->count = msg_tail->count;
         wmemcpy(msg->items, msg_tail->items, msg_tail->count);
         hide_cursor();
-        SetConsoleCursorPosition(console_out, home);
-        WriteConsoleW(console_out, msg->items, msg->count, NULL, NULL);
-        show_cursor();
         if (msg->count < prev_count) {
           COORD del_cursor = {
               .X = (msg->count + PREFIX) % console_width,
               .Y = home_y + ((msg->count + PREFIX) / console_width)};
           FillConsoleOutputCharacterW(console_out, CIN_SPACE, prev_count - msg->count, del_cursor, &filled);
         }
+        SetConsoleCursorPosition(console_out, home);
+        WriteConsoleW(console_out, msg->items, msg->count, NULL, NULL);
+        show_cursor();
         msg->prev = msg_tail->prev;
         msg->next = msg_tail->next;
         msg_index = msg->count;
