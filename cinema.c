@@ -1422,6 +1422,25 @@ static inline bool bounded_console(HANDLE console) {
   return prev_bot == next_bot;
 }
 
+static CONSOLE_CURSOR_INFO cursor_info = {0};
+static HANDLE console_out = {0};
+
+static inline void hide_cursor(void) {
+  assert(&console_out);
+  assert(&cursor_info);
+  assert(cursor_info.bVisible);
+  cursor_info.bVisible = false;
+  SetConsoleCursorInfo(console_out, &cursor_info);
+}
+
+static inline void show_cursor(void) {
+  assert(&console_out);
+  assert(&cursor_info);
+  assert(!cursor_info.bVisible);
+  cursor_info.bVisible = true;
+  SetConsoleCursorInfo(console_out, &cursor_info);
+}
+
 int main(int argc, char **argv) {
 #ifndef _WIN32
   log_message(LOG_ERROR, "main", "Error: Your operating system is not supported, Windows-only currently.");
@@ -1466,7 +1485,7 @@ int main(int argc, char **argv) {
     log_last_error("input", "Failed to set in console mode");
     return 1;
   }
-  HANDLE console_out = GetStdHandle(STD_OUTPUT_HANDLE);
+  console_out = GetStdHandle(STD_OUTPUT_HANDLE);
   if (console_out == INVALID_HANDLE_VALUE) {
     log_last_error("input", "Failed to get stdout handle");
     return 1;
@@ -1514,7 +1533,6 @@ int main(int argc, char **argv) {
   int16_t next_right = 0;
   int16_t curr_up = 0;
   int16_t curr_right = 0;
-  CONSOLE_CURSOR_INFO cursor_info = {0};
   size_t visible_lines = console_info.srWindow.Bottom - console_info.srWindow.Top;
   if (!GetConsoleScreenBufferInfo(console_out, &console_info)) {
     log_last_error("input", "Failed to get console screen buffer info");
@@ -1560,6 +1578,7 @@ int main(int argc, char **argv) {
       assert(console_width);
       int16_t shift = (msg_index + PREFIX) / console_width;
       home_y = console_info.dwCursorPosition.Y - shift;
+      // TODO: update home COORD as well
       continue;
     default:
       log_message(LOG_ERROR, "input", "\rUnsupported event: 0x%.4x", input.EventType);
@@ -1567,41 +1586,10 @@ int main(int argc, char **argv) {
     }
     bool move_cursor = false;
     switch (vk) {
-    case VK_BACK:
-      if (msg_index) {
-        size_t left = msg_index;
-        size_t right = msg_index;
-        if (ctrl) {
-          while (left && msg->items[left - 1] == CIN_SPACE) left--;
-          while (left && msg->items[left - 1] != CIN_SPACE) left--;
-        } else {
-          left--;
-        }
-        size_t deleted = right - left;
-        if (right < msg->count) {
-          wmemmove(&msg->items[left], &msg->items[right], msg->count - right);
-        }
-        msg->count -= deleted;
-        msg_index = left;
-        COORD new_cursor = {
-            .X = (msg_index + PREFIX) % console_width,
-            .Y = home_y + ((msg_index + PREFIX) / console_width)};
-        SetConsoleCursorPosition(console_out, new_cursor);
-        size_t leftover = msg->count - msg_index;
-        if (leftover) {
-          WriteConsoleW(console_out, msg->items + msg_index, leftover, NULL, NULL);
-        }
-        COORD del_cursor = {
-            .X = (msg->count + PREFIX) % console_width,
-            .Y = home_y + ((msg->count + PREFIX) / console_width)};
-        FillConsoleOutputCharacterW(console_out, CIN_SPACE, deleted, del_cursor, &filled);
-        SetConsoleCursorPosition(console_out, new_cursor);
-      }
-      continue;
     case VK_RETURN:
       // TODO: besides empty, also ignore duplicates
       SetConsoleCursorPosition(console_out, home);
-      FillConsoleOutputCharacterW(console_out, L' ', msg->count, home, &filled);
+      FillConsoleOutputCharacterW(console_out, CIN_SPACE, msg->count, home, &filled);
       bool empty = true;
       for (size_t i = 0; i < msg->count; ++i) {
         if (msg->items[i] != CIN_SPACE) {
@@ -1621,108 +1609,178 @@ int main(int argc, char **argv) {
       }
       msg_index = 0;
       msg->count = 0;
-      continue;
+      break;
     case VK_ESCAPE:
       SetConsoleCursorPosition(console_out, home);
-      FillConsoleOutputCharacterW(console_out, L' ', msg->count, home, &filled);
+      FillConsoleOutputCharacterW(console_out, CIN_SPACE, msg->count, home, &filled);
       msg_index = 0;
       msg->count = 0;
-      continue;
+      break;
+    case VK_HOME:
+      SetConsoleCursorPosition(console_out, home);
+      msg_index = 0;
+      break;
+    case VK_END:
+      msg_index = msg->count;
+      COORD new_cursor = {
+          .X = (msg_index + PREFIX) % console_width,
+          .Y = home_y + ((msg_index + PREFIX) / console_width)};
+      SetConsoleCursorPosition(console_out, new_cursor);
+      break;
+    case VK_BACK:
+      if (msg_index) {
+        size_t left = msg_index - 1;
+        if (ctrl) {
+          while (left && msg->items[left] == CIN_SPACE) --left;
+          while (left && msg->items[left - 1] != CIN_SPACE) --left;
+        }
+        if (msg_index < msg->count) {
+          wmemmove(&msg->items[left], &msg->items[msg_index], msg->count - msg_index);
+        }
+        size_t deleted = msg_index - left;
+        msg->count -= deleted;
+        msg_index = left;
+        COORD new_cursor = {
+            .X = (msg_index + PREFIX) % console_width,
+            .Y = home_y + ((msg_index + PREFIX) / console_width)};
+        SetConsoleCursorPosition(console_out, new_cursor);
+        size_t leftover = msg->count - msg_index;
+        if (leftover) {
+          hide_cursor();
+          WriteConsoleW(console_out, msg->items + msg_index, leftover, NULL, NULL);
+          SetConsoleCursorPosition(console_out, new_cursor);
+          show_cursor();
+        }
+        COORD del_cursor = {
+            .X = (msg->count + PREFIX) % console_width,
+            .Y = home_y + ((msg->count + PREFIX) / console_width)};
+        FillConsoleOutputCharacterW(console_out, CIN_SPACE, deleted, del_cursor, &filled);
+      }
+      break;
     case VK_DELETE:
       if (msg_index < msg->count) {
+        size_t right = msg_index;
         if (ctrl) {
-          size_t i = msg_index;
-          while (i < msg->count && msg->items[i] != CIN_SPACE) {
-            ++i;
-          }
-          while (i < msg->count && msg->items[++i] == CIN_SPACE) {
-          }
-          wmemmove(&msg->items[msg_index], &msg->items[i], msg->count - i);
-          msg->count -= (i - msg_index);
+          while (right < msg->count && msg->items[right] != CIN_SPACE) ++right;
+          while (right < msg->count && msg->items[++right] == CIN_SPACE);
         } else {
-          wmemmove(&msg->items[msg_index], &msg->items[msg_index + 1], msg->count - msg_index);
-          msg->count--;
+          ++right;
         }
+        size_t leftover = msg->count - right;
+        if (leftover) {
+          wmemmove(&msg->items[msg_index], &msg->items[right], leftover);
+          COORD curr_cursor = {
+              .X = (msg_index + PREFIX) % console_width,
+              .Y = home_y + ((msg_index + PREFIX) / console_width)};
+          hide_cursor();
+          WriteConsoleW(console_out, msg->items + msg_index, leftover, NULL, NULL);
+          SetConsoleCursorPosition(console_out, curr_cursor);
+          show_cursor();
+        }
+        size_t deleted = right - msg_index;
+        msg->count -= deleted;
+        COORD del_cursor = {
+            .X = (msg->count + PREFIX) % console_width,
+            .Y = home_y + ((msg->count + PREFIX)) / console_width};
+        FillConsoleOutputCharacterW(console_out, CIN_SPACE, deleted, del_cursor, &filled);
       }
       break;
     case VK_UP:
       if (msg->prev) {
+        size_t prev_count = msg->count;
         array_resize(msg, msg->prev->count);
         wmemcpy(msg->items, msg->prev->items, msg->prev->count);
         msg_index = msg->count;
         msg->next = msg->prev->next;
         msg->prev = msg->prev->prev;
+        hide_cursor();
+        SetConsoleCursorPosition(console_out, home);
+        WriteConsoleW(console_out, msg->items, msg->count, NULL, NULL);
+        show_cursor();
+        if (msg->count < prev_count) {
+          COORD del_cursor = {
+              .X = (msg->count + PREFIX) % console_width,
+              .Y = home_y + ((msg->count + PREFIX) / console_width)};
+          FillConsoleOutputCharacterW(console_out, CIN_SPACE, prev_count - msg->count, del_cursor, &filled);
+        }
       }
       break;
     case VK_DOWN:
       if (msg->next) {
+        size_t prev_count = msg->count;
         msg->capacity = msg->next->capacity;
         msg->count = msg->next->count;
         wmemcpy(msg->items, msg->next->items, msg->next->count);
+        hide_cursor();
+        SetConsoleCursorPosition(console_out, home);
+        WriteConsoleW(console_out, msg->items, msg->count, NULL, NULL);
+        show_cursor();
+        if (msg->count < prev_count) {
+          COORD del_cursor = {
+              .X = (msg->count + PREFIX) % console_width,
+              .Y = home_y + ((msg->count + PREFIX) / console_width)};
+          FillConsoleOutputCharacterW(console_out, CIN_SPACE, prev_count - msg->count, del_cursor, &filled);
+        }
         msg->prev = msg->next->prev;
         msg->next = msg->next->next;
+        msg_index = msg->count;
       } else {
+        SetConsoleCursorPosition(console_out, home);
+        FillConsoleOutputCharacterW(console_out, CIN_SPACE, msg->count, home, &filled);
         msg->prev = msg_tail;
         msg->count = 0;
+        msg_index = 0;
       }
-      msg_index = msg->count;
       break;
     case VK_LEFT:
       if (msg_index) {
+        --msg_index;
         if (ctrl) {
-          while (msg_index && msg->items[--msg_index] == CIN_SPACE) {
-          }
-          while (msg_index && msg->items[msg_index - 1] != CIN_SPACE) {
-            --msg_index;
-          }
-        } else {
-          --msg_index;
+          while (msg_index && msg->items[msg_index] == CIN_SPACE) --msg_index;
+          while (msg_index && msg->items[msg_index - 1] != CIN_SPACE) --msg_index;
         }
-        SetConsoleCursorPosition(console_out, (COORD){.X = (msg_index + PREFIX) % console_width, .Y = home_y + ((msg_index + PREFIX) / console_width)});
+        COORD new_cursor = {
+            .X = (msg_index + PREFIX) % console_width,
+            .Y = home_y + ((msg_index + PREFIX) / console_width)};
+        SetConsoleCursorPosition(console_out, new_cursor);
       }
-      continue;
+      break;
     case VK_RIGHT:
       if (msg_index < msg->count) {
         if (ctrl) {
-          while (msg_index < msg->count && msg->items[msg_index] != CIN_SPACE) {
-            ++msg_index;
-          }
-          while (msg_index < msg->count && msg->items[++msg_index] == CIN_SPACE) {
-          }
+          while (msg_index < msg->count && msg->items[msg_index] != CIN_SPACE) ++msg_index;
+          while (msg_index < msg->count && msg->items[++msg_index] == CIN_SPACE);
         } else {
           ++msg_index;
         }
-        SetConsoleCursorPosition(console_out, (COORD){.X = (msg_index + PREFIX) % console_width, .Y = home_y + ((msg_index + PREFIX) / console_width)});
+        COORD new_cursor = {
+            .X = (msg_index + PREFIX) % console_width,
+            .Y = home_y + ((msg_index + PREFIX) / console_width)};
+        SetConsoleCursorPosition(console_out, new_cursor);
       }
-      continue;
+      break;
     default:
-      if (!c) continue;
-      // wprintf(L"\rchar=%zu, v=%zu, pressed=%d, alt=%d, ctrl=%d\r\n", c, vk, pressed, alt, ctrl);
-      warray_insert(msg, msg_index, c);
-      ++msg_index;
+      if (c) {
+        assert(msg_index <= msg->count);
+        if (msg_index == msg->count) {
+          WriteConsoleW(console_out, &c, 1, NULL, NULL);
+          array_push(msg, c);
+          ++msg_index;
+        } else {
+          array_insert(msg, msg_index, c);
+          hide_cursor();
+          WriteConsoleW(console_out, msg->items + msg_index, msg->count - msg_index, NULL, NULL);
+          ++msg_index;
+          COORD new_cursor = {
+              .X = (msg_index + PREFIX) % console_width,
+              .Y = home_y + ((msg_index + PREFIX) / console_width)};
+          SetConsoleCursorPosition(console_out, new_cursor);
+          show_cursor();
+        }
+        // wprintf(L"\rchar=%zu, v=%zu, pressed=%d, alt=%d, ctrl=%d\r\n", c, vk, pressed, alt, ctrl);
+      }
       break;
     }
-    next_up = (msg->count + PREFIX) / console_width;
-    next_right = (msg->count + PREFIX) % console_width;
-    cursor_info.bVisible = false;
-    SetConsoleCursorInfo(console_out, &cursor_info);
-    SetConsoleCursorPosition(console_out, (COORD){.X = PREFIX, .Y = home_y});
-    WriteConsoleW(console_out, msg->items, msg->count, NULL, NULL);
-    if (msg->count < prev_count) {
-      FillConsoleOutputCharacterW(console_out, CIN_SPACE, prev_count - msg->count,
-                                  (COORD){.X = next_right, .Y = home_y + next_up}, &filled);
-    }
-    if (next_right == 0 && next_up > prev_up) {
-      SetConsoleCursorPosition(console_out, (COORD){.X = 0, .Y = home_y + next_up});
-    } else if (msg_index < msg->count) {
-      SetConsoleCursorPosition(console_out,
-                               (COORD){.X = (msg_index + PREFIX) % console_width,
-                                       .Y = home_y + ((msg_index + PREFIX) / console_width)});
-    }
-    cursor_info.bVisible = true;
-    SetConsoleCursorInfo(console_out, &cursor_info);
-    prev_count = msg->count;
-    prev_up = next_up;
   }
   if (!SetConsoleMode(console_in, console_mode_in)) {
     log_last_error("input", "Failed to reset in console mode");
