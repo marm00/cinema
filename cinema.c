@@ -175,22 +175,80 @@ static const char *level_to_str(Cin_Log_Level level) {
   }
 }
 
+typedef struct Console_Message {
+  struct Console_Message *next;
+  struct Console_Message *prev;
+  wchar_t *items;
+  size_t count;
+  size_t capacity;
+} Console_Message;
+
+// TODO: change to found upper bound
+static const size_t CM_INIT_CAP = 64;
+
+static Console_Message *create_console_message() {
+  Console_Message *msg = malloc(sizeof(Console_Message));
+  assert(msg);
+#if defined(NDEBUG)
+  wchar_t *items = malloc(CM_INIT_CAP * sizeof(wchar_t));
+#else
+  wchar_t *items = calloc(CM_INIT_CAP, sizeof(wchar_t));
+#endif
+  assert(items);
+  msg->next = NULL;
+  msg->prev = NULL;
+  msg->items = items;
+  msg->count = 0;
+  msg->capacity = CM_INIT_CAP;
+  return msg;
+}
+
+typedef struct REPL {
+  COORD home;
+  HANDLE out;
+  CONSOLE_SCREEN_BUFFER_INFO screen_info;
+  SHORT width;
+  Console_Message *msg;
+  size_t msg_index;
+  DWORD _filled;
+  HANDLE in;
+  DWORD in_mode;
+  BOOL viewport_bound;
+  CONSOLE_CURSOR_INFO cursor_info;
+} REPL;
+
+static REPL repl = {0};
+
+#define CIN_SPACE 0x20
 static CRITICAL_SECTION log_lock;
+static int16_t console_width = 0;
+#define PREFIX_STR L"\r> "
+#define PREFIX_STRLEN (sizeof(PREFIX_STR) / sizeof(*(PREFIX_STR))) - 1
+#define PREFIX 2
 
 static void log_message(Cin_Log_Level level, const char *location, const char *message, ...) {
   if (level > GLOBAL_LOG_LEVEL) {
     return;
   }
   EnterCriticalSection(&log_lock);
+  SetConsoleCursorPosition(repl.out, repl.home);
   // Process variadic args
   va_list args;
   va_start(args, message);
-  fprintf(stderr, "[%s] [%s] ", level_to_str(level), location);
+  fprintf(stderr, "\r[%s] [%s] ", level_to_str(level), location);
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wformat-nonliteral"
   vfprintf(stderr, message, args);
 #pragma clang diagnostic pop
+  GetConsoleScreenBufferInfo(repl.out, &repl.screen_info);
+  if (repl.msg->count > repl.screen_info.dwCursorPosition.X) {
+    // TODO: not repl.msg->count, but max of that and width
+    FillConsoleOutputCharacterW(repl.out, CIN_SPACE, repl.msg->count, repl.home, &repl._filled);
+  }
   fprintf(stderr, "\n");
+  repl.home.Y = repl.screen_info.dwCursorPosition.Y + 1;
+  WriteConsoleW(repl.out, PREFIX_STR, PREFIX_STRLEN, NULL, NULL);
+  WriteConsoleW(repl.out, repl.msg->items, repl.msg->count, NULL, NULL);
   va_end(args);
   LeaveCriticalSection(&log_lock);
 }
@@ -1361,7 +1419,6 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
 #define CIN_ENTER 0x0D
 #define CIN_CONTROL_BACK 0x7F
 #define CIN_ESCAPE 0x1B
-#define CIN_SPACE 0x20
 #define CIN_VK_0 0x30
 #define CIN_VK_9 0x39
 #define CIN_VK_A 0x41
@@ -1370,34 +1427,6 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
 // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences
 #define ESC "\x1b"
 #define CSI "\x1b["
-
-typedef struct Console_Message {
-  struct Console_Message *next;
-  struct Console_Message *prev;
-  wchar_t *items;
-  size_t count;
-  size_t capacity;
-} Console_Message;
-
-// TODO: change to found upper bound
-static const size_t CM_INIT_CAP = 64;
-
-static Console_Message *create_console_message() {
-  Console_Message *msg = malloc(sizeof(Console_Message));
-  assert(msg);
-#if defined(NDEBUG)
-  wchar_t *items = malloc(CM_INIT_CAP * sizeof(wchar_t));
-#else
-  wchar_t *items = calloc(CM_INIT_CAP, sizeof(wchar_t));
-#endif
-  assert(items);
-  msg->next = NULL;
-  msg->prev = NULL;
-  msg->items = items;
-  msg->count = 0;
-  msg->capacity = CM_INIT_CAP;
-  return msg;
-}
 
 static inline bool bounded_console(HANDLE console) {
   assert(console);
@@ -1422,30 +1451,60 @@ static inline bool bounded_console(HANDLE console) {
   return prev_bot == next_bot;
 }
 
-static CONSOLE_CURSOR_INFO cursor_info = {0};
-static HANDLE console_out = {0};
-
 static inline void hide_cursor(void) {
-  assert(&console_out);
-  assert(&cursor_info);
-  assert(cursor_info.bVisible);
-  cursor_info.bVisible = false;
-  SetConsoleCursorInfo(console_out, &cursor_info);
+  assert(&repl.out);
+  assert(&repl.cursor_info);
+  assert(repl.cursor_info.bVisible);
+  repl.cursor_info.bVisible = false;
+  SetConsoleCursorInfo(repl.out, &repl.cursor_info);
 }
 
 static inline void show_cursor(void) {
-  assert(&console_out);
-  assert(&cursor_info);
-  assert(!cursor_info.bVisible);
-  cursor_info.bVisible = true;
-  SetConsoleCursorInfo(console_out, &cursor_info);
+  assert(&repl.out);
+  assert(&repl.cursor_info);
+  assert(!repl.cursor_info.bVisible);
+  repl.cursor_info.bVisible = true;
+  SetConsoleCursorInfo(repl.out, &repl.cursor_info);
+}
+
+
+#define viewport_warning "Large inputs can cause minor scrollback issues in your terminal. " \
+                         "If this is bothersome, you can use vanilla cmd.exe "               \
+                         "(Command Prompt), which works perfectly.\n"
+
+static inline bool init_repl(void) {
+  if (!SetConsoleCP(CP_UTF8)) goto code_page;
+  if (!SetConsoleOutputCP(CP_UTF8)) goto code_page;
+  if ((repl.in = GetStdHandle(STD_INPUT_HANDLE)) == INVALID_HANDLE_VALUE) goto handle_in;
+  if (!GetConsoleMode(repl.in, &repl.in_mode)) goto handle_in;
+  if (!SetConsoleMode(repl.in, repl.in_mode | ENABLE_PROCESSED_INPUT | ENABLE_WINDOW_INPUT)) goto handle_in;
+  if ((repl.out = GetStdHandle(STD_OUTPUT_HANDLE)) == INVALID_HANDLE_VALUE) goto handle_out;
+  if ((repl.viewport_bound = bounded_console(repl.out))) printf(viewport_warning);
+  if (!GetConsoleScreenBufferInfo(repl.out, &repl.screen_info)) goto handle_out;
+  if (!GetConsoleCursorInfo(repl.out, &repl.cursor_info)) goto handle_out;
+  if (!WriteConsoleW(repl.out, PREFIX_STR, PREFIX_STRLEN, NULL, NULL)) goto handle_out;
+  repl.msg = create_console_message();
+  repl.msg_index = 0;
+  repl.home = (COORD){.X = PREFIX, .Y = repl.screen_info.dwCursorPosition.Y};
+  repl._filled = 0;
+  return true;
+code_page:
+  printf("Failed to modify console code page\n");
+  return false;
+handle_in:
+  printf("Failed to setup console input handle\n");
+  return false;
+handle_out:
+  printf("Failed to setup console output handle\n");
+  return false;
 }
 
 int main(int argc, char **argv) {
-#ifndef _WIN32
-  log_message(LOG_ERROR, "main", "Error: Your operating system is not supported, Windows-only currently.");
+#if !defined(_WIN32)
+  printf("Error: Your operating system is not supported, Windows-only currently.\n");
   return 1;
 #endif
+  if (!init_repl()) exit(1);
   InitializeCriticalSectionAndSpinCount(&log_lock, 0);
   char *config_filename = "config.json";
   cJSON *json = parse_json(config_filename);
@@ -1462,35 +1521,6 @@ int main(int argc, char **argv) {
   setup_substring_search();
   uint8_t pattern[] = "test";
   // document_listing(pattern, (int32_t)strlen((const char *)pattern));
-
-  if (!SetConsoleCP(CP_UTF8)) {
-    log_last_error("input", "Failed to set console code page");
-    return 1;
-  }
-  if (!SetConsoleOutputCP(CP_UTF8)) {
-    log_last_error("input", "Failed to set console output code page");
-    return 1;
-  }
-  HANDLE console_in = GetStdHandle(STD_INPUT_HANDLE);
-  if (console_in == INVALID_HANDLE_VALUE) {
-    log_last_error("input", "Failed to get stdin handle");
-    return 1;
-  }
-  DWORD console_mode_in;
-  if (!GetConsoleMode(console_in, &console_mode_in)) {
-    log_last_error("input", "Failed to get in console mode");
-    return 1;
-  }
-  if (!SetConsoleMode(console_in, console_mode_in | ENABLE_PROCESSED_INPUT | ENABLE_WINDOW_INPUT)) {
-    log_last_error("input", "Failed to set in console mode");
-    return 1;
-  }
-  console_out = GetStdHandle(STD_OUTPUT_HANDLE);
-  if (console_out == INVALID_HANDLE_VALUE) {
-    log_last_error("input", "Failed to get stdout handle");
-    return 1;
-  }
-  DWORD console_mode_out = 0;
   // NOTE: It seems impossible to reach outside the bounds of the viewport
   // within Windows Terminal using a custom ReadConsoleInput approach. Virtual
   // terminal sequences and related APIs are bound to the viewport. So,
@@ -1498,32 +1528,12 @@ int main(int argc, char **argv) {
   // the cmd.exe approach using screen clear tricks and partial writes,
   // but even then the scroll space will surely become confusing at some
   // point. We accept the scrollback issues and support relative consoles.
-  // TODO: support bounded viewport (excluding scrollback)
-  bool viewport_bound = bounded_console(console_out);
-  if (viewport_bound) {
-    log_message(LOG_WARNING, "main",
-                "Large inputs can cause minor scrollback issues in your terminal. "
-                "If this is bothersome, you can use vanilla cmd.exe "
-                "(Command Prompt), which works perfectly.");
-    // TODO: maybe use ENABLE_PROCESSED_OUTPUT & virtual terminal sequences when viewport_bound
-    // if (!GetConsoleMode(console_out, &console_mode_out)) {
-    //   log_last_error("input", "Failed to get out console mode");
-    //   return 1;
-    // }
-    // if (!SetConsoleMode(console_out, console_mode_out | ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING)) {
-    //   log_last_error("input", "Failed to set out console mode");
-    //   return 1;
-    // }
-  }
-  CONSOLE_SCREEN_BUFFER_INFO console_info = {0};
-  COORD console_cursor = {0};
+  // TODO: support bounded viewport (excluding scrollback) maybe VT100
   DWORD read = 0;
   INPUT_RECORD input = {0};
   wchar_t c = 0;
   wchar_t vk = 0;
-  Console_Message *msg = create_console_message();
   Console_Message *msg_tail = NULL;
-  size_t msg_index = 0;
   size_t prev_count = 0;
   wchar_t prefix[32];
   size_t prefix_len = 0;
@@ -1533,25 +1543,12 @@ int main(int argc, char **argv) {
   int16_t next_right = 0;
   int16_t curr_up = 0;
   int16_t curr_right = 0;
-  size_t visible_lines = console_info.srWindow.Bottom - console_info.srWindow.Top;
-  if (!GetConsoleScreenBufferInfo(console_out, &console_info)) {
-    log_last_error("input", "Failed to get console screen buffer info");
-    return 1;
-  }
-  if (!GetConsoleCursorInfo(console_out, &cursor_info)) {
-    log_last_error("input", "Failed to get console cursor info");
-    return 1;
-  }
+  size_t visible_lines = repl.screen_info.srWindow.Bottom - repl.screen_info.srWindow.Top;
   // NOTE: console cursor positions (both x/y) are 0-based
-  int16_t home_y = console_info.dwCursorPosition.Y;
-  int16_t console_width = console_info.dwSize.X;
+  console_width = repl.screen_info.dwSize.X;
   assert(console_width);
-  WriteConsoleW(console_out, L"\r> ", wcslen(L"\r> "), NULL, NULL);
-  static const int PREFIX = 2;
-  DWORD filled;
-  COORD home = {.X = PREFIX, .Y = home_y};
   for (;;) {
-    if (!ReadConsoleInputW(console_in, &input, 1, &read)) {
+    if (!ReadConsoleInputW(repl.in, &input, 1, &read)) {
       log_last_error("input", "Failed to read console input");
       return 1;
     }
@@ -1571,14 +1568,13 @@ int main(int argc, char **argv) {
       break;
     case WINDOW_BUFFER_SIZE_EVENT:
       console_width = input.Event.WindowBufferSizeEvent.dwSize.X;
-      if (!GetConsoleScreenBufferInfo(console_out, &console_info)) {
+      if (!GetConsoleScreenBufferInfo(repl.out, &repl.screen_info)) {
         log_last_error("input", "Failed to get console screen buffer info");
         return 1;
       }
       assert(console_width);
-      int16_t shift = (msg_index + PREFIX) / console_width;
-      home_y = console_info.dwCursorPosition.Y - shift;
-      // TODO: update home COORD as well
+      int16_t shift = (repl.msg_index + PREFIX) / console_width;
+      repl.home.Y = repl.screen_info.dwCursorPosition.Y - shift;
       continue;
     default:
       log_message(LOG_ERROR, "input", "\rUnsupported event: 0x%.4x", input.EventType);
@@ -1587,246 +1583,247 @@ int main(int argc, char **argv) {
     bool move_cursor = false;
     switch (vk) {
     case VK_RETURN:
-      FillConsoleOutputCharacterW(console_out, CIN_SPACE, msg->count, home, &filled);
-      SetConsoleCursorPosition(console_out, home);
-      assert(msg->items);
-      size_t i = msg->count;
-      while (i && iswspace(msg->items[i - 1])) --i;
+      FillConsoleOutputCharacterW(repl.out, CIN_SPACE, repl.msg->count, repl.home, &repl._filled);
+      SetConsoleCursorPosition(repl.out, repl.home);
+      assert(repl.msg->items);
+      size_t i = repl.msg->count;
+      while (i && iswspace(repl.msg->items[i - 1])) --i;
       bool empty = !i;
-      bool dup = !empty && msg_tail && msg->count == msg_tail->count &&
-                 !wcsncmp(msg->items, msg_tail->items, msg->count);
+      bool dup = !empty && msg_tail && repl.msg->count == msg_tail->count &&
+                 !wcsncmp(repl.msg->items, msg_tail->items, repl.msg->count);
       if (empty || dup) {
-        if (msg_tail) msg->prev = msg_tail;
-        msg->next = NULL;
-        msg_index = 0;
-        msg->count = 0;
+        if (msg_tail) repl.msg->prev = msg_tail;
+        repl.msg->next = NULL;
+        repl.msg_index = 0;
+        repl.msg->count = 0;
       } else {
         // commit to history
         if (msg_tail) {
-          msg_tail->next = msg;
-          msg->prev = msg_tail;
+          msg_tail->next = repl.msg;
+          repl.msg->prev = msg_tail;
         }
-        msg->next = NULL;
-        msg_tail = msg;
-        msg = create_console_message();
-        msg->prev = msg_tail;
-        msg_index = 0;
-        msg->count = 0;
+        repl.msg->next = NULL;
+        msg_tail = repl.msg;
+        repl.msg = create_console_message();
+        repl.msg->prev = msg_tail;
+        repl.msg_index = 0;
+        repl.msg->count = 0;
       }
       break;
     case VK_ESCAPE:
-      FillConsoleOutputCharacterW(console_out, CIN_SPACE, msg->count, home, &filled);
-      SetConsoleCursorPosition(console_out, home);
-      msg_index = 0;
-      msg->count = 0;
+      FillConsoleOutputCharacterW(repl.out, CIN_SPACE, repl.msg->count, repl.home, &repl._filled);
+      SetConsoleCursorPosition(repl.out, repl.home);
+      repl.msg_index = 0;
+      repl.msg->count = 0;
       break;
     case VK_HOME:
-      SetConsoleCursorPosition(console_out, home);
-      msg_index = 0;
+      SetConsoleCursorPosition(repl.out, repl.home);
+      repl.msg_index = 0;
+      log_message(LOG_INFO, "somewhere", "Hello!");
       break;
     case VK_END:
-      msg_index = msg->count;
+      repl.msg_index = repl.msg->count;
       COORD new_cursor = {
-          .X = (msg_index + PREFIX) % console_width,
-          .Y = home_y + ((msg_index + PREFIX) / console_width)};
-      SetConsoleCursorPosition(console_out, new_cursor);
+          .X = (repl.msg_index + PREFIX) % console_width,
+          .Y = repl.home.Y + ((repl.msg_index + PREFIX) / console_width)};
+      SetConsoleCursorPosition(repl.out, new_cursor);
       break;
     case VK_BACK:
-      if (msg_index) {
-        size_t left = msg_index - 1;
+      if (repl.msg_index) {
+        size_t left = repl.msg_index - 1;
         if (ctrl) {
-          while (left && msg->items[left] == CIN_SPACE) --left;
-          while (left && msg->items[left - 1] != CIN_SPACE) --left;
+          while (left && repl.msg->items[left] == CIN_SPACE) --left;
+          while (left && repl.msg->items[left - 1] != CIN_SPACE) --left;
         }
-        if (msg_index < msg->count) {
-          wmemmove(&msg->items[left], &msg->items[msg_index], msg->count - msg_index);
+        if (repl.msg_index < repl.msg->count) {
+          wmemmove(&repl.msg->items[left], &repl.msg->items[repl.msg_index], repl.msg->count - repl.msg_index);
         }
-        size_t deleted = msg_index - left;
-        msg->count -= deleted;
-        msg_index = left;
+        size_t deleted = repl.msg_index - left;
+        repl.msg->count -= deleted;
+        repl.msg_index = left;
         hide_cursor();
         COORD new_cursor = {
-            .X = (msg_index + PREFIX) % console_width,
-            .Y = home_y + ((msg_index + PREFIX) / console_width)};
-        SetConsoleCursorPosition(console_out, new_cursor);
-        size_t leftover = msg->count - msg_index;
+            .X = (repl.msg_index + PREFIX) % console_width,
+            .Y = repl.home.Y + ((repl.msg_index + PREFIX) / console_width)};
+        SetConsoleCursorPosition(repl.out, new_cursor);
+        size_t leftover = repl.msg->count - repl.msg_index;
         COORD del_cursor = {
-            .X = (msg->count + PREFIX) % console_width,
-            .Y = home_y + ((msg->count + PREFIX) / console_width)};
-        FillConsoleOutputCharacterW(console_out, CIN_SPACE, deleted, del_cursor, &filled);
+            .X = (repl.msg->count + PREFIX) % console_width,
+            .Y = repl.home.Y + ((repl.msg->count + PREFIX) / console_width)};
+        FillConsoleOutputCharacterW(repl.out, CIN_SPACE, deleted, del_cursor, &repl._filled);
         if (leftover) {
-          WriteConsoleW(console_out, msg->items + msg_index, leftover, NULL, NULL);
-          SetConsoleCursorPosition(console_out, new_cursor);
+          WriteConsoleW(repl.out, repl.msg->items + repl.msg_index, leftover, NULL, NULL);
+          SetConsoleCursorPosition(repl.out, new_cursor);
         }
         show_cursor();
       }
       break;
     case VK_DELETE:
-      if (msg_index < msg->count) {
-        size_t right = msg_index;
+      if (repl.msg_index < repl.msg->count) {
+        size_t right = repl.msg_index;
         if (ctrl) {
-          while (right < msg->count && msg->items[right] != CIN_SPACE) ++right;
-          while (right < msg->count && msg->items[++right] == CIN_SPACE);
+          while (right < repl.msg->count && repl.msg->items[right] != CIN_SPACE) ++right;
+          while (right < repl.msg->count && repl.msg->items[++right] == CIN_SPACE);
         } else {
           ++right;
         }
-        size_t leftover = msg->count - right;
-        size_t deleted = right - msg_index;
-        msg->count -= deleted;
+        size_t leftover = repl.msg->count - right;
+        size_t deleted = right - repl.msg_index;
+        repl.msg->count -= deleted;
         COORD del_cursor = {
-            .X = (msg->count + PREFIX) % console_width,
-            .Y = home_y + ((msg->count + PREFIX)) / console_width};
-        FillConsoleOutputCharacterW(console_out, CIN_SPACE, deleted, del_cursor, &filled);
+            .X = (repl.msg->count + PREFIX) % console_width,
+            .Y = repl.home.Y + ((repl.msg->count + PREFIX)) / console_width};
+        FillConsoleOutputCharacterW(repl.out, CIN_SPACE, deleted, del_cursor, &repl._filled);
         if (leftover) {
-          wmemmove(&msg->items[msg_index], &msg->items[right], leftover);
+          wmemmove(&repl.msg->items[repl.msg_index], &repl.msg->items[right], leftover);
           COORD curr_cursor = {
-              .X = (msg_index + PREFIX) % console_width,
-              .Y = home_y + ((msg_index + PREFIX) / console_width)};
+              .X = (repl.msg_index + PREFIX) % console_width,
+              .Y = repl.home.Y + ((repl.msg_index + PREFIX) / console_width)};
           hide_cursor();
-          WriteConsoleW(console_out, msg->items + msg_index, leftover, NULL, NULL);
-          SetConsoleCursorPosition(console_out, curr_cursor);
+          WriteConsoleW(repl.out, repl.msg->items + repl.msg_index, leftover, NULL, NULL);
+          SetConsoleCursorPosition(repl.out, curr_cursor);
           show_cursor();
         }
       }
       break;
     case VK_UP:
-      if (msg->prev) {
-        size_t prev_count = msg->count;
-        array_resize(msg, msg->prev->count);
-        wmemcpy(msg->items, msg->prev->items, msg->prev->count);
-        msg_index = msg->count;
-        msg->next = msg->prev->next;
-        msg->prev = msg->prev->prev;
+      if (repl.msg->prev) {
+        size_t prev_count = repl.msg->count;
+        array_resize(repl.msg, repl.msg->prev->count);
+        wmemcpy(repl.msg->items, repl.msg->prev->items, repl.msg->prev->count);
+        repl.msg_index = repl.msg->count;
+        repl.msg->next = repl.msg->prev->next;
+        repl.msg->prev = repl.msg->prev->prev;
         hide_cursor();
-        if (msg->count < prev_count) {
+        if (repl.msg->count < prev_count) {
           COORD del_cursor = {
-              .X = (msg->count + PREFIX) % console_width,
-              .Y = home_y + ((msg->count + PREFIX) / console_width)};
-          FillConsoleOutputCharacterW(console_out, CIN_SPACE, prev_count - msg->count, del_cursor, &filled);
+              .X = (repl.msg->count + PREFIX) % console_width,
+              .Y = repl.home.Y + ((repl.msg->count + PREFIX) / console_width)};
+          FillConsoleOutputCharacterW(repl.out, CIN_SPACE, prev_count - repl.msg->count, del_cursor, &repl._filled);
         }
-        SetConsoleCursorPosition(console_out, home);
-        WriteConsoleW(console_out, msg->items, msg->count, NULL, NULL);
+        SetConsoleCursorPosition(repl.out, repl.home);
+        WriteConsoleW(repl.out, repl.msg->items, repl.msg->count, NULL, NULL);
         show_cursor();
       }
       break;
     case VK_DOWN:
-      if (msg->next) {
-        size_t prev_count = msg->count;
-        msg->capacity = msg->next->capacity;
-        msg->count = msg->next->count;
-        wmemcpy(msg->items, msg->next->items, msg->next->count);
+      if (repl.msg->next) {
+        size_t prev_count = repl.msg->count;
+        repl.msg->capacity = repl.msg->next->capacity;
+        repl.msg->count = repl.msg->next->count;
+        wmemcpy(repl.msg->items, repl.msg->next->items, repl.msg->next->count);
         hide_cursor();
-        if (msg->count < prev_count) {
+        if (repl.msg->count < prev_count) {
           COORD del_cursor = {
-              .X = (msg->count + PREFIX) % console_width,
-              .Y = home_y + ((msg->count + PREFIX) / console_width)};
-          FillConsoleOutputCharacterW(console_out, CIN_SPACE, prev_count - msg->count, del_cursor, &filled);
+              .X = (repl.msg->count + PREFIX) % console_width,
+              .Y = repl.home.Y + ((repl.msg->count + PREFIX) / console_width)};
+          FillConsoleOutputCharacterW(repl.out, CIN_SPACE, prev_count - repl.msg->count, del_cursor, &repl._filled);
         }
-        SetConsoleCursorPosition(console_out, home);
-        WriteConsoleW(console_out, msg->items, msg->count, NULL, NULL);
+        SetConsoleCursorPosition(repl.out, repl.home);
+        WriteConsoleW(repl.out, repl.msg->items, repl.msg->count, NULL, NULL);
         show_cursor();
-        msg->prev = msg->next->prev;
-        msg->next = msg->next->next;
-        msg_index = msg->count;
+        repl.msg->prev = repl.msg->next->prev;
+        repl.msg->next = repl.msg->next->next;
+        repl.msg_index = repl.msg->count;
       } else {
-        SetConsoleCursorPosition(console_out, home);
-        FillConsoleOutputCharacterW(console_out, CIN_SPACE, msg->count, home, &filled);
-        msg->prev = msg_tail;
-        msg->count = 0;
-        msg_index = 0;
+        SetConsoleCursorPosition(repl.out, repl.home);
+        FillConsoleOutputCharacterW(repl.out, CIN_SPACE, repl.msg->count, repl.home, &repl._filled);
+        repl.msg->prev = msg_tail;
+        repl.msg->count = 0;
+        repl.msg_index = 0;
       }
       break;
     case VK_PRIOR:
-      if (msg->prev) {
-        Console_Message *head = msg->prev;
+      if (repl.msg->prev) {
+        Console_Message *head = repl.msg->prev;
         while (head->prev) head = head->prev;
-        size_t prev_count = msg->count;
-        array_resize(msg, head->count);
-        wmemcpy(msg->items, head->items, head->count);
-        msg_index = msg->count;
-        msg->next = head->next;
+        size_t prev_count = repl.msg->count;
+        array_resize(repl.msg, head->count);
+        wmemcpy(repl.msg->items, head->items, head->count);
+        repl.msg_index = repl.msg->count;
+        repl.msg->next = head->next;
         head = head->prev;
         hide_cursor();
-        if (msg->count < prev_count) {
+        if (repl.msg->count < prev_count) {
           COORD del_cursor = {
-              .X = (msg->count + PREFIX) % console_width,
-              .Y = home_y + ((msg->count + PREFIX) / console_width)};
-          FillConsoleOutputCharacterW(console_out, CIN_SPACE, prev_count - msg->count, del_cursor, &filled);
+              .X = (repl.msg->count + PREFIX) % console_width,
+              .Y = repl.home.Y + ((repl.msg->count + PREFIX) / console_width)};
+          FillConsoleOutputCharacterW(repl.out, CIN_SPACE, prev_count - repl.msg->count, del_cursor, &repl._filled);
         }
-        SetConsoleCursorPosition(console_out, home);
-        WriteConsoleW(console_out, msg->items, msg->count, NULL, NULL);
+        SetConsoleCursorPosition(repl.out, repl.home);
+        WriteConsoleW(repl.out, repl.msg->items, repl.msg->count, NULL, NULL);
         show_cursor();
       }
       break;
     case VK_NEXT:
       if (msg_tail) {
-        size_t prev_count = msg->count;
-        msg->capacity = msg_tail->capacity;
-        msg->count = msg_tail->count;
-        wmemcpy(msg->items, msg_tail->items, msg_tail->count);
+        size_t prev_count = repl.msg->count;
+        repl.msg->capacity = msg_tail->capacity;
+        repl.msg->count = msg_tail->count;
+        wmemcpy(repl.msg->items, msg_tail->items, msg_tail->count);
         hide_cursor();
-        if (msg->count < prev_count) {
+        if (repl.msg->count < prev_count) {
           COORD del_cursor = {
-              .X = (msg->count + PREFIX) % console_width,
-              .Y = home_y + ((msg->count + PREFIX) / console_width)};
-          FillConsoleOutputCharacterW(console_out, CIN_SPACE, prev_count - msg->count, del_cursor, &filled);
+              .X = (repl.msg->count + PREFIX) % console_width,
+              .Y = repl.home.Y + ((repl.msg->count + PREFIX) / console_width)};
+          FillConsoleOutputCharacterW(repl.out, CIN_SPACE, prev_count - repl.msg->count, del_cursor, &repl._filled);
         }
-        SetConsoleCursorPosition(console_out, home);
-        WriteConsoleW(console_out, msg->items, msg->count, NULL, NULL);
+        SetConsoleCursorPosition(repl.out, repl.home);
+        WriteConsoleW(repl.out, repl.msg->items, repl.msg->count, NULL, NULL);
         show_cursor();
-        msg->prev = msg_tail->prev;
-        msg->next = msg_tail->next;
-        msg_index = msg->count;
+        repl.msg->prev = msg_tail->prev;
+        repl.msg->next = msg_tail->next;
+        repl.msg_index = repl.msg->count;
       } else {
-        SetConsoleCursorPosition(console_out, home);
-        FillConsoleOutputCharacterW(console_out, CIN_SPACE, msg->count, home, &filled);
-        msg->count = 0;
-        msg_index = 0;
+        SetConsoleCursorPosition(repl.out, repl.home);
+        FillConsoleOutputCharacterW(repl.out, CIN_SPACE, repl.msg->count, repl.home, &repl._filled);
+        repl.msg->count = 0;
+        repl.msg_index = 0;
       }
       break;
     case VK_LEFT:
-      if (msg_index) {
-        --msg_index;
+      if (repl.msg_index) {
+        --repl.msg_index;
         if (ctrl) {
-          while (msg_index && msg->items[msg_index] == CIN_SPACE) --msg_index;
-          while (msg_index && msg->items[msg_index - 1] != CIN_SPACE) --msg_index;
+          while (repl.msg_index && repl.msg->items[repl.msg_index] == CIN_SPACE) --repl.msg_index;
+          while (repl.msg_index && repl.msg->items[repl.msg_index - 1] != CIN_SPACE) --repl.msg_index;
         }
         COORD new_cursor = {
-            .X = (msg_index + PREFIX) % console_width,
-            .Y = home_y + ((msg_index + PREFIX) / console_width)};
-        SetConsoleCursorPosition(console_out, new_cursor);
+            .X = (repl.msg_index + PREFIX) % console_width,
+            .Y = repl.home.Y + ((repl.msg_index + PREFIX) / console_width)};
+        SetConsoleCursorPosition(repl.out, new_cursor);
       }
       break;
     case VK_RIGHT:
-      if (msg_index < msg->count) {
+      if (repl.msg_index < repl.msg->count) {
         if (ctrl) {
-          while (msg_index < msg->count && msg->items[msg_index] != CIN_SPACE) ++msg_index;
-          while (msg_index < msg->count && msg->items[++msg_index] == CIN_SPACE);
+          while (repl.msg_index < repl.msg->count && repl.msg->items[repl.msg_index] != CIN_SPACE) ++repl.msg_index;
+          while (repl.msg_index < repl.msg->count && repl.msg->items[++repl.msg_index] == CIN_SPACE);
         } else {
-          ++msg_index;
+          ++repl.msg_index;
         }
         COORD new_cursor = {
-            .X = (msg_index + PREFIX) % console_width,
-            .Y = home_y + ((msg_index + PREFIX) / console_width)};
-        SetConsoleCursorPosition(console_out, new_cursor);
+            .X = (repl.msg_index + PREFIX) % console_width,
+            .Y = repl.home.Y + ((repl.msg_index + PREFIX) / console_width)};
+        SetConsoleCursorPosition(repl.out, new_cursor);
       }
       break;
     default:
       if (c) {
-        assert(msg_index <= msg->count);
-        if (msg_index == msg->count) {
-          WriteConsoleW(console_out, &c, 1, NULL, NULL);
-          array_push(msg, c);
-          ++msg_index;
+        assert(repl.msg_index <= repl.msg->count);
+        if (repl.msg_index == repl.msg->count) {
+          WriteConsoleW(repl.out, &c, 1, NULL, NULL);
+          array_push(repl.msg, c);
+          ++repl.msg_index;
         } else {
-          array_insert(msg, msg_index, c);
+          array_insert(repl.msg, repl.msg_index, c);
           hide_cursor();
-          WriteConsoleW(console_out, msg->items + msg_index, msg->count - msg_index, NULL, NULL);
-          ++msg_index;
+          WriteConsoleW(repl.out, repl.msg->items + repl.msg_index, repl.msg->count - repl.msg_index, NULL, NULL);
+          ++repl.msg_index;
           COORD new_cursor = {
-              .X = (msg_index + PREFIX) % console_width,
-              .Y = home_y + ((msg_index + PREFIX) / console_width)};
-          SetConsoleCursorPosition(console_out, new_cursor);
+              .X = (repl.msg_index + PREFIX) % console_width,
+              .Y = repl.home.Y + ((repl.msg_index + PREFIX) / console_width)};
+          SetConsoleCursorPosition(repl.out, new_cursor);
           show_cursor();
         }
         // wprintf(L"\rchar=%zu, v=%zu, pressed=%d, alt=%d, ctrl=%d\r\n", c, vk, pressed, alt, ctrl);
@@ -1834,13 +1831,13 @@ int main(int argc, char **argv) {
       break;
     }
   }
-  if (!SetConsoleMode(console_in, console_mode_in)) {
+  if (!SetConsoleMode(repl.in, repl.in_mode)) {
     log_last_error("input", "Failed to reset in console mode");
     return 1;
   }
-  if (viewport_bound) {
+  if (repl.viewport_bound) {
     // TODO: enable if using virtual terminal sequences if viewport_bound
-    // if (!SetConsoleMode(console_out, console_mode_out)) {
+    // if (!SetConsoleMode(repl.out, console_mode_out)) {
     //   log_last_error("input", "Failed to reset out console mode");
     //   return 1;
     // }
