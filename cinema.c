@@ -273,6 +273,24 @@ static inline bool ctrl_on(PINPUT_RECORD input) {
   return input->Event.KeyEvent.dwControlKeyState & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED);
 }
 
+static inline void rewrite_post_log(void) {
+  GetConsoleScreenBufferInfo(repl.out, &repl.screen_info);
+  assert(repl.msg->count <= SHRT_MAX && "SHORT overflow");
+  if ((SHORT)repl.msg->count > repl.screen_info.dwCursorPosition.X) {
+    SHORT leftover = repl.screen_info.dwSize.X - min((SHORT)repl.msg->count, repl.screen_info.dwCursorPosition.X);
+    FillConsoleOutputCharacterW(repl.out, CIN_SPACE, (DWORD)leftover, repl.screen_info.dwCursorPosition, &repl._filled);
+  }
+  fprintf(stderr, "\n");
+  assert(repl.screen_info.dwCursorPosition.Y < SHRT_MAX && "SHORT overflow");
+  repl.home.Y = repl.screen_info.dwCursorPosition.Y + 1;
+  WriteConsoleW(repl.out, PREFIX_STR, PREFIX_STRLEN, NULL, NULL);
+  WriteConsoleW(repl.out, repl.msg->items, repl.msg->count, NULL, NULL);
+  if (repl.msg_index < repl.msg->count) {
+    cursor_curr();
+  }
+  show_cursor();
+}
+
 static CRITICAL_SECTION log_lock;
 
 static void log_message(Cin_Log_Level level, const char *location, const char *message, ...) {
@@ -289,21 +307,7 @@ static void log_message(Cin_Log_Level level, const char *location, const char *m
 #pragma clang diagnostic ignored "-Wformat-nonliteral"
   vfprintf(stderr, message, args);
 #pragma clang diagnostic pop
-  GetConsoleScreenBufferInfo(repl.out, &repl.screen_info);
-  assert(repl.msg->count <= SHRT_MAX && "SHORT overflow");
-  if ((SHORT)repl.msg->count > repl.screen_info.dwCursorPosition.X) {
-    SHORT leftover = repl.screen_info.dwSize.X - min((SHORT)repl.msg->count, repl.screen_info.dwCursorPosition.X);
-    FillConsoleOutputCharacterW(repl.out, CIN_SPACE, (DWORD)leftover, repl.screen_info.dwCursorPosition, &repl._filled);
-  }
-  fprintf(stderr, "\n");
-  assert(repl.screen_info.dwCursorPosition.Y < SHRT_MAX && "SHORT overflow");
-  repl.home.Y = repl.screen_info.dwCursorPosition.Y + 1;
-  WriteConsoleW(repl.out, PREFIX_STR, PREFIX_STRLEN, NULL, NULL);
-  WriteConsoleW(repl.out, repl.msg->items, repl.msg->count, NULL, NULL);
-  if (repl.msg_index < repl.msg->count) {
-    cursor_curr();
-  }
-  show_cursor();
+  rewrite_post_log();
   va_end(args);
   LeaveCriticalSection(&log_lock);
 }
@@ -362,7 +366,10 @@ static void log_wmessage(Cin_Log_Level level, const char *location, const wchar_
   vswprintf(formatted_wmsg, CIN_MAX_LOG_MESSAGE, wmessage, args);
   static char buf[CIN_MAX_PATH_BYTES];
   utf16_to_utf8(formatted_wmsg, buf, -1);
-  fprintf(stderr, "[%s] [%s] %s\n", level_to_str(level), location, buf);
+  hide_cursor();
+  cursor_home();
+  fprintf(stderr, "\r[%s] [%s] %s", level_to_str(level), location, buf);
+  rewrite_post_log();
   va_end(args);
   LeaveCriticalSection(&log_lock);
 }
@@ -379,15 +386,26 @@ static void log_last_error(const char *location, const char *message, ...) {
     log_message(LOG_ERROR, location, "Failed to log GLE=%d - error with GLE=%d", code, GetLastError());
     return;
   }
+  // remove trailing \r\n
+  char *str = (char *)buffer;
+  size_t len = strlen(str);
+  assert(len >= 2);
+  assert(str[len - 1] == '\n');
+  assert(str[len - 2] == '\r');
+  str[--len] = '\0';
+  str[--len] = '\0';
   va_list args;
   va_start(args, message);
-  fprintf(stderr, "[%s] [%s] ", log_level, location);
+  hide_cursor();
+  cursor_home();
+  fprintf(stderr, "\r[%s] [%s] ", log_level, location);
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wformat-nonliteral"
   vfprintf(stderr, message, args);
 #pragma clang diagnostic pop
-  va_end(args);
   fprintf(stderr, " - Code %lu: %s", code, (char *)buffer);
+  rewrite_post_log();
+  va_end(args);
   LocalFree(buffer);
   LeaveCriticalSection(&log_lock);
 }
