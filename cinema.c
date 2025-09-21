@@ -179,14 +179,14 @@ typedef struct Console_Message {
   struct Console_Message *next;
   struct Console_Message *prev;
   wchar_t *items;
-  size_t count;
-  size_t capacity;
+  DWORD count;
+  DWORD capacity;
 } Console_Message;
 
 // TODO: change to found upper bound
-static const size_t CM_INIT_CAP = 64;
+static const DWORD CM_INIT_CAP = 64;
 
-static Console_Message *create_console_message() {
+static Console_Message *create_console_message(void) {
   Console_Message *msg = malloc(sizeof(Console_Message));
   assert(msg);
 #if defined(NDEBUG)
@@ -210,7 +210,7 @@ typedef struct REPL {
   CONSOLE_SCREEN_BUFFER_INFO screen_info;
   SHORT width;
   Console_Message *msg;
-  size_t msg_index;
+  DWORD msg_index;
   DWORD _filled;
   HANDLE in;
   DWORD in_mode;
@@ -237,10 +237,12 @@ static inline void show_cursor(void) {
   SetConsoleCursorInfo(repl.out, &repl.cursor_info);
 }
 
-static inline COORD next_cursor(size_t index) {
+static inline COORD next_cursor(DWORD index) {
+  assert(((index + PREFIX) / (DWORD)repl.screen_info.dwSize.X) <= SHRT_MAX && "SHORT overflow");
+  assert((SHORT)(SHRT_MAX - ((index + PREFIX) / (DWORD)repl.screen_info.dwSize.X)) >= repl.home.Y && "SHORT overflow");
   return (COORD){
-      .X = (index + PREFIX) % repl.screen_info.dwSize.X,
-      .Y = repl.home.Y + ((index + PREFIX) / repl.screen_info.dwSize.X)};
+      .X = (SHORT)((index + PREFIX) % (DWORD)repl.screen_info.dwSize.X),
+      .Y = repl.home.Y + (SHORT)((index + PREFIX) / (DWORD)repl.screen_info.dwSize.X)};
 }
 
 static inline COORD tail_cursor(void) {
@@ -259,12 +261,16 @@ static inline void cursor_curr(void) {
   SetConsoleCursorPosition(repl.out, curr_cursor());
 }
 
-static inline void clear_tail(size_t count) {
+static inline void clear_tail(DWORD count) {
   FillConsoleOutputCharacterW(repl.out, CIN_SPACE, count, tail_cursor(), &repl._filled);
 }
 
 static inline void clear_full(void) {
   FillConsoleOutputCharacterW(repl.out, CIN_SPACE, repl.msg->count, repl.home, &repl._filled);
+}
+
+static inline bool ctrl_on(PINPUT_RECORD input) {
+  return input->Event.KeyEvent.dwControlKeyState & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED);
 }
 
 static CRITICAL_SECTION log_lock;
@@ -284,11 +290,13 @@ static void log_message(Cin_Log_Level level, const char *location, const char *m
   vfprintf(stderr, message, args);
 #pragma clang diagnostic pop
   GetConsoleScreenBufferInfo(repl.out, &repl.screen_info);
-  if (repl.msg->count > repl.screen_info.dwCursorPosition.X) {
-    size_t leftover = repl.screen_info.dwSize.X - min(repl.msg->count, repl.screen_info.dwCursorPosition.X);
-    FillConsoleOutputCharacterW(repl.out, CIN_SPACE, leftover, repl.screen_info.dwCursorPosition, &repl._filled);
+  assert(repl.msg->count <= SHRT_MAX && "SHORT overflow");
+  if ((SHORT)repl.msg->count > repl.screen_info.dwCursorPosition.X) {
+    SHORT leftover = repl.screen_info.dwSize.X - min((SHORT)repl.msg->count, repl.screen_info.dwCursorPosition.X);
+    FillConsoleOutputCharacterW(repl.out, CIN_SPACE, (DWORD)leftover, repl.screen_info.dwCursorPosition, &repl._filled);
   }
   fprintf(stderr, "\n");
+  assert(repl.screen_info.dwCursorPosition.Y < SHRT_MAX && "SHORT overflow");
   repl.home.Y = repl.screen_info.dwCursorPosition.Y + 1;
   WriteConsoleW(repl.out, PREFIX_STR, PREFIX_STRLEN, NULL, NULL);
   WriteConsoleW(repl.out, repl.msg->items, repl.msg->count, NULL, NULL);
@@ -1559,40 +1567,20 @@ int main(int argc, char **argv) {
   // but even then the scroll space will surely become confusing at some
   // point. We accept the scrollback issues and support relative consoles.
   // TODO: support bounded viewport (excluding scrollback) maybe VT100
-  DWORD read = 0;
-  INPUT_RECORD input = {0};
-  wchar_t c = 0;
-  wchar_t vk = 0;
+  // size_t visible_lines = repl.screen_info.srWindow.Bottom - repl.screen_info.srWindow.Top;
   Console_Message *msg_tail = NULL;
-  size_t prev_count = 0;
-  wchar_t prefix[32];
-  size_t prefix_len = 0;
-  int16_t prev_up = 0;
-  int16_t prev_right = 0;
-  int16_t next_up = 0;
-  int16_t next_right = 0;
-  int16_t curr_up = 0;
-  int16_t curr_right = 0;
-  size_t visible_lines = repl.screen_info.srWindow.Bottom - repl.screen_info.srWindow.Top;
-  // NOTE: console cursor positions (both x/y) are 0-based
-  repl.screen_info.dwSize.X = repl.screen_info.dwSize.X;
-  assert(repl.screen_info.dwSize.X);
   for (;;) {
+    INPUT_RECORD input;
+    DWORD read;
     if (!ReadConsoleInputW(repl.in, &input, 1, &read)) {
       log_last_error("input", "Failed to read console input");
-      return 1;
+      break;
     }
-    c = input.Event.KeyEvent.uChar.UnicodeChar;
-    vk = input.Event.KeyEvent.wVirtualKeyCode;
-    bool pressed = input.Event.KeyEvent.bKeyDown;
-    bool ctrl = input.Event.KeyEvent.dwControlKeyState & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED);
-    bool alt = input.Event.KeyEvent.dwControlKeyState & (LEFT_ALT_PRESSED | RIGHT_ALT_PRESSED);
-    if (!pressed && (!c || vk != VK_MENU)) {
-      continue;
-    }
+    wchar_t c = input.Event.KeyEvent.uChar.UnicodeChar;
+    wchar_t vk = input.Event.KeyEvent.wVirtualKeyCode;
+    if (!input.Event.KeyEvent.bKeyDown && (!c || vk != VK_MENU)) continue;
     switch (input.EventType) {
     case KEY_EVENT:
-      // wprintf(L"\rchar=%zu, v=%zu, pressed=%d, alt=%d, ctrl=%d\r\n", c, vk, pressed, alt, ctrl);
       break;
     case WINDOW_BUFFER_SIZE_EVENT:
       repl.screen_info.dwSize.X = input.Event.WindowBufferSizeEvent.dwSize.X;
@@ -1601,19 +1589,20 @@ int main(int argc, char **argv) {
         return 1;
       }
       assert(repl.screen_info.dwSize.X);
-      int16_t shift = (repl.msg_index + PREFIX) / repl.screen_info.dwSize.X;
-      repl.home.Y = repl.screen_info.dwCursorPosition.Y - shift;
+      DWORD shift = (repl.msg_index + PREFIX) / (DWORD)repl.screen_info.dwSize.X;
+      assert(shift <= SHRT_MAX && "SHORT overflow");
+      assert(repl.screen_info.dwCursorPosition.Y >= (SHORT)shift && "SHORT underflow");
+      repl.home.Y = repl.screen_info.dwCursorPosition.Y - (SHORT)shift;
       continue;
     default:
       continue;
     }
-    bool move_cursor = false;
     switch (vk) {
     case VK_RETURN:
       clear_full();
       cursor_home();
       assert(repl.msg->items);
-      size_t i = repl.msg->count;
+      DWORD i = repl.msg->count;
       while (i && iswspace(repl.msg->items[i - 1])) --i;
       bool empty = !i;
       bool dup = !empty && msg_tail && repl.msg->count == msg_tail->count &&
@@ -1653,20 +1642,20 @@ int main(int argc, char **argv) {
       break;
     case VK_BACK:
       if (repl.msg_index) {
-        size_t left = repl.msg_index - 1;
-        if (ctrl) {
+        DWORD left = repl.msg_index - 1;
+        if (ctrl_on(&input)) {
           while (left && repl.msg->items[left] == CIN_SPACE) --left;
           while (left && repl.msg->items[left - 1] != CIN_SPACE) --left;
         }
         if (repl.msg_index < repl.msg->count) {
           wmemmove(&repl.msg->items[left], &repl.msg->items[repl.msg_index], repl.msg->count - repl.msg_index);
         }
-        size_t deleted = repl.msg_index - left;
+        DWORD deleted = repl.msg_index - left;
         repl.msg->count -= deleted;
         repl.msg_index = left;
         hide_cursor();
         cursor_curr();
-        size_t leftover = repl.msg->count - repl.msg_index;
+        DWORD leftover = repl.msg->count - repl.msg_index;
         clear_tail(deleted);
         if (leftover) {
           WriteConsoleW(repl.out, repl.msg->items + repl.msg_index, leftover, NULL, NULL);
@@ -1677,15 +1666,15 @@ int main(int argc, char **argv) {
       break;
     case VK_DELETE:
       if (repl.msg_index < repl.msg->count) {
-        size_t right = repl.msg_index;
-        if (ctrl) {
+        DWORD right = repl.msg_index;
+        if (ctrl_on(&input)) {
           while (right < repl.msg->count && repl.msg->items[right] != CIN_SPACE) ++right;
           while (right < repl.msg->count && repl.msg->items[++right] == CIN_SPACE);
         } else {
           ++right;
         }
-        size_t leftover = repl.msg->count - right;
-        size_t deleted = right - repl.msg_index;
+        DWORD leftover = repl.msg->count - right;
+        DWORD deleted = right - repl.msg_index;
         repl.msg->count -= deleted;
         clear_tail(deleted);
         if (leftover) {
@@ -1699,7 +1688,7 @@ int main(int argc, char **argv) {
       break;
     case VK_UP:
       if (repl.msg->prev) {
-        size_t prev_count = repl.msg->count;
+        DWORD prev_count = repl.msg->count;
         array_resize(repl.msg, repl.msg->prev->count);
         wmemcpy(repl.msg->items, repl.msg->prev->items, repl.msg->prev->count);
         repl.msg_index = repl.msg->count;
@@ -1714,7 +1703,7 @@ int main(int argc, char **argv) {
       break;
     case VK_DOWN:
       if (repl.msg->next) {
-        size_t prev_count = repl.msg->count;
+        DWORD prev_count = repl.msg->count;
         repl.msg->capacity = repl.msg->next->capacity;
         repl.msg->count = repl.msg->next->count;
         wmemcpy(repl.msg->items, repl.msg->next->items, repl.msg->next->count);
@@ -1738,7 +1727,7 @@ int main(int argc, char **argv) {
       if (repl.msg->prev) {
         Console_Message *head = repl.msg->prev;
         while (head->prev) head = head->prev;
-        size_t prev_count = repl.msg->count;
+        DWORD prev_count = repl.msg->count;
         array_resize(repl.msg, head->count);
         wmemcpy(repl.msg->items, head->items, head->count);
         repl.msg_index = repl.msg->count;
@@ -1753,7 +1742,7 @@ int main(int argc, char **argv) {
       break;
     case VK_NEXT:
       if (msg_tail) {
-        size_t prev_count = repl.msg->count;
+        DWORD prev_count = repl.msg->count;
         repl.msg->capacity = msg_tail->capacity;
         repl.msg->count = msg_tail->count;
         wmemcpy(repl.msg->items, msg_tail->items, msg_tail->count);
@@ -1775,7 +1764,7 @@ int main(int argc, char **argv) {
     case VK_LEFT:
       if (repl.msg_index) {
         --repl.msg_index;
-        if (ctrl) {
+        if (ctrl_on(&input)) {
           while (repl.msg_index && repl.msg->items[repl.msg_index] == CIN_SPACE) --repl.msg_index;
           while (repl.msg_index && repl.msg->items[repl.msg_index - 1] != CIN_SPACE) --repl.msg_index;
         }
@@ -1784,7 +1773,7 @@ int main(int argc, char **argv) {
       break;
     case VK_RIGHT:
       if (repl.msg_index < repl.msg->count) {
-        if (ctrl) {
+        if (ctrl_on(&input)) {
           while (repl.msg_index < repl.msg->count && repl.msg->items[repl.msg_index] != CIN_SPACE) ++repl.msg_index;
           while (repl.msg_index < repl.msg->count && repl.msg->items[++repl.msg_index] == CIN_SPACE);
         } else {
@@ -1808,7 +1797,7 @@ int main(int argc, char **argv) {
           cursor_curr();
           show_cursor();
         }
-        // wprintf(L"\rchar=%zu, v=%zu, pressed=%d, alt=%d, ctrl=%d\r\n", c, vk, pressed, alt, ctrl);
+        // wprintf(L"\rchar=%zu, v=%zu, pressed=%d, ctrl=%d\r\n", c, vk, pressed, ctrl);
       }
       break;
     }
