@@ -220,44 +220,61 @@ typedef struct REPL {
 
 static REPL repl = {0};
 
+#define CIN_SPACE 0x20
+#define PREFIX_STR L"\r> "
+#define PREFIX_STRLEN (sizeof(PREFIX_STR) / sizeof(*(PREFIX_STR))) - 1
+#define PREFIX 2
+
 static inline void hide_cursor(void) {
-  assert(&repl.out);
-  assert(&repl.cursor_info);
   assert(repl.cursor_info.bVisible);
   repl.cursor_info.bVisible = false;
   SetConsoleCursorInfo(repl.out, &repl.cursor_info);
 }
 
 static inline void show_cursor(void) {
-  assert(&repl.out);
-  assert(&repl.cursor_info);
   assert(!repl.cursor_info.bVisible);
   repl.cursor_info.bVisible = true;
   SetConsoleCursorInfo(repl.out, &repl.cursor_info);
 }
 
-#define CIN_SPACE 0x20
+static inline COORD next_cursor(size_t index) {
+  return (COORD){
+      .X = (index + PREFIX) % repl.screen_info.dwSize.X,
+      .Y = repl.home.Y + ((index + PREFIX) / repl.screen_info.dwSize.X)};
+}
+
+static inline COORD tail_cursor(void) {
+  return next_cursor(repl.msg->count);
+}
+
+static inline COORD curr_cursor(void) {
+  return next_cursor(repl.msg_index);
+}
+
+static inline void cursor_home(void) {
+  SetConsoleCursorPosition(repl.out, repl.home);
+}
+
+static inline void cursor_curr(void) {
+  SetConsoleCursorPosition(repl.out, curr_cursor());
+}
+
 static CRITICAL_SECTION log_lock;
-static int16_t console_width = 0;
-#define PREFIX_STR L"\r> "
-#define PREFIX_STRLEN (sizeof(PREFIX_STR) / sizeof(*(PREFIX_STR))) - 1
-#define PREFIX 2
 
 static void log_message(Cin_Log_Level level, const char *location, const char *message, ...) {
   if (level > GLOBAL_LOG_LEVEL) {
     return;
   }
   EnterCriticalSection(&log_lock);
-  hide_cursor();
-  SetConsoleCursorPosition(repl.out, repl.home);
   va_list args;
   va_start(args, message);
+  hide_cursor();
+  cursor_home();
   fprintf(stderr, "\r[%s] [%s] ", level_to_str(level), location);
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wformat-nonliteral"
   vfprintf(stderr, message, args);
 #pragma clang diagnostic pop
-  va_end(args);
   GetConsoleScreenBufferInfo(repl.out, &repl.screen_info);
   if (repl.msg->count > repl.screen_info.dwCursorPosition.X) {
     size_t leftover = repl.screen_info.dwSize.X - min(repl.msg->count, repl.screen_info.dwCursorPosition.X);
@@ -268,12 +285,10 @@ static void log_message(Cin_Log_Level level, const char *location, const char *m
   WriteConsoleW(repl.out, PREFIX_STR, PREFIX_STRLEN, NULL, NULL);
   WriteConsoleW(repl.out, repl.msg->items, repl.msg->count, NULL, NULL);
   if (repl.msg_index < repl.msg->count) {
-    COORD new_cursor = {
-        .X = (repl.msg_index + PREFIX) % console_width,
-        .Y = repl.home.Y + ((repl.msg_index + PREFIX) / console_width)};
-    SetConsoleCursorPosition(repl.out, new_cursor);
+    cursor_curr();
   }
   show_cursor();
+  va_end(args);
   LeaveCriticalSection(&log_lock);
 }
 
@@ -1552,8 +1567,8 @@ int main(int argc, char **argv) {
   int16_t curr_right = 0;
   size_t visible_lines = repl.screen_info.srWindow.Bottom - repl.screen_info.srWindow.Top;
   // NOTE: console cursor positions (both x/y) are 0-based
-  console_width = repl.screen_info.dwSize.X;
-  assert(console_width);
+  repl.screen_info.dwSize.X = repl.screen_info.dwSize.X;
+  assert(repl.screen_info.dwSize.X);
   for (;;) {
     if (!ReadConsoleInputW(repl.in, &input, 1, &read)) {
       log_last_error("input", "Failed to read console input");
@@ -1574,13 +1589,13 @@ int main(int argc, char **argv) {
     case FOCUS_EVENT:
       break;
     case WINDOW_BUFFER_SIZE_EVENT:
-      console_width = input.Event.WindowBufferSizeEvent.dwSize.X;
+      repl.screen_info.dwSize.X = input.Event.WindowBufferSizeEvent.dwSize.X;
       if (!GetConsoleScreenBufferInfo(repl.out, &repl.screen_info)) {
         log_last_error("input", "Failed to get console screen buffer info");
         return 1;
       }
-      assert(console_width);
-      int16_t shift = (repl.msg_index + PREFIX) / console_width;
+      assert(repl.screen_info.dwSize.X);
+      int16_t shift = (repl.msg_index + PREFIX) / repl.screen_info.dwSize.X;
       repl.home.Y = repl.screen_info.dwCursorPosition.Y - shift;
       continue;
     default:
@@ -1591,7 +1606,7 @@ int main(int argc, char **argv) {
     switch (vk) {
     case VK_RETURN:
       FillConsoleOutputCharacterW(repl.out, CIN_SPACE, repl.msg->count, repl.home, &repl._filled);
-      SetConsoleCursorPosition(repl.out, repl.home);
+      cursor_home();
       assert(repl.msg->items);
       size_t i = repl.msg->count;
       while (i && iswspace(repl.msg->items[i - 1])) --i;
@@ -1619,20 +1634,17 @@ int main(int argc, char **argv) {
       break;
     case VK_ESCAPE:
       FillConsoleOutputCharacterW(repl.out, CIN_SPACE, repl.msg->count, repl.home, &repl._filled);
-      SetConsoleCursorPosition(repl.out, repl.home);
+      cursor_home();
       repl.msg_index = 0;
       repl.msg->count = 0;
       break;
     case VK_HOME:
-      SetConsoleCursorPosition(repl.out, repl.home);
+      cursor_home();
       repl.msg_index = 0;
       break;
     case VK_END:
       repl.msg_index = repl.msg->count;
-      COORD new_cursor = {
-          .X = (repl.msg_index + PREFIX) % console_width,
-          .Y = repl.home.Y + ((repl.msg_index + PREFIX) / console_width)};
-      SetConsoleCursorPosition(repl.out, new_cursor);
+      cursor_curr();
       break;
     case VK_BACK:
       if (repl.msg_index) {
@@ -1648,18 +1660,12 @@ int main(int argc, char **argv) {
         repl.msg->count -= deleted;
         repl.msg_index = left;
         hide_cursor();
-        COORD new_cursor = {
-            .X = (repl.msg_index + PREFIX) % console_width,
-            .Y = repl.home.Y + ((repl.msg_index + PREFIX) / console_width)};
-        SetConsoleCursorPosition(repl.out, new_cursor);
+        cursor_curr();
         size_t leftover = repl.msg->count - repl.msg_index;
-        COORD del_cursor = {
-            .X = (repl.msg->count + PREFIX) % console_width,
-            .Y = repl.home.Y + ((repl.msg->count + PREFIX) / console_width)};
-        FillConsoleOutputCharacterW(repl.out, CIN_SPACE, deleted, del_cursor, &repl._filled);
+        FillConsoleOutputCharacterW(repl.out, CIN_SPACE, deleted, tail_cursor(), &repl._filled);
         if (leftover) {
           WriteConsoleW(repl.out, repl.msg->items + repl.msg_index, leftover, NULL, NULL);
-          SetConsoleCursorPosition(repl.out, new_cursor);
+          cursor_curr();
         }
         show_cursor();
       }
@@ -1676,18 +1682,12 @@ int main(int argc, char **argv) {
         size_t leftover = repl.msg->count - right;
         size_t deleted = right - repl.msg_index;
         repl.msg->count -= deleted;
-        COORD del_cursor = {
-            .X = (repl.msg->count + PREFIX) % console_width,
-            .Y = repl.home.Y + ((repl.msg->count + PREFIX)) / console_width};
-        FillConsoleOutputCharacterW(repl.out, CIN_SPACE, deleted, del_cursor, &repl._filled);
+        FillConsoleOutputCharacterW(repl.out, CIN_SPACE, deleted, tail_cursor(), &repl._filled);
         if (leftover) {
           wmemmove(&repl.msg->items[repl.msg_index], &repl.msg->items[right], leftover);
-          COORD curr_cursor = {
-              .X = (repl.msg_index + PREFIX) % console_width,
-              .Y = repl.home.Y + ((repl.msg_index + PREFIX) / console_width)};
           hide_cursor();
           WriteConsoleW(repl.out, repl.msg->items + repl.msg_index, leftover, NULL, NULL);
-          SetConsoleCursorPosition(repl.out, curr_cursor);
+          cursor_curr();
           show_cursor();
         }
       }
@@ -1702,12 +1702,9 @@ int main(int argc, char **argv) {
         repl.msg->prev = repl.msg->prev->prev;
         hide_cursor();
         if (repl.msg->count < prev_count) {
-          COORD del_cursor = {
-              .X = (repl.msg->count + PREFIX) % console_width,
-              .Y = repl.home.Y + ((repl.msg->count + PREFIX) / console_width)};
-          FillConsoleOutputCharacterW(repl.out, CIN_SPACE, prev_count - repl.msg->count, del_cursor, &repl._filled);
+          FillConsoleOutputCharacterW(repl.out, CIN_SPACE, prev_count - repl.msg->count, tail_cursor(), &repl._filled);
         }
-        SetConsoleCursorPosition(repl.out, repl.home);
+        cursor_home();
         WriteConsoleW(repl.out, repl.msg->items, repl.msg->count, NULL, NULL);
         show_cursor();
       }
@@ -1720,19 +1717,16 @@ int main(int argc, char **argv) {
         wmemcpy(repl.msg->items, repl.msg->next->items, repl.msg->next->count);
         hide_cursor();
         if (repl.msg->count < prev_count) {
-          COORD del_cursor = {
-              .X = (repl.msg->count + PREFIX) % console_width,
-              .Y = repl.home.Y + ((repl.msg->count + PREFIX) / console_width)};
-          FillConsoleOutputCharacterW(repl.out, CIN_SPACE, prev_count - repl.msg->count, del_cursor, &repl._filled);
+          FillConsoleOutputCharacterW(repl.out, CIN_SPACE, prev_count - repl.msg->count, tail_cursor(), &repl._filled);
         }
-        SetConsoleCursorPosition(repl.out, repl.home);
+        cursor_home();
         WriteConsoleW(repl.out, repl.msg->items, repl.msg->count, NULL, NULL);
         show_cursor();
         repl.msg->prev = repl.msg->next->prev;
         repl.msg->next = repl.msg->next->next;
         repl.msg_index = repl.msg->count;
       } else {
-        SetConsoleCursorPosition(repl.out, repl.home);
+        cursor_home();
         FillConsoleOutputCharacterW(repl.out, CIN_SPACE, repl.msg->count, repl.home, &repl._filled);
         repl.msg->prev = msg_tail;
         repl.msg->count = 0;
@@ -1751,12 +1745,9 @@ int main(int argc, char **argv) {
         head = head->prev;
         hide_cursor();
         if (repl.msg->count < prev_count) {
-          COORD del_cursor = {
-              .X = (repl.msg->count + PREFIX) % console_width,
-              .Y = repl.home.Y + ((repl.msg->count + PREFIX) / console_width)};
-          FillConsoleOutputCharacterW(repl.out, CIN_SPACE, prev_count - repl.msg->count, del_cursor, &repl._filled);
+          FillConsoleOutputCharacterW(repl.out, CIN_SPACE, prev_count - repl.msg->count, tail_cursor(), &repl._filled);
         }
-        SetConsoleCursorPosition(repl.out, repl.home);
+        cursor_home();
         WriteConsoleW(repl.out, repl.msg->items, repl.msg->count, NULL, NULL);
         show_cursor();
       }
@@ -1769,19 +1760,16 @@ int main(int argc, char **argv) {
         wmemcpy(repl.msg->items, msg_tail->items, msg_tail->count);
         hide_cursor();
         if (repl.msg->count < prev_count) {
-          COORD del_cursor = {
-              .X = (repl.msg->count + PREFIX) % console_width,
-              .Y = repl.home.Y + ((repl.msg->count + PREFIX) / console_width)};
-          FillConsoleOutputCharacterW(repl.out, CIN_SPACE, prev_count - repl.msg->count, del_cursor, &repl._filled);
+          FillConsoleOutputCharacterW(repl.out, CIN_SPACE, prev_count - repl.msg->count, tail_cursor(), &repl._filled);
         }
-        SetConsoleCursorPosition(repl.out, repl.home);
+        cursor_home();
         WriteConsoleW(repl.out, repl.msg->items, repl.msg->count, NULL, NULL);
         show_cursor();
         repl.msg->prev = msg_tail->prev;
         repl.msg->next = msg_tail->next;
         repl.msg_index = repl.msg->count;
       } else {
-        SetConsoleCursorPosition(repl.out, repl.home);
+        cursor_home();
         FillConsoleOutputCharacterW(repl.out, CIN_SPACE, repl.msg->count, repl.home, &repl._filled);
         repl.msg->count = 0;
         repl.msg_index = 0;
@@ -1794,10 +1782,7 @@ int main(int argc, char **argv) {
           while (repl.msg_index && repl.msg->items[repl.msg_index] == CIN_SPACE) --repl.msg_index;
           while (repl.msg_index && repl.msg->items[repl.msg_index - 1] != CIN_SPACE) --repl.msg_index;
         }
-        COORD new_cursor = {
-            .X = (repl.msg_index + PREFIX) % console_width,
-            .Y = repl.home.Y + ((repl.msg_index + PREFIX) / console_width)};
-        SetConsoleCursorPosition(repl.out, new_cursor);
+        cursor_curr();
       }
       break;
     case VK_RIGHT:
@@ -1808,10 +1793,7 @@ int main(int argc, char **argv) {
         } else {
           ++repl.msg_index;
         }
-        COORD new_cursor = {
-            .X = (repl.msg_index + PREFIX) % console_width,
-            .Y = repl.home.Y + ((repl.msg_index + PREFIX) / console_width)};
-        SetConsoleCursorPosition(repl.out, new_cursor);
+        cursor_curr();
       }
       break;
     default:
@@ -1826,10 +1808,7 @@ int main(int argc, char **argv) {
           hide_cursor();
           WriteConsoleW(repl.out, repl.msg->items + repl.msg_index, repl.msg->count - repl.msg_index, NULL, NULL);
           ++repl.msg_index;
-          COORD new_cursor = {
-              .X = (repl.msg_index + PREFIX) % console_width,
-              .Y = repl.home.Y + ((repl.msg_index + PREFIX) / console_width)};
-          SetConsoleCursorPosition(repl.out, new_cursor);
+          cursor_curr();
           show_cursor();
         }
         // wprintf(L"\rchar=%zu, v=%zu, pressed=%d, alt=%d, ctrl=%d\r\n", c, vk, pressed, alt, ctrl);
