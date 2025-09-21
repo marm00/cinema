@@ -259,6 +259,14 @@ static inline void cursor_curr(void) {
   SetConsoleCursorPosition(repl.out, curr_cursor());
 }
 
+static inline void clear_tail(size_t count) {
+  FillConsoleOutputCharacterW(repl.out, CIN_SPACE, count, tail_cursor(), &repl._filled);
+}
+
+static inline void clear_full(void) {
+  FillConsoleOutputCharacterW(repl.out, CIN_SPACE, repl.msg->count, repl.home, &repl._filled);
+}
+
 static CRITICAL_SECTION log_lock;
 
 static void log_message(Cin_Log_Level level, const char *location, const char *message, ...) {
@@ -1586,8 +1594,6 @@ int main(int argc, char **argv) {
     case KEY_EVENT:
       // wprintf(L"\rchar=%zu, v=%zu, pressed=%d, alt=%d, ctrl=%d\r\n", c, vk, pressed, alt, ctrl);
       break;
-    case FOCUS_EVENT:
-      break;
     case WINDOW_BUFFER_SIZE_EVENT:
       repl.screen_info.dwSize.X = input.Event.WindowBufferSizeEvent.dwSize.X;
       if (!GetConsoleScreenBufferInfo(repl.out, &repl.screen_info)) {
@@ -1599,13 +1605,12 @@ int main(int argc, char **argv) {
       repl.home.Y = repl.screen_info.dwCursorPosition.Y - shift;
       continue;
     default:
-      log_message(LOG_ERROR, "input", "\rUnsupported event: 0x%.4x", input.EventType);
-      break;
+      continue;
     }
     bool move_cursor = false;
     switch (vk) {
     case VK_RETURN:
-      FillConsoleOutputCharacterW(repl.out, CIN_SPACE, repl.msg->count, repl.home, &repl._filled);
+      clear_full();
       cursor_home();
       assert(repl.msg->items);
       size_t i = repl.msg->count;
@@ -1633,7 +1638,7 @@ int main(int argc, char **argv) {
       }
       break;
     case VK_ESCAPE:
-      FillConsoleOutputCharacterW(repl.out, CIN_SPACE, repl.msg->count, repl.home, &repl._filled);
+      clear_full();
       cursor_home();
       repl.msg_index = 0;
       repl.msg->count = 0;
@@ -1662,7 +1667,7 @@ int main(int argc, char **argv) {
         hide_cursor();
         cursor_curr();
         size_t leftover = repl.msg->count - repl.msg_index;
-        FillConsoleOutputCharacterW(repl.out, CIN_SPACE, deleted, tail_cursor(), &repl._filled);
+        clear_tail(deleted);
         if (leftover) {
           WriteConsoleW(repl.out, repl.msg->items + repl.msg_index, leftover, NULL, NULL);
           cursor_curr();
@@ -1682,7 +1687,7 @@ int main(int argc, char **argv) {
         size_t leftover = repl.msg->count - right;
         size_t deleted = right - repl.msg_index;
         repl.msg->count -= deleted;
-        FillConsoleOutputCharacterW(repl.out, CIN_SPACE, deleted, tail_cursor(), &repl._filled);
+        clear_tail(deleted);
         if (leftover) {
           wmemmove(&repl.msg->items[repl.msg_index], &repl.msg->items[right], leftover);
           hide_cursor();
@@ -1701,9 +1706,7 @@ int main(int argc, char **argv) {
         repl.msg->next = repl.msg->prev->next;
         repl.msg->prev = repl.msg->prev->prev;
         hide_cursor();
-        if (repl.msg->count < prev_count) {
-          FillConsoleOutputCharacterW(repl.out, CIN_SPACE, prev_count - repl.msg->count, tail_cursor(), &repl._filled);
-        }
+        if (repl.msg->count < prev_count) clear_tail(prev_count - repl.msg->count);
         cursor_home();
         WriteConsoleW(repl.out, repl.msg->items, repl.msg->count, NULL, NULL);
         show_cursor();
@@ -1716,9 +1719,7 @@ int main(int argc, char **argv) {
         repl.msg->count = repl.msg->next->count;
         wmemcpy(repl.msg->items, repl.msg->next->items, repl.msg->next->count);
         hide_cursor();
-        if (repl.msg->count < prev_count) {
-          FillConsoleOutputCharacterW(repl.out, CIN_SPACE, prev_count - repl.msg->count, tail_cursor(), &repl._filled);
-        }
+        if (repl.msg->count < prev_count) clear_tail(prev_count - repl.msg->count);
         cursor_home();
         WriteConsoleW(repl.out, repl.msg->items, repl.msg->count, NULL, NULL);
         show_cursor();
@@ -1727,7 +1728,7 @@ int main(int argc, char **argv) {
         repl.msg_index = repl.msg->count;
       } else {
         cursor_home();
-        FillConsoleOutputCharacterW(repl.out, CIN_SPACE, repl.msg->count, repl.home, &repl._filled);
+        clear_full();
         repl.msg->prev = msg_tail;
         repl.msg->count = 0;
         repl.msg_index = 0;
@@ -1744,9 +1745,7 @@ int main(int argc, char **argv) {
         repl.msg->next = head->next;
         head = head->prev;
         hide_cursor();
-        if (repl.msg->count < prev_count) {
-          FillConsoleOutputCharacterW(repl.out, CIN_SPACE, prev_count - repl.msg->count, tail_cursor(), &repl._filled);
-        }
+        if (repl.msg->count < prev_count) clear_tail(prev_count - repl.msg->count);
         cursor_home();
         WriteConsoleW(repl.out, repl.msg->items, repl.msg->count, NULL, NULL);
         show_cursor();
@@ -1759,9 +1758,7 @@ int main(int argc, char **argv) {
         repl.msg->count = msg_tail->count;
         wmemcpy(repl.msg->items, msg_tail->items, msg_tail->count);
         hide_cursor();
-        if (repl.msg->count < prev_count) {
-          FillConsoleOutputCharacterW(repl.out, CIN_SPACE, prev_count - repl.msg->count, tail_cursor(), &repl._filled);
-        }
+        if (repl.msg->count < prev_count) clear_tail(prev_count - repl.msg->count);
         cursor_home();
         WriteConsoleW(repl.out, repl.msg->items, repl.msg->count, NULL, NULL);
         show_cursor();
@@ -1770,7 +1767,7 @@ int main(int argc, char **argv) {
         repl.msg_index = repl.msg->count;
       } else {
         cursor_home();
-        FillConsoleOutputCharacterW(repl.out, CIN_SPACE, repl.msg->count, repl.home, &repl._filled);
+        clear_full();
         repl.msg->count = 0;
         repl.msg_index = 0;
       }
