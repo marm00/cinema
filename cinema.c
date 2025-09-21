@@ -203,6 +203,7 @@ static Console_Message *create_console_message() {
   return msg;
 }
 
+// TODO: fix padding / prune
 typedef struct REPL {
   COORD home;
   HANDLE out;
@@ -219,6 +220,22 @@ typedef struct REPL {
 
 static REPL repl = {0};
 
+static inline void hide_cursor(void) {
+  assert(&repl.out);
+  assert(&repl.cursor_info);
+  assert(repl.cursor_info.bVisible);
+  repl.cursor_info.bVisible = false;
+  SetConsoleCursorInfo(repl.out, &repl.cursor_info);
+}
+
+static inline void show_cursor(void) {
+  assert(&repl.out);
+  assert(&repl.cursor_info);
+  assert(!repl.cursor_info.bVisible);
+  repl.cursor_info.bVisible = true;
+  SetConsoleCursorInfo(repl.out, &repl.cursor_info);
+}
+
 #define CIN_SPACE 0x20
 static CRITICAL_SECTION log_lock;
 static int16_t console_width = 0;
@@ -231,8 +248,8 @@ static void log_message(Cin_Log_Level level, const char *location, const char *m
     return;
   }
   EnterCriticalSection(&log_lock);
+  hide_cursor();
   SetConsoleCursorPosition(repl.out, repl.home);
-  // Process variadic args
   va_list args;
   va_start(args, message);
   fprintf(stderr, "\r[%s] [%s] ", level_to_str(level), location);
@@ -240,16 +257,23 @@ static void log_message(Cin_Log_Level level, const char *location, const char *m
 #pragma clang diagnostic ignored "-Wformat-nonliteral"
   vfprintf(stderr, message, args);
 #pragma clang diagnostic pop
+  va_end(args);
   GetConsoleScreenBufferInfo(repl.out, &repl.screen_info);
   if (repl.msg->count > repl.screen_info.dwCursorPosition.X) {
-    // TODO: not repl.msg->count, but max of that and width
-    FillConsoleOutputCharacterW(repl.out, CIN_SPACE, repl.msg->count, repl.home, &repl._filled);
+    size_t leftover = repl.screen_info.dwSize.X - min(repl.msg->count, repl.screen_info.dwCursorPosition.X);
+    FillConsoleOutputCharacterW(repl.out, CIN_SPACE, leftover, repl.screen_info.dwCursorPosition, &repl._filled);
   }
   fprintf(stderr, "\n");
   repl.home.Y = repl.screen_info.dwCursorPosition.Y + 1;
   WriteConsoleW(repl.out, PREFIX_STR, PREFIX_STRLEN, NULL, NULL);
   WriteConsoleW(repl.out, repl.msg->items, repl.msg->count, NULL, NULL);
-  va_end(args);
+  if (repl.msg_index < repl.msg->count) {
+    COORD new_cursor = {
+        .X = (repl.msg_index + PREFIX) % console_width,
+        .Y = repl.home.Y + ((repl.msg_index + PREFIX) / console_width)};
+    SetConsoleCursorPosition(repl.out, new_cursor);
+  }
+  show_cursor();
   LeaveCriticalSection(&log_lock);
 }
 
@@ -1451,23 +1475,6 @@ static inline bool bounded_console(HANDLE console) {
   return prev_bot == next_bot;
 }
 
-static inline void hide_cursor(void) {
-  assert(&repl.out);
-  assert(&repl.cursor_info);
-  assert(repl.cursor_info.bVisible);
-  repl.cursor_info.bVisible = false;
-  SetConsoleCursorInfo(repl.out, &repl.cursor_info);
-}
-
-static inline void show_cursor(void) {
-  assert(&repl.out);
-  assert(&repl.cursor_info);
-  assert(!repl.cursor_info.bVisible);
-  repl.cursor_info.bVisible = true;
-  SetConsoleCursorInfo(repl.out, &repl.cursor_info);
-}
-
-
 #define viewport_warning "Large inputs can cause minor scrollback issues in your terminal. " \
                          "If this is bothersome, you can use vanilla cmd.exe "               \
                          "(Command Prompt), which works perfectly.\n"
@@ -1619,7 +1626,6 @@ int main(int argc, char **argv) {
     case VK_HOME:
       SetConsoleCursorPosition(repl.out, repl.home);
       repl.msg_index = 0;
-      log_message(LOG_INFO, "somewhere", "Hello!");
       break;
     case VK_END:
       repl.msg_index = repl.msg->count;
