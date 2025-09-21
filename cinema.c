@@ -203,19 +203,18 @@ static Console_Message *create_console_message(void) {
   return msg;
 }
 
-// TODO: fix padding / prune
 typedef struct REPL {
-  COORD home;
-  HANDLE out;
-  CONSOLE_SCREEN_BUFFER_INFO screen_info;
-  SHORT width;
   Console_Message *msg;
+  HANDLE out;
   DWORD msg_index;
+  COORD home;
+  COORD dwSize;
+  CONSOLE_CURSOR_INFO cursor_info;
+  COORD dwCursorPosition;
   DWORD _filled;
   HANDLE in;
   DWORD in_mode;
   BOOL viewport_bound;
-  CONSOLE_CURSOR_INFO cursor_info;
 } REPL;
 
 static REPL repl = {0};
@@ -238,11 +237,11 @@ static inline void show_cursor(void) {
 }
 
 static inline COORD next_cursor(DWORD index) {
-  assert(((index + PREFIX) / (DWORD)repl.screen_info.dwSize.X) <= SHRT_MAX && "SHORT overflow");
-  assert((SHORT)(SHRT_MAX - ((index + PREFIX) / (DWORD)repl.screen_info.dwSize.X)) >= repl.home.Y && "SHORT overflow");
+  assert(((index + PREFIX) / (DWORD)repl.dwSize.X) <= SHRT_MAX && "SHORT overflow");
+  assert((SHORT)(SHRT_MAX - ((index + PREFIX) / (DWORD)repl.dwSize.X)) >= repl.home.Y && "SHORT overflow");
   return (COORD){
-      .X = (SHORT)((index + PREFIX) % (DWORD)repl.screen_info.dwSize.X),
-      .Y = repl.home.Y + (SHORT)((index + PREFIX) / (DWORD)repl.screen_info.dwSize.X)};
+      .X = (SHORT)((index + PREFIX) % (DWORD)repl.dwSize.X),
+      .Y = repl.home.Y + (SHORT)((index + PREFIX) / (DWORD)repl.dwSize.X)};
 }
 
 static inline COORD tail_cursor(void) {
@@ -274,15 +273,18 @@ static inline bool ctrl_on(PINPUT_RECORD input) {
 }
 
 static inline void rewrite_post_log(void) {
-  GetConsoleScreenBufferInfo(repl.out, &repl.screen_info);
+  CONSOLE_SCREEN_BUFFER_INFO buffer_info;
+  GetConsoleScreenBufferInfo(repl.out, &buffer_info);
+  repl.dwCursorPosition = buffer_info.dwCursorPosition;
+  repl.dwSize = buffer_info.dwSize;
   assert(repl.msg->count <= SHRT_MAX && "SHORT overflow");
-  if ((SHORT)repl.msg->count > repl.screen_info.dwCursorPosition.X) {
-    SHORT leftover = repl.screen_info.dwSize.X - min((SHORT)repl.msg->count, repl.screen_info.dwCursorPosition.X);
-    FillConsoleOutputCharacterW(repl.out, CIN_SPACE, (DWORD)leftover, repl.screen_info.dwCursorPosition, &repl._filled);
+  if ((SHORT)repl.msg->count > repl.dwCursorPosition.X) {
+    SHORT leftover = repl.dwSize.X - min((SHORT)repl.msg->count, repl.dwCursorPosition.X);
+    FillConsoleOutputCharacterW(repl.out, CIN_SPACE, (DWORD)leftover, repl.dwCursorPosition, &repl._filled);
   }
   fprintf(stderr, "\n");
-  assert(repl.screen_info.dwCursorPosition.Y < SHRT_MAX && "SHORT overflow");
-  repl.home.Y = repl.screen_info.dwCursorPosition.Y + 1;
+  assert(repl.dwCursorPosition.Y < SHRT_MAX && "SHORT overflow");
+  repl.home.Y = repl.dwCursorPosition.Y + 1;
   WriteConsoleW(repl.out, PREFIX_STR, PREFIX_STRLEN, NULL, NULL);
   WriteConsoleW(repl.out, repl.msg->items, repl.msg->count, NULL, NULL);
   if (repl.msg_index < repl.msg->count) {
@@ -1536,12 +1538,15 @@ static inline bool init_repl(void) {
   if (!SetConsoleMode(repl.in, repl.in_mode | ENABLE_PROCESSED_INPUT | ENABLE_WINDOW_INPUT)) goto handle_in;
   if ((repl.out = GetStdHandle(STD_OUTPUT_HANDLE)) == INVALID_HANDLE_VALUE) goto handle_out;
   if ((repl.viewport_bound = bounded_console(repl.out))) printf(viewport_warning);
-  if (!GetConsoleScreenBufferInfo(repl.out, &repl.screen_info)) goto handle_out;
+  CONSOLE_SCREEN_BUFFER_INFO buffer_info;
+  if (!GetConsoleScreenBufferInfo(repl.out, &buffer_info)) goto handle_out;
+  repl.dwCursorPosition = buffer_info.dwCursorPosition;
+  repl.dwSize = buffer_info.dwSize;
   if (!GetConsoleCursorInfo(repl.out, &repl.cursor_info)) goto handle_out;
   if (!WriteConsoleW(repl.out, PREFIX_STR, PREFIX_STRLEN, NULL, NULL)) goto handle_out;
   repl.msg = create_console_message();
   repl.msg_index = 0;
-  repl.home = (COORD){.X = PREFIX, .Y = repl.screen_info.dwCursorPosition.Y};
+  repl.home = (COORD){.X = PREFIX, .Y = repl.dwCursorPosition.Y};
   repl._filled = 0;
   return true;
 code_page:
@@ -1601,16 +1606,19 @@ int main(int argc, char **argv) {
     case KEY_EVENT:
       break;
     case WINDOW_BUFFER_SIZE_EVENT:
-      repl.screen_info.dwSize.X = input.Event.WindowBufferSizeEvent.dwSize.X;
-      if (!GetConsoleScreenBufferInfo(repl.out, &repl.screen_info)) {
+      repl.dwSize.X = input.Event.WindowBufferSizeEvent.dwSize.X;
+      CONSOLE_SCREEN_BUFFER_INFO buffer_info;
+      if (!GetConsoleScreenBufferInfo(repl.out, &buffer_info)) {
         log_last_error("input", "Failed to get console screen buffer info");
         return 1;
       }
-      assert(repl.screen_info.dwSize.X);
-      DWORD shift = (repl.msg_index + PREFIX) / (DWORD)repl.screen_info.dwSize.X;
+      repl.dwCursorPosition = buffer_info.dwCursorPosition;
+      repl.dwSize = buffer_info.dwSize;
+      assert(repl.dwSize.X);
+      DWORD shift = (repl.msg_index + PREFIX) / (DWORD)repl.dwSize.X;
       assert(shift <= SHRT_MAX && "SHORT overflow");
-      assert(repl.screen_info.dwCursorPosition.Y >= (SHORT)shift && "SHORT underflow");
-      repl.home.Y = repl.screen_info.dwCursorPosition.Y - (SHORT)shift;
+      assert(repl.dwCursorPosition.Y >= (SHORT)shift && "SHORT underflow");
+      repl.home.Y = repl.dwCursorPosition.Y - (SHORT)shift;
       continue;
     default:
       continue;
