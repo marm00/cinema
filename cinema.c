@@ -235,12 +235,20 @@ static inline void show_cursor(void) {
   SetConsoleCursorInfo(repl.out, &repl.cursor_info);
 }
 
-static inline COORD next_cursor(DWORD index) {
+static inline SHORT next_x(DWORD index) {
   assert(((index + PREFIX) / (DWORD)repl.dwSize.X) <= SHRT_MAX && "SHORT overflow");
   assert((SHORT)(SHRT_MAX - ((index + PREFIX) / (DWORD)repl.dwSize.X)) >= repl.home.Y && "SHORT overflow");
-  return (COORD){
-      .X = (SHORT)((index + PREFIX) % (DWORD)repl.dwSize.X),
-      .Y = repl.home.Y + (SHORT)((index + PREFIX) / (DWORD)repl.dwSize.X)};
+  return (SHORT)((index + PREFIX) % (DWORD)repl.dwSize.X);
+}
+
+static inline SHORT next_y(DWORD index) {
+  assert(((index + PREFIX) / (DWORD)repl.dwSize.X) <= SHRT_MAX && "SHORT overflow");
+  assert((SHORT)(SHRT_MAX - ((index + PREFIX) / (DWORD)repl.dwSize.X)) >= repl.home.Y && "SHORT overflow");
+  return repl.home.Y + (SHORT)((index + PREFIX) / (DWORD)repl.dwSize.X);
+}
+
+static inline COORD next_cursor(DWORD index) {
+  return (COORD){.X = next_x(index), .Y = next_y(index)};
 }
 
 static inline COORD tail_cursor(void) {
@@ -295,14 +303,35 @@ static inline void rewrite_post_log(void) {
 static CRITICAL_SECTION log_lock;
 
 static void log_preview(void) {
-  const wchar_t *msg = L"tmp";
-  clear_tail(wcslen(msg));
-  wprintf(L"\r\n");
-  wprintf(L"%ls", msg);
-  COORD curr = curr_cursor();
-  curr.X = 0;
-  curr.Y += 1;
-  FillConsoleOutputAttribute(repl.out, FOREGROUND_INTENSITY, wcslen(msg), curr, &repl._filled);
+  static COORD prev_pos = {0};
+  static DWORD prev_len = 0;
+  wchar_t *preview = malloc(80 * sizeof(wchar_t));
+  wchar_t *msg2 = L"123456789012345678922012345678901456789012345678901234099999";
+  DWORD msg_len = wcslen(msg2);
+  COORD tail = {.X = 0, .Y = next_y(repl.msg->count) + 1};
+  if (prev_len != tail.Y) {
+    // TODO: dont clear if there is already text there
+    FillConsoleOutputCharacterW(repl.out, CIN_SPACE, prev_len, prev_pos, &repl._filled);
+  }
+  if (msg_len == repl.dwSize.X) {
+    WriteConsoleW(repl.out, L"\r\n", 2, NULL, NULL);
+    WriteConsoleOutputCharacterW(repl.out, msg2, msg_len, tail, &repl._filled);
+  } else if (msg_len > repl.dwSize.X) {
+    WriteConsoleW(repl.out, L"\r\n", 2, NULL, NULL);
+    assert(msg_len > 3);
+    wmemcpy(preview, msg2, repl.dwSize.X - 3);
+    preview[repl.dwSize.X - 3] = '.';
+    preview[repl.dwSize.X - 2] = '.';
+    preview[repl.dwSize.X - 1] = '.';
+    WriteConsoleOutputCharacterW(repl.out, preview, msg_len, tail, &repl._filled);
+  } else {
+    preview[0] = L'\r';
+    preview[1] = L'\n';
+    wmemcpy(preview + 2, msg2, msg_len);
+    WriteConsoleW(repl.out, preview, msg_len + 2, NULL, NULL);
+  }
+  prev_pos = tail;
+  prev_len = msg_len;
   cursor_curr();
 }
 
@@ -1815,24 +1844,25 @@ int main(int argc, char **argv) {
         cursor_curr();
       }
       continue;
-    default: {
-      if (c) {
-        assert(repl.msg_index <= repl.msg->count);
-        if (repl.msg_index == repl.msg->count) {
-          WriteConsoleW(repl.out, &c, 1, NULL, NULL);
-          array_push(repl.msg, c);
-          ++repl.msg_index;
-        } else {
-          array_insert(repl.msg, repl.msg_index, c);
-          hide_cursor();
-          WriteConsoleW(repl.out, repl.msg->items + repl.msg_index, repl.msg->count - repl.msg_index, NULL, NULL);
-          ++repl.msg_index;
-          cursor_curr();
-          show_cursor();
-        }
-        // wprintf(L"\rchar=%zu, v=%zu, pressed=%d, ctrl=%d\r\n", c, vk, pressed, ctrl);
+    case VK_TAB:
+      continue;
+    default:
+      if (!c) continue;
+      assert(repl.msg_index <= repl.msg->count);
+      if (repl.msg_index == repl.msg->count) {
+        WriteConsoleW(repl.out, &c, 1, NULL, NULL);
+        array_push(repl.msg, c);
+        ++repl.msg_index;
+      } else {
+        array_insert(repl.msg, repl.msg_index, c);
+        hide_cursor();
+        WriteConsoleW(repl.out, repl.msg->items + repl.msg_index, repl.msg->count - repl.msg_index, NULL, NULL);
+        ++repl.msg_index;
+        cursor_curr();
+        show_cursor();
       }
-    } break;
+      // wprintf(L"\rchar=%zu, v=%zu, pressed=%d, ctrl=%d\r\n", c, vk, pressed, ctrl);
+      break;
     }
     log_preview();
   }
