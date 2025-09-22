@@ -183,8 +183,7 @@ typedef struct Console_Message {
   DWORD capacity;
 } Console_Message;
 
-// TODO: change to found upper bound
-static const DWORD CM_INIT_CAP = 64;
+#define CM_INIT_CAP 64
 
 static Console_Message *create_console_message(void) {
   Console_Message *msg = malloc(sizeof(Console_Message));
@@ -206,13 +205,13 @@ static Console_Message *create_console_message(void) {
 typedef struct REPL {
   Console_Message *msg;
   HANDLE out;
+  HANDLE in;
   DWORD msg_index;
   COORD home;
-  COORD dwSize;
   CONSOLE_CURSOR_INFO cursor_info;
+  COORD dwSize;
   COORD dwCursorPosition;
   DWORD _filled;
-  HANDLE in;
   DWORD in_mode;
   BOOL viewport_bound;
 } REPL;
@@ -294,6 +293,18 @@ static inline void rewrite_post_log(void) {
 }
 
 static CRITICAL_SECTION log_lock;
+
+static void log_preview(void) {
+  const wchar_t *msg = L"tmp";
+  clear_tail(wcslen(msg));
+  wprintf(L"\r\n");
+  wprintf(L"%ls", msg);
+  COORD curr = curr_cursor();
+  curr.X = 0;
+  curr.Y += 1;
+  FillConsoleOutputAttribute(repl.out, FOREGROUND_INTENSITY, wcslen(msg), curr, &repl._filled);
+  cursor_curr();
+}
 
 static void log_message(Cin_Log_Level level, const char *location, const char *message, ...) {
   if (level > GLOBAL_LOG_LEVEL) {
@@ -1624,7 +1635,7 @@ int main(int argc, char **argv) {
       continue;
     }
     switch (vk) {
-    case VK_RETURN:
+    case VK_RETURN: {
       clear_full();
       cursor_home();
       assert(repl.msg->items);
@@ -1651,83 +1662,80 @@ int main(int argc, char **argv) {
         repl.msg_index = 0;
         repl.msg->count = 0;
       }
-      break;
-    case VK_ESCAPE:
+    } break;
+    case VK_ESCAPE: {
       clear_full();
       cursor_home();
       repl.msg_index = 0;
       repl.msg->count = 0;
-      break;
+    } break;
     case VK_HOME:
       cursor_home();
       repl.msg_index = 0;
-      break;
+      continue;
     case VK_END:
       repl.msg_index = repl.msg->count;
       cursor_curr();
-      break;
-    case VK_BACK:
-      if (repl.msg_index) {
-        DWORD left = repl.msg_index - 1;
-        if (ctrl_on(&input)) {
-          while (left && repl.msg->items[left] == CIN_SPACE) --left;
-          while (left && repl.msg->items[left - 1] != CIN_SPACE) --left;
-        }
-        if (repl.msg_index < repl.msg->count) {
-          wmemmove(&repl.msg->items[left], &repl.msg->items[repl.msg_index], repl.msg->count - repl.msg_index);
-        }
-        DWORD deleted = repl.msg_index - left;
-        repl.msg->count -= deleted;
-        repl.msg_index = left;
-        hide_cursor();
-        cursor_curr();
-        DWORD leftover = repl.msg->count - repl.msg_index;
-        clear_tail(deleted);
-        if (leftover) {
-          WriteConsoleW(repl.out, repl.msg->items + repl.msg_index, leftover, NULL, NULL);
-          cursor_curr();
-        }
-        show_cursor();
+      continue;
+    case VK_BACK: {
+      if (!repl.msg_index) continue;
+      DWORD left = repl.msg_index - 1;
+      if (ctrl_on(&input)) {
+        while (left && repl.msg->items[left] == CIN_SPACE) --left;
+        while (left && repl.msg->items[left - 1] != CIN_SPACE) --left;
       }
-      break;
-    case VK_DELETE:
       if (repl.msg_index < repl.msg->count) {
-        DWORD right = repl.msg_index;
-        if (ctrl_on(&input)) {
-          while (right < repl.msg->count && repl.msg->items[right] != CIN_SPACE) ++right;
-          while (right < repl.msg->count && repl.msg->items[++right] == CIN_SPACE);
-        } else {
-          ++right;
-        }
-        DWORD leftover = repl.msg->count - right;
-        DWORD deleted = right - repl.msg_index;
-        repl.msg->count -= deleted;
-        clear_tail(deleted);
-        if (leftover) {
-          wmemmove(&repl.msg->items[repl.msg_index], &repl.msg->items[right], leftover);
-          hide_cursor();
-          WriteConsoleW(repl.out, repl.msg->items + repl.msg_index, leftover, NULL, NULL);
-          cursor_curr();
-          show_cursor();
-        }
+        wmemmove(&repl.msg->items[left], &repl.msg->items[repl.msg_index], repl.msg->count - repl.msg_index);
       }
-      break;
-    case VK_UP:
-      if (repl.msg->prev) {
-        DWORD prev_count = repl.msg->count;
-        array_resize(repl.msg, repl.msg->prev->count);
-        wmemcpy(repl.msg->items, repl.msg->prev->items, repl.msg->prev->count);
-        repl.msg_index = repl.msg->count;
-        repl.msg->next = repl.msg->prev->next;
-        repl.msg->prev = repl.msg->prev->prev;
+      DWORD deleted = repl.msg_index - left;
+      repl.msg->count -= deleted;
+      repl.msg_index = left;
+      hide_cursor();
+      cursor_curr();
+      DWORD leftover = repl.msg->count - repl.msg_index;
+      clear_tail(deleted);
+      if (leftover) {
+        WriteConsoleW(repl.out, repl.msg->items + repl.msg_index, leftover, NULL, NULL);
+        cursor_curr();
+      }
+      show_cursor();
+    } break;
+    case VK_DELETE: {
+      if (repl.msg_index == repl.msg->count) continue;
+      DWORD right = repl.msg_index;
+      if (ctrl_on(&input)) {
+        while (right < repl.msg->count && repl.msg->items[right] != CIN_SPACE) ++right;
+        while (right < repl.msg->count && repl.msg->items[++right] == CIN_SPACE);
+      } else {
+        ++right;
+      }
+      DWORD leftover = repl.msg->count - right;
+      DWORD deleted = right - repl.msg_index;
+      repl.msg->count -= deleted;
+      clear_tail(deleted);
+      if (leftover) {
+        wmemmove(&repl.msg->items[repl.msg_index], &repl.msg->items[right], leftover);
         hide_cursor();
-        if (repl.msg->count < prev_count) clear_tail(prev_count - repl.msg->count);
-        cursor_home();
-        WriteConsoleW(repl.out, repl.msg->items, repl.msg->count, NULL, NULL);
+        WriteConsoleW(repl.out, repl.msg->items + repl.msg_index, leftover, NULL, NULL);
+        cursor_curr();
         show_cursor();
       }
-      break;
-    case VK_DOWN:
+    } break;
+    case VK_UP: {
+      if (!repl.msg->prev) continue;
+      DWORD prev_count = repl.msg->count;
+      array_resize(repl.msg, repl.msg->prev->count);
+      wmemcpy(repl.msg->items, repl.msg->prev->items, repl.msg->prev->count);
+      repl.msg_index = repl.msg->count;
+      repl.msg->next = repl.msg->prev->next;
+      repl.msg->prev = repl.msg->prev->prev;
+      hide_cursor();
+      if (repl.msg->count < prev_count) clear_tail(prev_count - repl.msg->count);
+      cursor_home();
+      WriteConsoleW(repl.out, repl.msg->items, repl.msg->count, NULL, NULL);
+      show_cursor();
+    } break;
+    case VK_DOWN: {
       if (repl.msg->next) {
         DWORD prev_count = repl.msg->count;
         repl.msg->capacity = repl.msg->next->capacity;
@@ -1748,25 +1756,24 @@ int main(int argc, char **argv) {
         repl.msg->count = 0;
         repl.msg_index = 0;
       }
-      break;
-    case VK_PRIOR:
-      if (repl.msg->prev) {
-        Console_Message *head = repl.msg->prev;
-        while (head->prev) head = head->prev;
-        DWORD prev_count = repl.msg->count;
-        array_resize(repl.msg, head->count);
-        wmemcpy(repl.msg->items, head->items, head->count);
-        repl.msg_index = repl.msg->count;
-        repl.msg->next = head->next;
-        head = head->prev;
-        hide_cursor();
-        if (repl.msg->count < prev_count) clear_tail(prev_count - repl.msg->count);
-        cursor_home();
-        WriteConsoleW(repl.out, repl.msg->items, repl.msg->count, NULL, NULL);
-        show_cursor();
-      }
-      break;
-    case VK_NEXT:
+    } break;
+    case VK_PRIOR: {
+      if (!repl.msg->prev) continue;
+      Console_Message *head = repl.msg->prev;
+      while (head->prev) head = head->prev;
+      DWORD prev_count = repl.msg->count;
+      array_resize(repl.msg, head->count);
+      wmemcpy(repl.msg->items, head->items, head->count);
+      repl.msg_index = repl.msg->count;
+      repl.msg->next = head->next;
+      head = head->prev;
+      hide_cursor();
+      if (repl.msg->count < prev_count) clear_tail(prev_count - repl.msg->count);
+      cursor_home();
+      WriteConsoleW(repl.out, repl.msg->items, repl.msg->count, NULL, NULL);
+      show_cursor();
+    } break;
+    case VK_NEXT: {
       if (msg_tail) {
         DWORD prev_count = repl.msg->count;
         repl.msg->capacity = msg_tail->capacity;
@@ -1786,7 +1793,7 @@ int main(int argc, char **argv) {
         repl.msg->count = 0;
         repl.msg_index = 0;
       }
-      break;
+    } break;
     case VK_LEFT:
       if (repl.msg_index) {
         --repl.msg_index;
@@ -1796,7 +1803,7 @@ int main(int argc, char **argv) {
         }
         cursor_curr();
       }
-      break;
+      continue;
     case VK_RIGHT:
       if (repl.msg_index < repl.msg->count) {
         if (ctrl_on(&input)) {
@@ -1807,8 +1814,8 @@ int main(int argc, char **argv) {
         }
         cursor_curr();
       }
-      break;
-    default:
+      continue;
+    default: {
       if (c) {
         assert(repl.msg_index <= repl.msg->count);
         if (repl.msg_index == repl.msg->count) {
@@ -1825,8 +1832,9 @@ int main(int argc, char **argv) {
         }
         // wprintf(L"\rchar=%zu, v=%zu, pressed=%d, ctrl=%d\r\n", c, vk, pressed, ctrl);
       }
-      break;
+    } break;
     }
+    log_preview();
   }
   if (!SetConsoleMode(repl.in, repl.in_mode)) {
     log_last_error("input", "Failed to reset in console mode");
