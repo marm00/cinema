@@ -176,11 +176,11 @@ static const char *level_to_str(Cin_Log_Level level) {
 }
 
 typedef struct Console_Message {
-  struct Console_Message *next;
-  struct Console_Message *prev;
   wchar_t *items;
   DWORD count;
   DWORD capacity;
+  struct Console_Message *prev;
+  struct Console_Message *next;
 } Console_Message;
 
 #define CM_INIT_CAP 64
@@ -303,19 +303,32 @@ static inline void rewrite_post_log(void) {
 static CRITICAL_SECTION log_lock;
 
 static void log_preview(void) {
-  static COORD prev_pos = {0};
-  static DWORD prev_len = 0;
   wchar_t *preview = malloc(80 * sizeof(wchar_t));
   wchar_t *msg2 = L"123456789012345678922012345678901456789012345678901234099999";
   DWORD msg_len = wcslen(msg2);
-  COORD tail = {.X = 0, .Y = next_y(repl.msg->count) + 1};
-  if (prev_len != tail.Y) {
-    // TODO: dont clear if there is already text there
-    FillConsoleOutputCharacterW(repl.out, CIN_SPACE, prev_len, prev_pos, &repl._filled);
+
+  static DWORD prev_line = 0;
+  static DWORD prev_tail_index = 0;
+  DWORD write_len = min(msg_len, (DWORD)repl.dwSize.X);
+  DWORD next_head_index = repl.msg->count + PREFIX;
+  DWORD m = next_head_index % (DWORD)repl.dwSize.X;
+  if (m) next_head_index += (DWORD)repl.dwSize.X - m;
+  assert(next_head_index % (DWORD)repl.dwSize.X == 0);
+  DWORD next_tail_index = next_head_index + write_len;
+  SHORT next_line = next_y(next_head_index - PREFIX);
+  COORD next_head = {.X = 0, .Y = next_line};
+  COORD next_tail = {.X = write_len, .Y = next_line};
+
+  // TODO: optimize
+  if (prev_line != next_line && repl.msg->count + PREFIX < prev_tail_index) {
+    DWORD leftover = prev_tail_index - repl.msg->count + PREFIX;
+    FillConsoleOutputCharacterW(repl.out, CIN_SPACE, leftover, next_cursor(prev_tail_index - leftover + PREFIX), &repl._filled);
   }
+  prev_tail_index = next_tail_index;
+  prev_line = next_line;
   if (msg_len == repl.dwSize.X) {
     WriteConsoleW(repl.out, L"\r\n", 2, NULL, NULL);
-    WriteConsoleOutputCharacterW(repl.out, msg2, msg_len, tail, &repl._filled);
+    WriteConsoleOutputCharacterW(repl.out, msg2, write_len, next_head, &repl._filled);
   } else if (msg_len > repl.dwSize.X) {
     WriteConsoleW(repl.out, L"\r\n", 2, NULL, NULL);
     assert(msg_len > 3);
@@ -323,15 +336,13 @@ static void log_preview(void) {
     preview[repl.dwSize.X - 3] = '.';
     preview[repl.dwSize.X - 2] = '.';
     preview[repl.dwSize.X - 1] = '.';
-    WriteConsoleOutputCharacterW(repl.out, preview, msg_len, tail, &repl._filled);
+    WriteConsoleOutputCharacterW(repl.out, preview, write_len, next_head, &repl._filled);
   } else {
     preview[0] = L'\r';
     preview[1] = L'\n';
-    wmemcpy(preview + 2, msg2, msg_len);
-    WriteConsoleW(repl.out, preview, msg_len + 2, NULL, NULL);
+    wmemcpy(preview + PREFIX, msg2, msg_len);
+    WriteConsoleW(repl.out, preview, PREFIX + write_len, NULL, NULL);
   }
-  prev_pos = tail;
-  prev_len = msg_len;
   cursor_curr();
 }
 
