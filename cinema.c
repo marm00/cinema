@@ -302,50 +302,58 @@ static inline void rewrite_post_log(void) {
 
 static CRITICAL_SECTION log_lock;
 
+typedef struct Console_Preview {
+  wchar_t *items;
+  DWORD head_index;
+  DWORD tail_index;
+  DWORD line;
+  DWORD count;
+  DWORD capacity;
+} Console_Preview;
+
 static void log_preview(void) {
-  static DWORD prev_head_index = 0;
-  static DWORD prev_tail_index = 0;
-  static DWORD prev_line = 0;
-  wchar_t *preview = malloc(80 * sizeof(wchar_t));
-  wchar_t *msg2 = L"123456789012345678922012345678901456789012345678901234wwwwww";
+  static Console_Preview preview = {0};
+  DWORD console_width = (DWORD)repl.dwSize.X;
+  array_ensure_capacity(&preview, console_width);
+  wchar_t *msg2 = L"123456789012345678922012345678901456789012345678901234";
   DWORD msg_len = wcslen(msg2);
-  DWORD write_len = min(msg_len, (DWORD)repl.dwSize.X);
+  DWORD write_len = min(msg_len, console_width);
   DWORD tail_index = repl.msg->count + PREFIX;
-  DWORD next_mod = (DWORD)repl.dwSize.X - (tail_index % (DWORD)repl.dwSize.X);
+  DWORD next_mod = console_width - (tail_index % console_width);
   DWORD next_head_index = tail_index + next_mod;
-  assert(next_head_index % (DWORD)repl.dwSize.X == 0);
+  assert(next_head_index % console_width == 0);
   SHORT next_line = next_y(next_head_index - PREFIX);
   COORD next_head = {.X = 0, .Y = next_line};
   hide_cursor();
-  if (prev_line != next_line && tail_index < prev_tail_index) {
-    DWORD left = max(tail_index, prev_head_index);
-    DWORD deleted = prev_tail_index - left;
+  if (preview.line != next_line && tail_index < preview.tail_index) {
+    DWORD left = max(tail_index, preview.head_index);
+    DWORD deleted = preview.tail_index - left;
     COORD del_pos = next_cursor(left - PREFIX);
     FillConsoleOutputCharacterW(repl.out, CIN_SPACE, deleted, del_pos, &repl._filled);
   }
-  if (msg_len == repl.dwSize.X) {
+  if (msg_len == console_width) {
     WriteConsoleW(repl.out, L"\r\n", 2, NULL, NULL);
     WriteConsoleOutputCharacterW(repl.out, msg2, write_len, next_head, &repl._filled);
-  } else if (msg_len > repl.dwSize.X) {
+  } else if (msg_len > console_width) {
     WriteConsoleW(repl.out, L"\r\n", 2, NULL, NULL);
     assert(msg_len > 3);
-    wmemcpy(preview, msg2, repl.dwSize.X - 3);
-    preview[repl.dwSize.X - 3] = '.';
-    preview[repl.dwSize.X - 2] = '.';
-    preview[repl.dwSize.X - 1] = '.';
-    WriteConsoleOutputCharacterW(repl.out, preview, write_len, next_head, &repl._filled);
+    wmemcpy(preview.items, msg2, console_width - 3);
+    preview.items[console_width - 3] = '.';
+    preview.items[console_width - 2] = '.';
+    preview.items[console_width - 1] = '.';
+    WriteConsoleOutputCharacterW(repl.out, preview.items, write_len, next_head, &repl._filled);
   } else {
-    preview[0] = L'\r';
-    preview[1] = L'\n';
-    wmemcpy(preview + PREFIX, msg2, msg_len);
-    WriteConsoleW(repl.out, preview, PREFIX + write_len, NULL, NULL);
+    preview.items[0] = L'\r';
+    preview.items[1] = L'\n';
+    wmemcpy(preview.items + PREFIX, msg2, msg_len);
+    WriteConsoleW(repl.out, preview.items, PREFIX + write_len, NULL, NULL);
   }
   FillConsoleOutputAttribute(repl.out, FOREGROUND_INTENSITY, write_len, next_head, &repl._filled);
   cursor_curr();
   show_cursor();
-  prev_head_index = next_head_index;
-  prev_tail_index = next_head_index + write_len;
-  prev_line = next_line;
+  preview.head_index = next_head_index;
+  preview.tail_index = next_head_index + write_len;
+  preview.line = next_line;
 }
 
 static void log_message(Cin_Log_Level level, const char *location, const char *message, ...) {
