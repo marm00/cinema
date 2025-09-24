@@ -303,29 +303,26 @@ static inline void rewrite_post_log(void) {
 static CRITICAL_SECTION log_lock;
 
 static void log_preview(void) {
-  wchar_t *preview = malloc(80 * sizeof(wchar_t));
-  wchar_t *msg2 = L"123456789012345678922012345678901456789012345678901234099999";
-  DWORD msg_len = wcslen(msg2);
-
-  static DWORD prev_line = 0;
+  static DWORD prev_head_index = 0;
   static DWORD prev_tail_index = 0;
+  static DWORD prev_line = 0;
+  wchar_t *preview = malloc(80 * sizeof(wchar_t));
+  wchar_t *msg2 = L"123456789012345678922012345678901456789012345678901234wwwwww";
+  DWORD msg_len = wcslen(msg2);
   DWORD write_len = min(msg_len, (DWORD)repl.dwSize.X);
-  DWORD next_head_index = repl.msg->count + PREFIX;
-  DWORD m = next_head_index % (DWORD)repl.dwSize.X;
-  if (m) next_head_index += (DWORD)repl.dwSize.X - m;
+  DWORD tail_index = repl.msg->count + PREFIX;
+  DWORD next_mod = (DWORD)repl.dwSize.X - (tail_index % (DWORD)repl.dwSize.X);
+  DWORD next_head_index = tail_index + next_mod;
   assert(next_head_index % (DWORD)repl.dwSize.X == 0);
-  DWORD next_tail_index = next_head_index + write_len;
   SHORT next_line = next_y(next_head_index - PREFIX);
   COORD next_head = {.X = 0, .Y = next_line};
-  COORD next_tail = {.X = write_len, .Y = next_line};
-
-  // TODO: optimize
-  if (prev_line != next_line && repl.msg->count + PREFIX < prev_tail_index) {
-    DWORD leftover = prev_tail_index - repl.msg->count + PREFIX;
-    FillConsoleOutputCharacterW(repl.out, CIN_SPACE, leftover, next_cursor(prev_tail_index - leftover + PREFIX), &repl._filled);
+  hide_cursor();
+  if (prev_line != next_line && tail_index < prev_tail_index) {
+    DWORD left = max(tail_index, prev_head_index);
+    DWORD deleted = prev_tail_index - left;
+    COORD del_pos = next_cursor(left - PREFIX);
+    FillConsoleOutputCharacterW(repl.out, CIN_SPACE, deleted, del_pos, &repl._filled);
   }
-  prev_tail_index = next_tail_index;
-  prev_line = next_line;
   if (msg_len == repl.dwSize.X) {
     WriteConsoleW(repl.out, L"\r\n", 2, NULL, NULL);
     WriteConsoleOutputCharacterW(repl.out, msg2, write_len, next_head, &repl._filled);
@@ -343,7 +340,12 @@ static void log_preview(void) {
     wmemcpy(preview + PREFIX, msg2, msg_len);
     WriteConsoleW(repl.out, preview, PREFIX + write_len, NULL, NULL);
   }
+  FillConsoleOutputAttribute(repl.out, FOREGROUND_INTENSITY, write_len, next_head, &repl._filled);
   cursor_curr();
+  show_cursor();
+  prev_head_index = next_head_index;
+  prev_tail_index = next_head_index + write_len;
+  prev_line = next_line;
 }
 
 static void log_message(Cin_Log_Level level, const char *location, const char *message, ...) {
@@ -1790,8 +1792,8 @@ int main(int argc, char **argv) {
         repl.msg->next = repl.msg->next->next;
         repl.msg_index = repl.msg->count;
       } else {
-        cursor_home();
         clear_full();
+        cursor_home();
         repl.msg->prev = msg_tail;
         repl.msg->count = 0;
         repl.msg_index = 0;
@@ -1828,8 +1830,8 @@ int main(int argc, char **argv) {
         repl.msg->next = msg_tail->next;
         repl.msg_index = repl.msg->count;
       } else {
-        cursor_home();
         clear_full();
+        cursor_home();
         repl.msg->count = 0;
         repl.msg_index = 0;
       }
