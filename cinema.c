@@ -224,15 +224,17 @@ static REPL repl = {0};
 #define PREFIX 2
 
 static inline void hide_cursor(void) {
-  assert(repl.cursor_info.bVisible);
-  repl.cursor_info.bVisible = false;
-  SetConsoleCursorInfo(repl.out, &repl.cursor_info);
+  if (repl.cursor_info.bVisible) {
+    repl.cursor_info.bVisible = false;
+    SetConsoleCursorInfo(repl.out, &repl.cursor_info);
+  }
 }
 
 static inline void show_cursor(void) {
-  assert(!repl.cursor_info.bVisible);
-  repl.cursor_info.bVisible = true;
-  SetConsoleCursorInfo(repl.out, &repl.cursor_info);
+  if (!repl.cursor_info.bVisible) {
+    repl.cursor_info.bVisible = true;
+    SetConsoleCursorInfo(repl.out, &repl.cursor_info);
+  }
 }
 
 static inline SHORT next_x(DWORD index) {
@@ -279,6 +281,60 @@ static inline bool ctrl_on(PINPUT_RECORD input) {
   return input->Event.KeyEvent.dwControlKeyState & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED);
 }
 
+typedef struct Console_Preview {
+  wchar_t *items;
+  DWORD head_index;
+  DWORD tail_index;
+  DWORD line;
+  DWORD count;
+  DWORD capacity;
+} Console_Preview;
+
+static void log_preview(void) {
+  static Console_Preview preview = {0};
+  DWORD console_width = (DWORD)repl.dwSize.X;
+  array_ensure_capacity(&preview, console_width);
+  wchar_t *msg2 = L"123456789012345678922012345678901456789012345678901234";
+  DWORD msg_len = wcslen(msg2);
+  DWORD write_len = min(msg_len, console_width);
+  DWORD tail_index = repl.msg->count + PREFIX;
+  DWORD diff_next_div = console_width - (tail_index % console_width);
+  DWORD next_head_index = tail_index + diff_next_div;
+  assert(next_head_index % console_width == 0);
+  SHORT next_line = next_y(next_head_index - PREFIX);
+  COORD next_head = {.X = 0, .Y = next_line};
+  hide_cursor();
+  if (preview.line != next_line && tail_index < preview.tail_index) {
+    DWORD left = max(tail_index, preview.head_index);
+    DWORD deleted = preview.tail_index - left;
+    COORD del_pos = next_cursor(left - PREFIX);
+    FillConsoleOutputCharacterW(repl.out, CIN_SPACE, deleted, del_pos, &repl._filled);
+  }
+  if (msg_len < console_width) {
+    preview.items[0] = L'\r';
+    preview.items[1] = L'\n';
+    wmemcpy(preview.items + PREFIX, msg2, msg_len);
+    WriteConsoleW(repl.out, preview.items, PREFIX + write_len, NULL, NULL);
+  } else if (msg_len > console_width) {
+    WriteConsoleW(repl.out, L"\r\n", 2, NULL, NULL);
+    assert(msg_len > 3);
+    wmemcpy(preview.items, msg2, console_width - 3);
+    preview.items[console_width - 3] = '.';
+    preview.items[console_width - 2] = '.';
+    preview.items[console_width - 1] = '.';
+    WriteConsoleOutputCharacterW(repl.out, preview.items, write_len, next_head, &repl._filled);
+  } else {
+    WriteConsoleW(repl.out, L"\r\n", 2, NULL, NULL);
+    WriteConsoleOutputCharacterW(repl.out, msg2, write_len, next_head, &repl._filled);
+  }
+  FillConsoleOutputAttribute(repl.out, FOREGROUND_INTENSITY, write_len, next_head, &repl._filled);
+  cursor_curr();
+  show_cursor();
+  preview.head_index = next_head_index;
+  preview.tail_index = next_head_index + write_len;
+  preview.line = next_line;
+}
+
 static inline void rewrite_post_log(void) {
   CONSOLE_SCREEN_BUFFER_INFO buffer_info;
   GetConsoleScreenBufferInfo(repl.out, &buffer_info);
@@ -301,60 +357,6 @@ static inline void rewrite_post_log(void) {
 }
 
 static CRITICAL_SECTION log_lock;
-
-typedef struct Console_Preview {
-  wchar_t *items;
-  DWORD head_index;
-  DWORD tail_index;
-  DWORD line;
-  DWORD count;
-  DWORD capacity;
-} Console_Preview;
-
-static void log_preview(void) {
-  static Console_Preview preview = {0};
-  DWORD console_width = (DWORD)repl.dwSize.X;
-  array_ensure_capacity(&preview, console_width);
-  wchar_t *msg2 = L"123456789012345678922012345678901456789012345678901234";
-  DWORD msg_len = wcslen(msg2);
-  DWORD write_len = min(msg_len, console_width);
-  DWORD tail_index = repl.msg->count + PREFIX;
-  DWORD next_mod = console_width - (tail_index % console_width);
-  DWORD next_head_index = tail_index + next_mod;
-  assert(next_head_index % console_width == 0);
-  SHORT next_line = next_y(next_head_index - PREFIX);
-  COORD next_head = {.X = 0, .Y = next_line};
-  hide_cursor();
-  if (preview.line != next_line && tail_index < preview.tail_index) {
-    DWORD left = max(tail_index, preview.head_index);
-    DWORD deleted = preview.tail_index - left;
-    COORD del_pos = next_cursor(left - PREFIX);
-    FillConsoleOutputCharacterW(repl.out, CIN_SPACE, deleted, del_pos, &repl._filled);
-  }
-  if (msg_len == console_width) {
-    WriteConsoleW(repl.out, L"\r\n", 2, NULL, NULL);
-    WriteConsoleOutputCharacterW(repl.out, msg2, write_len, next_head, &repl._filled);
-  } else if (msg_len > console_width) {
-    WriteConsoleW(repl.out, L"\r\n", 2, NULL, NULL);
-    assert(msg_len > 3);
-    wmemcpy(preview.items, msg2, console_width - 3);
-    preview.items[console_width - 3] = '.';
-    preview.items[console_width - 2] = '.';
-    preview.items[console_width - 1] = '.';
-    WriteConsoleOutputCharacterW(repl.out, preview.items, write_len, next_head, &repl._filled);
-  } else {
-    preview.items[0] = L'\r';
-    preview.items[1] = L'\n';
-    wmemcpy(preview.items + PREFIX, msg2, msg_len);
-    WriteConsoleW(repl.out, preview.items, PREFIX + write_len, NULL, NULL);
-  }
-  FillConsoleOutputAttribute(repl.out, FOREGROUND_INTENSITY, write_len, next_head, &repl._filled);
-  cursor_curr();
-  show_cursor();
-  preview.head_index = next_head_index;
-  preview.tail_index = next_head_index + write_len;
-  preview.line = next_line;
-}
 
 static void log_message(Cin_Log_Level level, const char *location, const char *message, ...) {
   if (level > GLOBAL_LOG_LEVEL) {
@@ -1680,6 +1682,7 @@ int main(int argc, char **argv) {
       assert(shift <= SHRT_MAX && "SHORT overflow");
       assert(repl.dwCursorPosition.Y >= (SHORT)shift && "SHORT underflow");
       repl.home.Y = repl.dwCursorPosition.Y - (SHORT)shift;
+      // TODO: adjust preview
       continue;
     default:
       continue;
