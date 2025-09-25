@@ -294,9 +294,9 @@ static inline void clear_full(void) {
   FillConsoleOutputCharacterW(repl.out, CIN_SPACE, repl.msg->count, repl.home, &repl._filled);
 }
 
-static inline void clear_preview(SHORT pos) {
+static inline void clear_preview(DWORD pos) {
   preview.pos.X = pos;
-  DWORD leftover = preview.len - (DWORD)pos;
+  DWORD leftover = preview.len - pos;
   FillConsoleOutputCharacterW(repl.out, CIN_SPACE, leftover, preview.pos, &repl._filled);
 }
 
@@ -359,26 +359,21 @@ static inline void rewrite_post_log(void) {
   repl.dwCursorPosition = buffer_info.dwCursorPosition;
   repl.dwSize = buffer_info.dwSize;
   assert(repl.msg->count <= SHRT_MAX && "SHORT overflow");
-  if ((SHORT)repl.msg->count > repl.dwCursorPosition.X) {
-    SHORT leftover = repl.dwSize.X - min((SHORT)repl.msg->count, repl.dwCursorPosition.X);
-    FillConsoleOutputCharacterW(repl.out, CIN_SPACE, (DWORD)leftover, repl.dwCursorPosition, &repl._filled);
-  }
   assert(repl.dwCursorPosition.Y < SHRT_MAX && "SHORT overflow");
-  DWORD y_shift = repl.dwCursorPosition.Y - repl.home.Y + 1;
-  repl.home.Y += y_shift;
-  if (preview.pos.Y < repl.home.Y) {
-    if (repl.home.Y - preview.pos.Y == 1 && preview.len > repl.dwCursorPosition.X) {
-      clear_preview(repl.dwCursorPosition.X);
-    }
-  } else if (preview.pos.Y == repl.home.Y) {
-    DWORD msg_len = min(repl.msg->count + PREFIX, repl.dwSize.X);
-    if (msg_len < repl.dwSize.X && preview.len > msg_len) {
-      clear_preview(msg_len);
-    }
-  } else {
-    DWORD msg_len = next_x(repl.msg->count);
-    if (preview.len > msg_len) {
-      clear_preview(msg_len);
+  DWORD cursor_x = (DWORD)repl.dwCursorPosition.X;
+  DWORD width = (DWORD)repl.dwSize.X;
+  if (repl.msg->count > cursor_x) {
+    DWORD leftover = width - repl.msg->count;
+    FillConsoleOutputCharacterW(repl.out, CIN_SPACE, leftover, repl.dwCursorPosition, &repl._filled);
+  }
+  repl.home.Y += repl.dwCursorPosition.Y - repl.home.Y + 1;
+  SHORT y_diff = preview.pos.Y - repl.home.Y;
+  if (y_diff == -1 && preview.len > cursor_x) {
+    clear_preview(cursor_x);
+  } else if (y_diff >= 0) {
+    DWORD x = (y_diff == 0) ? min(repl.msg->count + PREFIX, width) : (DWORD)next_x(repl.msg->count);
+    if (preview.len > x && (y_diff > 0 || x < width)) {
+      clear_preview(x);
     }
   }
   fprintf(stderr, "\r\n");
