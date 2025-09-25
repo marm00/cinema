@@ -223,6 +223,19 @@ static REPL repl = {0};
 #define PREFIX_STRLEN (sizeof(PREFIX_STR) / sizeof(*(PREFIX_STR))) - 1
 #define PREFIX 2
 
+typedef struct Console_Preview {
+  wchar_t *items;
+  DWORD head_index;
+  DWORD tail_index;
+  DWORD line;
+  DWORD count;
+  DWORD capacity;
+  DWORD len;
+  COORD pos;
+} Console_Preview;
+
+static Console_Preview preview = {0};
+
 static inline void hide_cursor(void) {
   if (repl.cursor_info.bVisible) {
     repl.cursor_info.bVisible = false;
@@ -281,22 +294,16 @@ static inline void clear_full(void) {
   FillConsoleOutputCharacterW(repl.out, CIN_SPACE, repl.msg->count, repl.home, &repl._filled);
 }
 
+static inline void clear_preview(SHORT pos) {
+  preview.pos.X = pos;
+  DWORD leftover = preview.len - (DWORD)pos;
+  FillConsoleOutputCharacterW(repl.out, CIN_SPACE, leftover, preview.pos, &repl._filled);
+}
+
 static inline bool ctrl_on(PINPUT_RECORD input) {
   return input->Event.KeyEvent.dwControlKeyState & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED);
 }
 
-typedef struct Console_Preview {
-  wchar_t *items;
-  DWORD head_index;
-  DWORD tail_index;
-  DWORD line;
-  DWORD count;
-  DWORD capacity;
-  DWORD len;
-  COORD pos;
-} Console_Preview;
-
-static Console_Preview preview = {0};
 static void log_preview(bool clear) {
   DWORD console_width = (DWORD)repl.dwSize.X;
   array_ensure_capacity(&preview, console_width);
@@ -357,27 +364,21 @@ static inline void rewrite_post_log(void) {
     FillConsoleOutputCharacterW(repl.out, CIN_SPACE, (DWORD)leftover, repl.dwCursorPosition, &repl._filled);
   }
   assert(repl.dwCursorPosition.Y < SHRT_MAX && "SHORT overflow");
-  DWORD y_shift = repl.dwCursorPosition.Y - repl.home.Y;
-  repl.home.Y += y_shift + 1;
+  DWORD y_shift = repl.dwCursorPosition.Y - repl.home.Y + 1;
+  repl.home.Y += y_shift;
   if (preview.pos.Y < repl.home.Y) {
     if (repl.home.Y - preview.pos.Y == 1 && preview.len > repl.dwCursorPosition.X) {
-      preview.pos.X = repl.dwCursorPosition.X;
-      SHORT leftover = preview.len - repl.dwCursorPosition.X;
-      FillConsoleOutputCharacterW(repl.out, CIN_SPACE, (DWORD)leftover, preview.pos, &repl._filled);
+      clear_preview(repl.dwCursorPosition.X);
     }
   } else if (preview.pos.Y == repl.home.Y) {
     DWORD msg_len = min(repl.msg->count + PREFIX, repl.dwSize.X);
     if (msg_len < repl.dwSize.X && preview.len > msg_len) {
-      preview.pos.X = msg_len;
-      SHORT leftover = preview.len - msg_len;
-      FillConsoleOutputCharacterW(repl.out, CIN_SPACE, (DWORD)leftover, preview.pos, &repl._filled);
+      clear_preview(msg_len);
     }
   } else {
     DWORD msg_len = next_x(repl.msg->count);
     if (preview.len > msg_len) {
-      preview.pos.X = msg_len;
-      SHORT leftover = preview.len - msg_len;
-      FillConsoleOutputCharacterW(repl.out, CIN_SPACE, (DWORD)leftover, preview.pos, &repl._filled);
+      clear_preview(msg_len);
     }
   }
   fprintf(stderr, "\r\n");
