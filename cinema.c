@@ -337,12 +337,12 @@ static void log_preview(bool clear) {
     wmemcpy(preview.items + PREFIX, msg2, msg_len);
     WriteConsoleW(repl.out, preview.items, PREFIX + write_len, NULL, NULL);
   } else if (msg_len > console_width) {
-    WriteConsoleW(repl.out, L"\r\n", 2, NULL, NULL);
     assert(msg_len > 3);
     wmemcpy(preview.items, msg2, console_width - 3);
     preview.items[console_width - 3] = '.';
     preview.items[console_width - 2] = '.';
     preview.items[console_width - 1] = '.';
+    WriteConsoleW(repl.out, L"\r\n", 2, NULL, NULL);
     WriteConsoleOutputCharacterW(repl.out, preview.items, write_len, next_head, &repl._filled);
   } else {
     WriteConsoleW(repl.out, L"\r\n", 2, NULL, NULL);
@@ -1698,19 +1698,27 @@ int main(int argc, char **argv) {
       // the user input / preview, OR it is not. The former seems way more likely,
       // but to support the latter, we just generalize and assume the latter.
       // A "benefit" of this is that we can use the preview before starting REPL.
-      // TODO: wip
+      assert(repl.dwSize_X > 0);
+      DWORD tail_index = (preview.pos.Y * repl.dwSize_X) + preview.len;
+      if (!tail_index) {
+        tail_index = PREFIX + (repl.home.Y * repl.dwSize_X) + repl.msg->count;
+      }
       CONSOLE_SCREEN_BUFFER_INFO buffer_info;
       if (!GetConsoleScreenBufferInfo(repl.out, &buffer_info)) {
         log_last_error("input", "Failed to get console screen buffer info");
         return 1;
       }
       repl.dwSize_X = buffer_info.dwSize.X;
-      assert(repl.dwSize_X > 0);
-      DWORD width = (DWORD)repl.dwSize_X;
-      DWORD msg_shift = (repl.msg->count + PREFIX) / width;
-      DWORD preview_shift = preview.len / width;
-      assert((msg_shift + preview_shift) <= SHRT_MAX && "SHORT overflow");
-      repl.home.Y = buffer_info.dwCursorPosition.Y - (msg_shift + preview_shift);
+      DWORD empty_space = repl.dwSize_X - ((PREFIX + repl.msg->count) % repl.dwSize_X);
+      DWORD home_index = tail_index - preview.len - repl.msg->count - empty_space;
+      repl.home.Y = home_index / repl.dwSize_X;
+      preview.pos.Y = (tail_index - preview.len) / repl.dwSize_X;
+      if (preview.len > repl.dwSize_X) {
+        COORD del_pos = {.X = 0, .Y = preview.pos.Y + 1};
+        DWORD leftover = preview.len - repl.dwSize_X;
+        FillConsoleOutputCharacterW(repl.out, CIN_SPACE, leftover, del_pos, &repl._filled);
+      }
+      log_preview(false);
       continue;
     default:
       continue;
