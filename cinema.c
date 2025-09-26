@@ -46,7 +46,7 @@ typedef enum {
   LOG_TRACE
 } Cin_Log_Level;
 
-static const Cin_Log_Level GLOBAL_LOG_LEVEL = LOG_TRACE;
+static const Cin_Log_Level GLOBAL_LOG_LEVEL = LOG_ERROR;
 
 #define CIN_ARRAY_CAP 256
 #define CIN_ARRAY_GROWTH 2
@@ -209,8 +209,8 @@ typedef struct REPL {
   DWORD msg_index;
   COORD home;
   CONSOLE_CURSOR_INFO cursor_info;
-  COORD dwSize;
-  COORD dwCursorPosition;
+  // TODO: store as DWORD probably
+  SHORT dwSize_X;
   DWORD _filled;
   DWORD in_mode;
   BOOL viewport_bound;
@@ -251,15 +251,15 @@ static inline void show_cursor(void) {
 }
 
 static inline SHORT next_x(DWORD index) {
-  assert(((index + PREFIX) / (DWORD)repl.dwSize.X) <= SHRT_MAX && "SHORT overflow");
-  assert((SHORT)(SHRT_MAX - ((index + PREFIX) / (DWORD)repl.dwSize.X)) >= repl.home.Y && "SHORT overflow");
-  return (SHORT)((index + PREFIX) % (DWORD)repl.dwSize.X);
+  assert(((index + PREFIX) / (DWORD)repl.dwSize_X) <= SHRT_MAX && "SHORT overflow");
+  assert((SHORT)(SHRT_MAX - ((index + PREFIX) / (DWORD)repl.dwSize_X)) >= repl.home.Y && "SHORT overflow");
+  return (SHORT)((index + PREFIX) % (DWORD)repl.dwSize_X);
 }
 
 static inline SHORT next_y(DWORD index) {
-  assert(((index + PREFIX) / (DWORD)repl.dwSize.X) <= SHRT_MAX && "SHORT overflow");
-  assert((SHORT)(SHRT_MAX - ((index + PREFIX) / (DWORD)repl.dwSize.X)) >= repl.home.Y && "SHORT overflow");
-  return repl.home.Y + (SHORT)((index + PREFIX) / (DWORD)repl.dwSize.X);
+  assert(((index + PREFIX) / (DWORD)repl.dwSize_X) <= SHRT_MAX && "SHORT overflow");
+  assert((SHORT)(SHRT_MAX - ((index + PREFIX) / (DWORD)repl.dwSize_X)) >= repl.home.Y && "SHORT overflow");
+  return repl.home.Y + (SHORT)((index + PREFIX) / (DWORD)repl.dwSize_X);
 }
 
 static inline COORD next_cursor(DWORD index) {
@@ -305,9 +305,9 @@ static inline bool ctrl_on(PINPUT_RECORD input) {
 }
 
 static void log_preview(bool clear) {
-  DWORD console_width = (DWORD)repl.dwSize.X;
+  DWORD console_width = (DWORD)repl.dwSize_X;
   array_ensure_capacity(&preview, console_width);
-  wchar_t *msg2 = L"123456789012345678922012345678901456789012345678901234";
+  wchar_t *msg2 = L"1234567890123456789220123456789014567890123456789012348888555";
   DWORD msg_len = wcslen(msg2);
   DWORD write_len = min(msg_len, console_width);
   DWORD tail_index = repl.msg->count + PREFIX;
@@ -356,20 +356,19 @@ static void log_preview(bool clear) {
 static inline void rewrite_post_log(void) {
   CONSOLE_SCREEN_BUFFER_INFO buffer_info;
   GetConsoleScreenBufferInfo(repl.out, &buffer_info);
-  repl.dwCursorPosition = buffer_info.dwCursorPosition;
-  repl.dwSize = buffer_info.dwSize;
+  repl.dwSize_X = buffer_info.dwSize.X;
   assert(repl.msg->count <= SHRT_MAX && "SHORT overflow");
-  assert(repl.dwCursorPosition.Y < SHRT_MAX && "SHORT overflow");
-  DWORD cursor_x = (DWORD)repl.dwCursorPosition.X;
-  DWORD width = (DWORD)repl.dwSize.X;
-  if (repl.msg->count > cursor_x) {
+  assert(buffer_info.dwCursorPosition.Y < SHRT_MAX && "SHORT overflow");
+  DWORD tail_x = (DWORD)buffer_info.dwCursorPosition.X;
+  DWORD width = (DWORD)repl.dwSize_X;
+  if (repl.msg->count > tail_x) {
     DWORD leftover = width - repl.msg->count;
-    FillConsoleOutputCharacterW(repl.out, CIN_SPACE, leftover, repl.dwCursorPosition, &repl._filled);
+    FillConsoleOutputCharacterW(repl.out, CIN_SPACE, leftover, buffer_info.dwCursorPosition, &repl._filled);
   }
-  repl.home.Y += repl.dwCursorPosition.Y - repl.home.Y + 1;
+  repl.home.Y += buffer_info.dwCursorPosition.Y - repl.home.Y + 1;
   SHORT y_diff = preview.pos.Y - repl.home.Y;
-  if (y_diff == -1 && preview.len > cursor_x) {
-    clear_preview(cursor_x);
+  if (y_diff == -1 && preview.len > tail_x) {
+    clear_preview(tail_x);
   } else if (y_diff >= 0) {
     DWORD x = (y_diff == 0) ? min(repl.msg->count + PREFIX, width) : (DWORD)next_x(repl.msg->count);
     if (preview.len > x && (y_diff > 0 || x < width)) {
@@ -1629,13 +1628,12 @@ static inline bool init_repl(void) {
   if ((repl.viewport_bound = bounded_console(repl.out))) printf(viewport_warning);
   CONSOLE_SCREEN_BUFFER_INFO buffer_info;
   if (!GetConsoleScreenBufferInfo(repl.out, &buffer_info)) goto handle_out;
-  repl.dwCursorPosition = buffer_info.dwCursorPosition;
-  repl.dwSize = buffer_info.dwSize;
+  repl.dwSize_X = buffer_info.dwSize.X;
   if (!GetConsoleCursorInfo(repl.out, &repl.cursor_info)) goto handle_out;
   if (!WriteConsoleW(repl.out, PREFIX_STR, PREFIX_STRLEN, NULL, NULL)) goto handle_out;
   repl.msg = create_console_message();
   repl.msg_index = 0;
-  repl.home = (COORD){.X = PREFIX, .Y = repl.dwCursorPosition.Y};
+  repl.home = (COORD){.X = PREFIX, .Y = buffer_info.dwCursorPosition.Y};
   repl._filled = 0;
   return true;
 code_page:
@@ -1695,20 +1693,24 @@ int main(int argc, char **argv) {
     case KEY_EVENT:
       break;
     case WINDOW_BUFFER_SIZE_EVENT:
-      repl.dwSize.X = input.Event.WindowBufferSizeEvent.dwSize.X;
+      // NOTE: There are two important cases for when this event gets triggered:
+      // either the cursor is automatically repositioned to the tail of
+      // the user input / preview, OR it is not. The former seems way more likely,
+      // but to support the latter, we just generalize and assume the latter.
+      // A "benefit" of this is that we can use the preview before starting REPL.
+      // TODO: wip
       CONSOLE_SCREEN_BUFFER_INFO buffer_info;
       if (!GetConsoleScreenBufferInfo(repl.out, &buffer_info)) {
         log_last_error("input", "Failed to get console screen buffer info");
         return 1;
       }
-      repl.dwCursorPosition = buffer_info.dwCursorPosition;
-      repl.dwSize = buffer_info.dwSize;
-      assert(repl.dwSize.X);
-      DWORD shift = (repl.msg_index + PREFIX) / (DWORD)repl.dwSize.X;
-      assert(shift <= SHRT_MAX && "SHORT overflow");
-      assert(repl.dwCursorPosition.Y >= (SHORT)shift && "SHORT underflow");
-      repl.home.Y = repl.dwCursorPosition.Y - (SHORT)shift;
-      // TODO: adjust preview
+      repl.dwSize_X = buffer_info.dwSize.X;
+      assert(repl.dwSize_X > 0);
+      DWORD width = (DWORD)repl.dwSize_X;
+      DWORD msg_shift = (repl.msg->count + PREFIX) / width;
+      DWORD preview_shift = preview.len / width;
+      assert((msg_shift + preview_shift) <= SHRT_MAX && "SHORT overflow");
+      repl.home.Y = buffer_info.dwCursorPosition.Y - (msg_shift + preview_shift);
       continue;
     default:
       continue;
