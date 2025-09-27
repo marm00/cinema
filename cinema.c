@@ -320,16 +320,16 @@ static inline bool ctrl_on(PINPUT_RECORD input) {
 }
 
 static void log_preview(bool clear) {
-  DWORD console_width = (DWORD)repl.dwSize_X;
-  array_ensure_capacity(&preview, console_width);
+  DWORD width = (DWORD)repl.dwSize_X;
+  array_ensure_capacity(&preview, width);
   wchar_t *msg2 = L"123456789012345678922012345678904567890123456789012348888555";
   DWORD msg_len = wcslen(msg2);
-  DWORD write_len = min(msg_len, console_width);
+  DWORD write_len = min(msg_len, width);
   assert(wmemchr(msg2, PREFIX_TOKEN, write_len) == NULL);
   DWORD tail_index = repl.msg->count + PREFIX;
-  DWORD diff_next_div = console_width - (tail_index % console_width);
+  DWORD diff_next_div = width - (tail_index % width);
   DWORD next_head_index = tail_index + diff_next_div;
-  assert(next_head_index % console_width == 0);
+  assert(next_head_index % width == 0);
   SHORT next_line = next_y(next_head_index - PREFIX);
   COORD next_head = {.X = 0, .Y = next_line};
   preview.pos = next_head;
@@ -348,14 +348,14 @@ static void log_preview(bool clear) {
   preview.line = next_line;
   // set cursor to scroll down (and prep next write if < width)
   SetConsoleCursorPosition(repl.out, next_head);
-  if (msg_len < console_width) {
+  if (msg_len < width) {
     WriteConsoleW(repl.out, msg2, msg_len, NULL, NULL);
-  } else if (msg_len > console_width) {
+  } else if (msg_len > width) {
     assert(msg_len > 3);
-    wmemcpy(preview.items, msg2, console_width - 3);
-    preview.items[console_width - 3] = '.';
-    preview.items[console_width - 2] = '.';
-    preview.items[console_width - 1] = '.';
+    wmemcpy(preview.items, msg2, width - 3);
+    preview.items[width - 3] = '.';
+    preview.items[width - 2] = '.';
+    preview.items[width - 1] = '.';
     WriteConsoleOutputCharacterW(repl.out, preview.items, write_len, next_head, &repl._filled);
   } else {
     WriteConsoleOutputCharacterW(repl.out, msg2, write_len, next_head, &repl._filled);
@@ -1812,7 +1812,6 @@ int main(int argc, char **argv) {
       repl.msg->count = 0;
     } break;
     case VK_HOME:
-      log_message(LOG_INFO, "a", "d=%d", rand());
       cursor_home();
       repl.msg_index = 0;
       continue;
@@ -1978,7 +1977,17 @@ int main(int argc, char **argv) {
       // wprintf(L"\rchar=%zu, v=%zu, pressed=%d, ctrl=%d\r\n", c, vk, pressed, ctrl);
       break;
     }
-    log_preview(true);
+    SHORT preview_offset = ((repl.msg->count + PREFIX) / repl.dwSize_X) + 1;
+    SHORT y_diff = repl.home.Y + preview_offset - preview.pos.Y;
+    if (y_diff < 0) {
+      clear_preview(repl.dwSize_X - preview.len);
+    } else if (y_diff == 1) {
+      SHORT tail_x = ((repl.msg->count + PREFIX) % repl.dwSize_X);
+      if (preview.len > tail_x) {
+        clear_preview(tail_x);
+      }
+    }
+    log_preview(false);
   }
   if (!SetConsoleMode(repl.in, repl.in_mode)) {
     log_last_error("input", "Failed to reset in console mode");
