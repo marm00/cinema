@@ -322,9 +322,10 @@ static inline bool ctrl_on(PINPUT_RECORD input) {
 static void log_preview(bool clear) {
   DWORD console_width = (DWORD)repl.dwSize_X;
   array_ensure_capacity(&preview, console_width);
-  wchar_t *msg2 = L"1234567890123456789220123456789014567890123456789012348888555";
+  wchar_t *msg2 = L"123456789012345678922012345678904567890123456789012348888555";
   DWORD msg_len = wcslen(msg2);
   DWORD write_len = min(msg_len, console_width);
+  assert(wmemchr(msg2, PREFIX_TOKEN, write_len) == NULL);
   DWORD tail_index = repl.msg->count + PREFIX;
   DWORD diff_next_div = console_width - (tail_index % console_width);
   DWORD next_head_index = tail_index + diff_next_div;
@@ -345,12 +346,9 @@ static void log_preview(bool clear) {
   preview.head_index = next_head_index;
   preview.tail_index = next_head_index + write_len;
   preview.line = next_line;
-  // if (repl.msg_index < repl.msg->count) cursor_tail();
+  // set cursor to scroll down (and prep next write if < width)
+  SetConsoleCursorPosition(repl.out, next_head);
   if (msg_len < console_width) {
-    // preview.items[0] = L'\r';
-    // preview.items[1] = L'\n';
-    // wmemcpy(preview.items + PREFIX, msg2, msg_len);
-    SetConsoleCursorPosition(repl.out, next_head);
     WriteConsoleW(repl.out, msg2, msg_len, NULL, NULL);
   } else if (msg_len > console_width) {
     assert(msg_len > 3);
@@ -358,10 +356,8 @@ static void log_preview(bool clear) {
     preview.items[console_width - 3] = '.';
     preview.items[console_width - 2] = '.';
     preview.items[console_width - 1] = '.';
-    // WriteConsoleW(repl.out, L"\r\n", 2, NULL, NULL);
     WriteConsoleOutputCharacterW(repl.out, preview.items, write_len, next_head, &repl._filled);
   } else {
-    // WriteConsoleW(repl.out, L"\r\n", 2, NULL, NULL);
     WriteConsoleOutputCharacterW(repl.out, msg2, write_len, next_head, &repl._filled);
   }
   FillConsoleOutputAttribute(repl.out, FOREGROUND_INTENSITY, write_len, next_head, &repl._filled);
@@ -377,8 +373,8 @@ static inline void rewrite_post_log(void) {
   assert(buffer_info.dwCursorPosition.Y < SHRT_MAX && "SHORT overflow");
   DWORD tail_x = (DWORD)buffer_info.dwCursorPosition.X;
   DWORD width = (DWORD)repl.dwSize_X;
-  if (repl.msg->count > tail_x) {
-    DWORD leftover = width - repl.msg->count;
+  if (repl.msg->count + PREFIX > tail_x) {
+    DWORD leftover = repl.msg->count + PREFIX - tail_x;
     FillConsoleOutputCharacterW(repl.out, CIN_SPACE, leftover, buffer_info.dwCursorPosition, &repl._filled);
   }
   repl.home.Y += buffer_info.dwCursorPosition.Y - repl.home.Y + 1;
