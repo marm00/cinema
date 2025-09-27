@@ -46,7 +46,7 @@ typedef enum {
   LOG_TRACE
 } Cin_Log_Level;
 
-static const Cin_Log_Level GLOBAL_LOG_LEVEL = LOG_ERROR;
+static const Cin_Log_Level GLOBAL_LOG_LEVEL = LOG_TRACE;
 
 #define CIN_ARRAY_CAP 256
 #define CIN_ARRAY_GROWTH 2
@@ -219,9 +219,12 @@ typedef struct REPL {
 static REPL repl = {0};
 
 #define CIN_SPACE 0x20
-#define PREFIX_STR L"\r> "
-#define PREFIX_STRLEN (sizeof(PREFIX_STR) / sizeof(*(PREFIX_STR))) - 1
+#define PREFIX_TOKEN L'>'
 #define PREFIX 2
+#define PREFIX_STR L"\r> "
+#define PREFIX_ABS L">"
+#define PREFIX_STRLEN (sizeof(PREFIX_STR) / sizeof(*(PREFIX_STR))) - 1
+#define PREFIX_ABSLEN (sizeof(PREFIX_ABS) / sizeof(*(PREFIX_ABS))) - 1
 
 typedef struct Console_Preview {
   wchar_t *items;
@@ -248,6 +251,18 @@ static inline void show_cursor(void) {
     repl.cursor_info.bVisible = true;
     SetConsoleCursorInfo(repl.out, &repl.cursor_info);
   }
+}
+
+static inline DWORD cursor_to_index(COORD cursor, DWORD dwSize_X) {
+  assert(cursor.X >= 0);
+  assert(cursor.Y >= 0);
+  return (DWORD)cursor.X + ((DWORD)cursor.Y * dwSize_X);
+}
+
+static inline COORD index_to_cursor(DWORD index, DWORD dwSize_X) {
+  assert(index % dwSize_X <= SHRT_MAX);
+  assert(index / dwSize_X <= SHRT_MAX);
+  return (COORD){.X = (SHORT)(index % dwSize_X), .Y = (SHORT)(index / dwSize_X)};
 }
 
 static inline SHORT next_x(DWORD index) {
@@ -330,22 +345,23 @@ static void log_preview(bool clear) {
   preview.head_index = next_head_index;
   preview.tail_index = next_head_index + write_len;
   preview.line = next_line;
-  if (repl.msg_index < repl.msg->count) cursor_tail();
+  // if (repl.msg_index < repl.msg->count) cursor_tail();
   if (msg_len < console_width) {
-    preview.items[0] = L'\r';
-    preview.items[1] = L'\n';
-    wmemcpy(preview.items + PREFIX, msg2, msg_len);
-    WriteConsoleW(repl.out, preview.items, PREFIX + write_len, NULL, NULL);
+    // preview.items[0] = L'\r';
+    // preview.items[1] = L'\n';
+    // wmemcpy(preview.items + PREFIX, msg2, msg_len);
+    SetConsoleCursorPosition(repl.out, next_head);
+    WriteConsoleW(repl.out, msg2, msg_len, NULL, NULL);
   } else if (msg_len > console_width) {
     assert(msg_len > 3);
     wmemcpy(preview.items, msg2, console_width - 3);
     preview.items[console_width - 3] = '.';
     preview.items[console_width - 2] = '.';
     preview.items[console_width - 1] = '.';
-    WriteConsoleW(repl.out, L"\r\n", 2, NULL, NULL);
+    // WriteConsoleW(repl.out, L"\r\n", 2, NULL, NULL);
     WriteConsoleOutputCharacterW(repl.out, preview.items, write_len, next_head, &repl._filled);
   } else {
-    WriteConsoleW(repl.out, L"\r\n", 2, NULL, NULL);
+    // WriteConsoleW(repl.out, L"\r\n", 2, NULL, NULL);
     WriteConsoleOutputCharacterW(repl.out, msg2, write_len, next_head, &repl._filled);
   }
   FillConsoleOutputAttribute(repl.out, FOREGROUND_INTENSITY, write_len, next_head, &repl._filled);
@@ -1647,6 +1663,12 @@ handle_out:
   return false;
 }
 
+typedef struct Console_Buffer {
+  CHAR_INFO *items;
+  DWORD count;
+  DWORD capacity;
+} Console_Buffer;
+
 int main(int argc, char **argv) {
 #if !defined(_WIN32)
   printf("Error: Your operating system is not supported, Windows-only currently.\n");
@@ -1698,27 +1720,62 @@ int main(int argc, char **argv) {
       // the user input / preview, OR it is not. The former seems way more likely,
       // but to support the latter, we just generalize and assume the latter.
       // A "benefit" of this is that we can use the preview before starting REPL.
-      assert(repl.dwSize_X > 0);
-      DWORD tail_index = (preview.pos.Y * repl.dwSize_X) + preview.len;
-      if (!tail_index) {
-        tail_index = PREFIX + (repl.home.Y * repl.dwSize_X) + repl.msg->count;
-      }
+      static Console_Buffer console_buffer = {0};
+      EnterCriticalSection(&log_lock);
       CONSOLE_SCREEN_BUFFER_INFO buffer_info;
       if (!GetConsoleScreenBufferInfo(repl.out, &buffer_info)) {
-        log_last_error("input", "Failed to get console screen buffer info");
+        log_last_error("resize", "Failed to get console screen buffer info");
         return 1;
       }
-      repl.dwSize_X = buffer_info.dwSize.X;
-      DWORD empty_space = repl.dwSize_X - ((PREFIX + repl.msg->count) % repl.dwSize_X);
-      DWORD home_index = tail_index - preview.len - repl.msg->count - empty_space;
-      repl.home.Y = home_index / repl.dwSize_X;
-      preview.pos.Y = (tail_index - preview.len) / repl.dwSize_X;
-      if (preview.len > repl.dwSize_X) {
-        COORD del_pos = {.X = 0, .Y = preview.pos.Y + 1};
-        DWORD leftover = preview.len - repl.dwSize_X;
-        FillConsoleOutputCharacterW(repl.out, CIN_SPACE, leftover, del_pos, &repl._filled);
+      DWORD dwSize_X = (DWORD)buffer_info.dwSize.X;
+      DWORD repl_dwSize_X = (DWORD)repl.dwSize_X;
+      if (dwSize_X == repl_dwSize_X) continue;
+      // latest screen buffer cell where new home can be
+      DWORD upper_bound = cursor_to_index(buffer_info.dwCursorPosition, dwSize_X);
+      COORD lower_cursor = {.X = 0, .Y = repl.home.Y};
+      // earliest screen buffer cell where new home can be
+      DWORD lower_bound = cursor_to_index(lower_cursor, repl_dwSize_X);
+      bool bottom_up = dwSize_X > repl_dwSize_X;
+      if (bottom_up) {
+        // width increase, assume worst case where each cell was \r\n
+        lower_bound /= repl_dwSize_X;
+        lower_cursor = index_to_cursor(lower_bound, repl_dwSize_X);
       }
+      COORD upper_cursor = buffer_info.dwCursorPosition;
+      SHORT rows = upper_cursor.Y - lower_cursor.Y + 1;
+      assert(rows >= 0);
+      SHORT cols = buffer_info.dwSize.X;
+      COORD buffer_size = {.X = cols, .Y = rows};
+      DWORD buffer_count = (DWORD)cols * (DWORD)rows;
+      array_resize(&console_buffer, buffer_count);
+      COORD region_start = {.X = 0, .Y = 0};
+      SMALL_RECT region = {.Left = 0, .Top = lower_cursor.Y, .Right = dwSize_X - 1, .Bottom = upper_cursor.Y};
+      DWORD err = 0;
+      if (!ReadConsoleOutputW(repl.out, console_buffer.items, buffer_size, region_start, &region)) {
+        log_last_error("resize", "Failed to read console output region");
+        return 1;
+      }
+      for (SHORT i = 0; i < rows; ++i) {
+        SHORT row = bottom_up ? (rows - 1 - i) : i;
+        SHORT head = row * dwSize_X;
+        if (console_buffer.items[head].Char.UnicodeChar == PREFIX_TOKEN) {
+          repl.home.Y = lower_cursor.Y + row;
+          break;
+        }
+      }
+      DWORD msg_shift = (repl.msg->count + PREFIX) / dwSize_X;
+      preview.pos.Y = repl.home.Y + msg_shift + 1;
+      if (preview.len > dwSize_X) {
+        preview.pos.X = 0;
+        ++preview.pos.Y;
+        DWORD leftover = preview.len - dwSize_X;
+        FillConsoleOutputCharacterW(repl.out, CIN_SPACE, leftover, preview.pos, &repl._filled);
+        preview.pos.X = dwSize_X;
+        --preview.pos.Y;
+      }
+      repl.dwSize_X = (SHORT)dwSize_X;
       log_preview(false);
+      LeaveCriticalSection(&log_lock);
       continue;
     default:
       continue;
