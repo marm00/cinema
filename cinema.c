@@ -1698,6 +1698,7 @@ int main(int argc, char **argv) {
   // size_t visible_lines = repl.screen_info.srWindow.Bottom - repl.screen_info.srWindow.Top;
   Console_Message *msg_tail = NULL;
   for (;;) {
+    show_cursor();
     INPUT_RECORD input;
     DWORD read;
     if (!ReadConsoleInputW(repl.in, &input, 1, &read)) {
@@ -1709,6 +1710,7 @@ int main(int argc, char **argv) {
     if (!input.Event.KeyEvent.bKeyDown && (!c || vk != VK_MENU)) continue;
     switch (input.EventType) {
     case KEY_EVENT:
+      hide_cursor();
       break;
     case WINDOW_BUFFER_SIZE_EVENT:
       // NOTE: There are two important cases for when this event gets triggered:
@@ -1832,7 +1834,6 @@ int main(int argc, char **argv) {
       DWORD deleted = repl.msg_index - left;
       repl.msg->count -= deleted;
       repl.msg_index = left;
-      hide_cursor();
       cursor_curr();
       DWORD leftover = repl.msg->count - repl.msg_index;
       clear_tail(deleted);
@@ -1840,7 +1841,6 @@ int main(int argc, char **argv) {
         WriteConsoleW(repl.out, repl.msg->items + repl.msg_index, leftover, NULL, NULL);
         cursor_curr();
       }
-      show_cursor();
     } break;
     case VK_DELETE: {
       if (repl.msg_index == repl.msg->count) continue;
@@ -1857,10 +1857,8 @@ int main(int argc, char **argv) {
       clear_tail(deleted);
       if (leftover) {
         wmemmove(&repl.msg->items[repl.msg_index], &repl.msg->items[right], leftover);
-        hide_cursor();
         WriteConsoleW(repl.out, repl.msg->items + repl.msg_index, leftover, NULL, NULL);
         cursor_curr();
-        show_cursor();
       }
     } break;
     case VK_UP: {
@@ -1871,11 +1869,9 @@ int main(int argc, char **argv) {
       repl.msg_index = repl.msg->count;
       repl.msg->next = repl.msg->prev->next;
       repl.msg->prev = repl.msg->prev->prev;
-      hide_cursor();
       if (repl.msg->count < prev_count) clear_tail(prev_count - repl.msg->count);
       cursor_home();
       WriteConsoleW(repl.out, repl.msg->items, repl.msg->count, NULL, NULL);
-      show_cursor();
     } break;
     case VK_DOWN: {
       if (repl.msg->next) {
@@ -1883,11 +1879,9 @@ int main(int argc, char **argv) {
         repl.msg->capacity = repl.msg->next->capacity;
         repl.msg->count = repl.msg->next->count;
         wmemcpy(repl.msg->items, repl.msg->next->items, repl.msg->next->count);
-        hide_cursor();
         if (repl.msg->count < prev_count) clear_tail(prev_count - repl.msg->count);
         cursor_home();
         WriteConsoleW(repl.out, repl.msg->items, repl.msg->count, NULL, NULL);
-        show_cursor();
         repl.msg->prev = repl.msg->next->prev;
         repl.msg->next = repl.msg->next->next;
         repl.msg_index = repl.msg->count;
@@ -1909,11 +1903,9 @@ int main(int argc, char **argv) {
       repl.msg_index = repl.msg->count;
       repl.msg->next = head->next;
       head = head->prev;
-      hide_cursor();
       if (repl.msg->count < prev_count) clear_tail(prev_count - repl.msg->count);
       cursor_home();
       WriteConsoleW(repl.out, repl.msg->items, repl.msg->count, NULL, NULL);
-      show_cursor();
     } break;
     case VK_NEXT: {
       if (msg_tail) {
@@ -1921,11 +1913,9 @@ int main(int argc, char **argv) {
         repl.msg->capacity = msg_tail->capacity;
         repl.msg->count = msg_tail->count;
         wmemcpy(repl.msg->items, msg_tail->items, msg_tail->count);
-        hide_cursor();
         if (repl.msg->count < prev_count) clear_tail(prev_count - repl.msg->count);
         cursor_home();
         WriteConsoleW(repl.out, repl.msg->items, repl.msg->count, NULL, NULL);
-        show_cursor();
         repl.msg->prev = msg_tail->prev;
         repl.msg->next = msg_tail->next;
         repl.msg_index = repl.msg->count;
@@ -1960,7 +1950,7 @@ int main(int argc, char **argv) {
     case VK_TAB:
       continue;
     default:
-      if (!c) continue;
+      if (!c || c == PREFIX_TOKEN) continue;
       assert(repl.msg_index <= repl.msg->count);
       if (repl.msg_index == repl.msg->count) {
         WriteConsoleW(repl.out, &c, 1, NULL, NULL);
@@ -1968,13 +1958,12 @@ int main(int argc, char **argv) {
         ++repl.msg_index;
       } else {
         array_insert(repl.msg, repl.msg_index, c);
-        hide_cursor();
         WriteConsoleW(repl.out, repl.msg->items + repl.msg_index, repl.msg->count - repl.msg_index, NULL, NULL);
         ++repl.msg_index;
         cursor_curr();
-        show_cursor();
       }
-      // wprintf(L"\rchar=%zu, v=%zu, pressed=%d, ctrl=%d\r\n", c, vk, pressed, ctrl);
+      log_wmessage(LOG_TRACE, "input", L"char=%hu (%lc), v=%hu (%lc), pressed=%d, ctrl=%d",
+                   c, c, vk, vk ? vk : L' ', input.Event.KeyEvent.bKeyDown, ctrl_on(&input));
       break;
     }
     SHORT preview_offset = ((repl.msg->count + PREFIX) / repl.dwSize_X) + 1;
@@ -1988,6 +1977,7 @@ int main(int argc, char **argv) {
       }
     }
     log_preview(false);
+    assert(repl.cursor_info.bVisible);
   }
   if (!SetConsoleMode(repl.in, repl.in_mode)) {
     log_last_error("input", "Failed to reset in console mode");
