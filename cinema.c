@@ -426,17 +426,17 @@ static inline BOOL GetConsoleScreenBufferInfo_safe(HANDLE hConsoleOutput, PCONSO
   if (msg_tail >= max_y) {
     repl.msg_index = 0;
     repl.msg->count = 0;
-    wwritef(L"Input message too large (tail at line %hd >= console screen"
-            " buffer height limit %hd). Cinema resolved this by fully"
+    wwritef(L"WARNING: Input message too large (tail at line %hd >= console"
+            " screen buffer height limit %hd). Cinema resolved this by fully"
             " clearing your input. Your console terminal supports roughly"
-            " %lu characters (cells).\r\n",
+            " %lu characters (cells)." WCRLF,
             msg_tail, max_y, (DWORD)max_x * (DWORD)max_y);
   }
-  wwritef(L"Console screen buffer height limit reached (%hd>=%hd). Cinema"
-          " resolved this by activating a fresh buffer. The content of"
+  wwritef(L"WARNING: Console screen buffer height limit reached (%hd>=%hd)."
+          " Cinema resolved this by activating a fresh buffer. The content of"
           " the previous buffer will be available once Cinema is closed."
           " If you want to prevent this situation in the future, increase"
-          " the screen buffer size (height) of your console.\r\n",
+          " the screen buffer size (height) of your console." WCRLF,
           cur_y, max_y);
   if (!GetConsoleScreenBufferInfo(repl.out, lpConsoleScreenBufferInfo)) return FALSE;
   repl.home.Y = lpConsoleScreenBufferInfo->dwCursorPosition.Y;
@@ -1760,14 +1760,12 @@ handle_out:
   return false;
 }
 
-typedef struct Console_Buffer {
-  CHAR_INFO *items;
-  DWORD count;
-  DWORD capacity;
-} Console_Buffer;
-
 static inline bool resize_console(void) {
-  static Console_Buffer console_buffer = {0};
+  static struct Console_Buffer {
+    CHAR_INFO *items;
+    DWORD count;
+    DWORD capacity;
+  } console_buffer = {0};
   // NOTE: There are two important cases for when this event gets triggered:
   // either the cursor is automatically repositioned to the tail of
   // the user input / preview, OR it is not. The former seems way more likely,
@@ -1783,7 +1781,10 @@ static inline bool resize_console(void) {
   assert(buffer_info.dwCursorPosition.Y < buffer_info.dwSize.Y - 1);
   DWORD dwSize_X = (DWORD)buffer_info.dwSize.X;
   DWORD repl_dwSize_X = (DWORD)repl.dwSize_X;
-  if (dwSize_X == repl_dwSize_X) return true;
+  if (dwSize_X == repl_dwSize_X) {
+    LeaveCriticalSection(&log_lock);
+    return true;
+  }
   COORD upper_cursor = buffer_info.dwCursorPosition;
   DWORD upper_bound = cursor_to_index(buffer_info.dwCursorPosition, dwSize_X);
   COORD lower_cursor = {.X = 0, .Y = repl.home.Y};
@@ -1868,6 +1869,50 @@ static inline bool resize_console(void) {
   return true;
 }
 
+static inline bool evaluate_input(void) {
+  return true;
+}
+
+enum Console_Timer_Type {
+  CIN_TIMER_RESIZE,
+  CIN_TIMER_EVALUATE,
+  _CIN_TIMER_END
+};
+
+static PTP_TIMER console_timers[_CIN_TIMER_END];
+static ULONGLONG console_millis[_CIN_TIMER_END];
+static bool (*console_functions[_CIN_TIMER_END])(void);
+
+VOID CALLBACK console_timer_callback(PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_TIMER Timer) {
+  ((bool (*)(void))Context)();
+}
+
+static inline bool register_console_timer(enum Console_Timer_Type type, bool (*fn)(void), ULONGLONG millis) {
+  console_millis[type] = millis;
+  console_functions[type] = fn;
+  console_timers[type] = CreateThreadpoolTimer(console_timer_callback, console_functions[type], NULL);
+  if (console_timers[type] == NULL) {
+    log_last_error("timers", "Failed to register console timer");
+    return false;
+  }
+  return true;
+}
+
+static inline void reset_console_timer(enum Console_Timer_Type type) {
+  ULARGE_INTEGER t;
+  FILETIME ft;
+  t.QuadPart = console_millis[type] * -10000LL;
+  ft.dwHighDateTime = t.HighPart;
+  ft.dwLowDateTime = t.LowPart;
+  SetThreadpoolTimer(console_timers[type], &ft, 0, 0);
+}
+
+static inline bool init_timers(void) {
+  if (!register_console_timer(CIN_TIMER_RESIZE, resize_console, 100LL)) return false;
+  // if (!register_console_timer(CIN_TIMER_EVALUATE, evaluate_input, 2000LL)) return false;
+  return true;
+}
+
 int main(int argc, char **argv) {
 #if !defined(_WIN32)
   printf("Error: Your operating system is not supported, Windows-only currently.\n");
@@ -1875,6 +1920,7 @@ int main(int argc, char **argv) {
 #endif
   if (!init_repl()) exit(1);
   InitializeCriticalSectionAndSpinCount(&log_lock, 0);
+  if (!init_timers()) exit(1);
   char *config_filename = "config.json";
   cJSON *json = parse_json(config_filename);
   if (json == NULL) {
@@ -1900,7 +1946,6 @@ int main(int argc, char **argv) {
   // TODO: support bounded viewport (excluding scrollback) maybe VT100
   // size_t visible_lines = repl.screen_info.srWindow.Bottom - repl.screen_info.srWindow.Top;
   Console_Message *msg_tail = NULL;
-  bool resize_pending = false; // TODO: event/timer bus instead
   for (;;) {
     show_cursor();
     INPUT_RECORD input;
@@ -1917,14 +1962,10 @@ int main(int argc, char **argv) {
       hide_cursor();
       break;
     case WINDOW_BUFFER_SIZE_EVENT:
-      resize_pending = true;
+      reset_console_timer(CIN_TIMER_RESIZE);
       continue;
     default:
       continue;
-    }
-    if (resize_pending) {
-      resize_console();
-      resize_pending = false;
     }
     switch (vk) {
     case VK_RETURN: {
