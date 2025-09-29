@@ -225,7 +225,14 @@ static REPL repl = {0};
 #define PREFIX_ABS L">"
 #define PREFIX_STRLEN (sizeof(PREFIX_STR) / sizeof(*(PREFIX_STR))) - 1
 #define PREFIX_ABSLEN (sizeof(PREFIX_ABS) / sizeof(*(PREFIX_ABS))) - 1
+#define WCRLF L"\r\n"
+#define WCRLF_LEN 2
+#define WCR L"\r"
+#define WCR_LEN 1
+#define CR "\r"
+#define CR_LEN 1
 
+// TODO: prune struct
 typedef struct Console_Preview {
   wchar_t *items;
   DWORD head_index;
@@ -238,6 +245,80 @@ typedef struct Console_Preview {
 } Console_Preview;
 
 static Console_Preview preview = {0};
+
+static struct Console_WWrite_Buffer {
+  wchar_t *items;
+  DWORD count;
+  DWORD capacity;
+} wwrite_buf = {0};
+
+static struct Console_Write_Buffer {
+  char *items;
+  DWORD count;
+  DWORD capacity;
+} write_buf = {0};
+
+static inline void wswrite(wchar_t *str) {
+  WriteConsoleW(repl.out, str, wcslen(str), NULL, NULL);
+}
+
+static inline void wwrite(wchar_t *str, DWORD len) {
+  WriteConsoleW(repl.out, str, len, NULL, NULL);
+}
+
+static void wwritef(const wchar_t *format, ...) {
+  va_list args;
+  va_list args_dup;
+  va_start(args, format);
+  va_copy(args_dup, args);
+  int len = _vscwprintf(format, args);
+  va_end(args);
+  array_resize(&wwrite_buf, len + 1);
+  _vsnwprintf_s(wwrite_buf.items, len + 1, len, format, args_dup);
+  va_end(args_dup);
+  WriteConsoleW(repl.out, wwrite_buf.items, len, NULL, NULL);
+}
+
+static void wvwritef(const wchar_t *format, va_list args) {
+  va_list args_dup;
+  va_copy(args_dup, args);
+  int len = _vscwprintf(format, args_dup);
+  va_end(args_dup);
+  array_resize(&wwrite_buf, len + 1);
+  _vsnwprintf_s(wwrite_buf.items, len + 1, len, format, args);
+  WriteConsoleW(repl.out, wwrite_buf.items, len, NULL, NULL);
+}
+
+static inline void swrite(char *str) {
+  WriteConsoleA(repl.out, str, strlen(str), NULL, NULL);
+}
+
+static inline void write(char *str, DWORD len) {
+  WriteConsoleA(repl.out, str, len, NULL, NULL);
+}
+
+static void writef(const char *format, ...) {
+  va_list args;
+  va_list args_dup;
+  va_start(args, format);
+  va_copy(args_dup, args);
+  int len = _vscprintf(format, args);
+  va_end(args);
+  array_resize(&write_buf, len + 1);
+  _vsnprintf_s(write_buf.items, len + 1, len, format, args_dup);
+  va_end(args_dup);
+  WriteConsoleA(repl.out, write_buf.items, len, NULL, NULL);
+}
+
+static void vwritef(const char *format, va_list args) {
+  va_list args_dup;
+  va_copy(args_dup, args);
+  int len = _vscprintf(format, args_dup);
+  va_end(args_dup);
+  array_resize(&write_buf, len + 1);
+  _vsnprintf_s(write_buf.items, len + 1, len, format, args);
+  WriteConsoleA(repl.out, write_buf.items, len, NULL, NULL);
+}
 
 static inline void hide_cursor(void) {
   if (repl.cursor_info.bVisible) {
@@ -315,59 +396,84 @@ static inline void clear_preview(DWORD pos) {
   FillConsoleOutputCharacterW(repl.out, CIN_SPACE, leftover, preview.pos, &repl._filled);
 }
 
+static inline void set_preview_pos(DWORD y) {
+  preview.pos.X = 0;
+  preview.pos.Y = y;
+}
+
 static inline bool ctrl_on(PINPUT_RECORD input) {
   return input->Event.KeyEvent.dwControlKeyState & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED);
 }
 
-static void log_preview(bool clear) {
+static inline BOOL GetConsoleScreenBufferInfo_safe(HANDLE hConsoleOutput, PCONSOLE_SCREEN_BUFFER_INFO lpConsoleScreenBufferInfo) {
+  if (!GetConsoleScreenBufferInfo(hConsoleOutput, lpConsoleScreenBufferInfo)) return FALSE;
+  SHORT cur_y = lpConsoleScreenBufferInfo->dwCursorPosition.Y;
+  SHORT max_y = lpConsoleScreenBufferInfo->dwSize.Y - 1;
+  SHORT max_x = lpConsoleScreenBufferInfo->dwSize.X;
+  if (cur_y < max_y) return TRUE;
+  HANDLE fresh_buffer = CreateConsoleScreenBuffer(GENERIC_READ | GENERIC_WRITE,
+                                                  FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                                  NULL, CONSOLE_TEXTMODE_BUFFER, NULL);
+  if (fresh_buffer == INVALID_HANDLE_VALUE) return FALSE;
+  if (!SetConsoleScreenBufferSize(fresh_buffer, lpConsoleScreenBufferInfo->dwSize)) return FALSE;
+  if (!SetConsoleActiveScreenBuffer(fresh_buffer)) return FALSE;
+  repl.out = fresh_buffer;
+  repl.dwSize_X = max_x;
+  SetConsoleCursorPosition(repl.out, (COORD){.X = 0, .Y = 0});
+  repl.home.Y = 0;
+  preview.pos.Y = 1;
+  SHORT msg_tail = next_y(repl.msg->count) + 1;
+  if (msg_tail >= max_y) {
+    repl.msg_index = 0;
+    repl.msg->count = 0;
+    wwritef(L"Input message too large (tail at line %hd >= console screen"
+            " buffer height limit %hd). Cinema resolved this by fully"
+            " clearing your input. Your console terminal supports roughly"
+            " %lu characters (cells).\r\n",
+            msg_tail, max_y, (DWORD)max_x * (DWORD)max_y);
+  }
+  wwritef(L"Console screen buffer height limit reached (%hd>=%hd). Cinema"
+          " resolved this by activating a fresh buffer. The content of"
+          " the previous buffer will be available once Cinema is closed."
+          " If you want to prevent this situation in the future, increase"
+          " the screen buffer size (height) of your console.\r\n",
+          cur_y, max_y);
+  if (!GetConsoleScreenBufferInfo(repl.out, lpConsoleScreenBufferInfo)) return FALSE;
+  repl.home.Y = lpConsoleScreenBufferInfo->dwCursorPosition.Y;
+  SHORT preview_shift = ((repl.msg->count + PREFIX) / max_x) + 1;
+  set_preview_pos(repl.home.Y + preview_shift);
+  if (!FlushConsoleInputBuffer(repl.in)) return FALSE;
+  return TRUE;
+}
+
+static void log_preview() {
   DWORD width = (DWORD)repl.dwSize_X;
-  array_ensure_capacity(&preview, width);
   wchar_t *msg2 = L"123456789012345678922012345678904567890123456789012348888555";
   DWORD msg_len = wcslen(msg2);
-  DWORD write_len = min(msg_len, width);
-  assert(wmemchr(msg2, PREFIX_TOKEN, write_len) == NULL);
-  DWORD tail_index = repl.msg->count + PREFIX;
-  DWORD diff_next_div = width - (tail_index % width);
-  DWORD next_head_index = tail_index + diff_next_div;
-  assert(next_head_index % width == 0);
-  SHORT next_line = next_y(next_head_index - PREFIX);
-  COORD next_head = {.X = 0, .Y = next_line};
-  preview.pos = next_head;
-  hide_cursor();
-  if (clear) {
-    if (preview.line != next_line && tail_index < preview.tail_index) {
-      DWORD left = max(tail_index, preview.head_index);
-      DWORD deleted = preview.tail_index - left;
-      COORD del_pos = next_cursor(left - PREFIX);
-      FillConsoleOutputCharacterW(repl.out, CIN_SPACE, deleted, del_pos, &repl._filled);
-    }
-  }
-  preview.len = write_len;
-  preview.head_index = next_head_index;
-  preview.tail_index = next_head_index + write_len;
-  preview.line = next_line;
+  preview.len = min(msg_len, width);
+  assert(wmemchr(msg2, PREFIX_TOKEN, preview.len) == NULL);
   // set cursor to scroll down (and prep next write if < width)
-  SetConsoleCursorPosition(repl.out, next_head);
+  SetConsoleCursorPosition(repl.out, preview.pos);
   if (msg_len < width) {
     WriteConsoleW(repl.out, msg2, msg_len, NULL, NULL);
   } else if (msg_len > width) {
+    array_ensure_capacity(&preview, width);
     assert(msg_len > 3);
     wmemcpy(preview.items, msg2, width - 3);
     preview.items[width - 3] = '.';
     preview.items[width - 2] = '.';
     preview.items[width - 1] = '.';
-    WriteConsoleOutputCharacterW(repl.out, preview.items, write_len, next_head, &repl._filled);
+    WriteConsoleOutputCharacterW(repl.out, preview.items, preview.len, preview.pos, &repl._filled);
   } else {
-    WriteConsoleOutputCharacterW(repl.out, msg2, write_len, next_head, &repl._filled);
+    WriteConsoleOutputCharacterW(repl.out, msg2, preview.len, preview.pos, &repl._filled);
   }
-  FillConsoleOutputAttribute(repl.out, FOREGROUND_INTENSITY, write_len, next_head, &repl._filled);
+  FillConsoleOutputAttribute(repl.out, FOREGROUND_INTENSITY, preview.len, preview.pos, &repl._filled);
   cursor_curr();
-  show_cursor();
 }
 
 static inline void rewrite_post_log(void) {
   CONSOLE_SCREEN_BUFFER_INFO buffer_info;
-  GetConsoleScreenBufferInfo(repl.out, &buffer_info);
+  GetConsoleScreenBufferInfo_safe(repl.out, &buffer_info);
   repl.dwSize_X = buffer_info.dwSize.X;
   assert(repl.msg->count <= SHRT_MAX && "SHORT overflow");
   assert(buffer_info.dwCursorPosition.Y < SHRT_MAX && "SHORT overflow");
@@ -387,10 +493,14 @@ static inline void rewrite_post_log(void) {
       clear_preview(x);
     }
   }
-  fprintf(stderr, "\r\n");
-  WriteConsoleW(repl.out, PREFIX_STR, PREFIX_STRLEN, NULL, NULL);
-  WriteConsoleW(repl.out, repl.msg->items, repl.msg->count, NULL, NULL);
-  log_preview(false);
+  wwrite(WCRLF, WCRLF_LEN);
+  wwrite(PREFIX_STR, PREFIX_STRLEN);
+  wwrite(repl.msg->items, repl.msg->count);
+  SHORT preview_offset = ((repl.msg->count + PREFIX) / repl.dwSize_X) + 1;
+  SHORT preview_line = repl.home.Y + preview_offset;
+  set_preview_pos(preview_line);
+  log_preview();
+  show_cursor();
 }
 
 static CRITICAL_SECTION log_lock;
@@ -400,15 +510,12 @@ static void log_message(Cin_Log_Level level, const char *location, const char *m
     return;
   }
   EnterCriticalSection(&log_lock);
-  va_list args;
-  va_start(args, message);
   hide_cursor();
   cursor_home();
-  fprintf(stderr, "\r[%s] [%s] ", level_to_str(level), location);
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wformat-nonliteral"
-  vfprintf(stderr, message, args);
-#pragma clang diagnostic pop
+  writef(CR "[%s] [%s] ", level_to_str(level), location);
+  va_list args;
+  va_start(args, message);
+  vwritef(message, args);
   rewrite_post_log();
   va_end(args);
   LeaveCriticalSection(&log_lock);
@@ -462,29 +569,26 @@ static void log_wmessage(Cin_Log_Level level, const char *location, const wchar_
     return;
   }
   EnterCriticalSection(&log_lock);
-  va_list args;
-  va_start(args, wmessage);
-  wchar_t formatted_wmsg[CIN_MAX_LOG_MESSAGE];
-  vswprintf(formatted_wmsg, CIN_MAX_LOG_MESSAGE, wmessage, args);
-  static char buf[CIN_MAX_PATH_BYTES];
-  utf16_to_utf8(formatted_wmsg, buf, -1);
   hide_cursor();
   cursor_home();
-  fprintf(stderr, "\r[%s] [%s] %s", level_to_str(level), location, buf);
+  writef(CR "[%s] [%s] ", level_to_str(level), location);
+  va_list args;
+  va_start(args, wmessage);
+  wvwritef(wmessage, args);
   rewrite_post_log();
   va_end(args);
   LeaveCriticalSection(&log_lock);
 }
 
 static void log_last_error(const char *location, const char *message, ...) {
-  EnterCriticalSection(&log_lock);
   static const char *log_level = "ERROR";
   static const DWORD dw_flags = FORMAT_MESSAGE_ALLOCATE_BUFFER |
                                 FORMAT_MESSAGE_FROM_SYSTEM |
                                 FORMAT_MESSAGE_IGNORE_INSERTS;
+  EnterCriticalSection(&log_lock);
   LPVOID buffer;
   DWORD code = GetLastError();
-  if (!FormatMessage(dw_flags, NULL, code, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPTSTR)&buffer, 0, NULL)) {
+  if (!FormatMessageA(dw_flags, NULL, code, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPTSTR)&buffer, 0, NULL)) {
     log_message(LOG_ERROR, location, "Failed to log GLE=%d - error with GLE=%d", code, GetLastError());
     return;
   }
@@ -496,18 +600,15 @@ static void log_last_error(const char *location, const char *message, ...) {
   assert(str[len - 2] == '\r');
   str[--len] = '\0';
   str[--len] = '\0';
-  va_list args;
-  va_start(args, message);
   hide_cursor();
   cursor_home();
-  fprintf(stderr, "\r[%s] [%s] ", log_level, location);
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wformat-nonliteral"
-  vfprintf(stderr, message, args);
-#pragma clang diagnostic pop
-  fprintf(stderr, " - Code %lu: %s", code, (char *)buffer);
-  rewrite_post_log();
+  writef(CR "[%s] [%s] ", log_level, location);
+  va_list args;
+  va_start(args, message);
+  vwritef(message, args);
   va_end(args);
+  writef(" - Code %lu: %s", code, (char *)buffer);
+  rewrite_post_log();
   LocalFree(buffer);
   LeaveCriticalSection(&log_lock);
 }
@@ -1626,9 +1727,9 @@ static inline bool bounded_console(HANDLE console) {
   return prev_bot == next_bot;
 }
 
-#define viewport_warning "Large inputs can cause minor scrollback issues in your terminal. " \
-                         "If this is bothersome, you can use vanilla cmd.exe "               \
-                         "(Command Prompt), which works perfectly.\n"
+#define viewport_warning L"Large inputs can cause minor scrollback issues in your terminal. " \
+                         "If this is bothersome, you can use vanilla cmd.exe "                \
+                         "(Command Prompt), which works perfectly." WCRLF
 
 static inline bool init_repl(void) {
   if (!SetConsoleCP(CP_UTF8)) goto code_page;
@@ -1637,9 +1738,9 @@ static inline bool init_repl(void) {
   if (!GetConsoleMode(repl.in, &repl.in_mode)) goto handle_in;
   if (!SetConsoleMode(repl.in, repl.in_mode | ENABLE_PROCESSED_INPUT | ENABLE_WINDOW_INPUT)) goto handle_in;
   if ((repl.out = GetStdHandle(STD_OUTPUT_HANDLE)) == INVALID_HANDLE_VALUE) goto handle_out;
-  if ((repl.viewport_bound = bounded_console(repl.out))) printf(viewport_warning);
+  if ((repl.viewport_bound = bounded_console(repl.out))) wswrite(viewport_warning);
   CONSOLE_SCREEN_BUFFER_INFO buffer_info;
-  if (!GetConsoleScreenBufferInfo(repl.out, &buffer_info)) goto handle_out;
+  if (!GetConsoleScreenBufferInfo_safe(repl.out, &buffer_info)) goto handle_out;
   repl.dwSize_X = buffer_info.dwSize.X;
   if (!GetConsoleCursorInfo(repl.out, &repl.cursor_info)) goto handle_out;
   if (!WriteConsoleW(repl.out, PREFIX_STR, PREFIX_STRLEN, NULL, NULL)) goto handle_out;
@@ -1649,13 +1750,13 @@ static inline bool init_repl(void) {
   repl._filled = 0;
   return true;
 code_page:
-  printf("Failed to modify console code page\n");
+  wswrite(L"Failed to modify console code page" WCRLF);
   return false;
 handle_in:
-  printf("Failed to setup console input handle\n");
+  wswrite(L"Failed to setup console input handle" WCRLF);
   return false;
 handle_out:
-  printf("Failed to setup console output handle\n");
+  wswrite(L"Failed to setup console output handle" WCRLF);
   return false;
 }
 
@@ -1664,6 +1765,108 @@ typedef struct Console_Buffer {
   DWORD count;
   DWORD capacity;
 } Console_Buffer;
+
+static inline bool resize_console(void) {
+  static Console_Buffer console_buffer = {0};
+  // NOTE: There are two important cases for when this event gets triggered:
+  // either the cursor is automatically repositioned to the tail of
+  // the user input / preview, OR it is not. The former seems way more likely,
+  // but to support the latter, we just generalize and assume the latter.
+  // A "benefit" of this is that we can use the preview before starting REPL.
+  // TODO: update note, check types
+  EnterCriticalSection(&log_lock);
+  CONSOLE_SCREEN_BUFFER_INFO buffer_info;
+  if (!GetConsoleScreenBufferInfo_safe(repl.out, &buffer_info)) {
+    log_last_error("resize", "Failed to get console screen buffer info");
+    return false;
+  }
+  assert(buffer_info.dwCursorPosition.Y < buffer_info.dwSize.Y - 1);
+  DWORD dwSize_X = (DWORD)buffer_info.dwSize.X;
+  DWORD repl_dwSize_X = (DWORD)repl.dwSize_X;
+  if (dwSize_X == repl_dwSize_X) return true;
+  COORD upper_cursor = buffer_info.dwCursorPosition;
+  DWORD upper_bound = cursor_to_index(buffer_info.dwCursorPosition, dwSize_X);
+  COORD lower_cursor = {.X = 0, .Y = repl.home.Y};
+  DWORD lower_bound = cursor_to_index(lower_cursor, dwSize_X);
+  bool bottom_up = dwSize_X > repl_dwSize_X;
+  assert(upper_bound > 0);
+  if (bottom_up && lower_bound >= upper_bound) {
+    lower_bound = upper_bound / 2;
+    lower_cursor = index_to_cursor(lower_bound, dwSize_X);
+  }
+  SHORT rows = upper_cursor.Y - lower_cursor.Y + 1;
+  assert(rows > 0);
+  assert(rows <= SHRT_MAX);
+  SHORT cols = (SHORT)dwSize_X;
+  COORD buffer_size = {.X = cols, .Y = rows};
+  DWORD buffer_count = (DWORD)cols * (DWORD)rows;
+  array_resize(&console_buffer, buffer_count);
+  COORD region_start = {.X = 0, .Y = 0};
+  SMALL_RECT region = {
+      .Left = 0,
+      .Top = lower_cursor.Y,
+      .Right = cols - 1,
+      .Bottom = upper_cursor.Y};
+  if (!ReadConsoleOutputW(repl.out, console_buffer.items, buffer_size, region_start, &region)) {
+    log_last_error("resize", "Failed to read console output region");
+    return false;
+  }
+  bool match = false;
+  if (bottom_up) {
+    for (;;) {
+      for (DWORD i = 0; i < (DWORD)rows; ++i) {
+        DWORD row = rows - 1 - i;
+        DWORD head = row * dwSize_X;
+        if (console_buffer.items[head].Char.UnicodeChar == PREFIX_TOKEN) {
+          repl.home.Y = lower_cursor.Y + row;
+          match = true;
+          goto outer;
+        }
+      }
+      if (lower_bound == 0) goto outer;
+      upper_bound = lower_bound;
+      upper_cursor = lower_cursor;
+      lower_bound /= 2;
+      lower_cursor = index_to_cursor(lower_bound, dwSize_X);
+      rows = upper_cursor.Y - lower_cursor.Y + 1;
+      buffer_size.Y = rows;
+      buffer_count = (DWORD)cols * (DWORD)rows;
+      array_resize(&console_buffer, buffer_count);
+      region.Left = 0;
+      region.Top = lower_cursor.Y;
+      region.Right = cols - 1;
+      region.Bottom = upper_cursor.Y;
+      if (!ReadConsoleOutputW(repl.out, console_buffer.items, buffer_size, region_start, &region)) {
+        log_last_error("resize", "Failed to read console output region");
+        return false;
+      }
+    }
+  outer:;
+  } else {
+    for (DWORD i = 0; i < (DWORD)rows; ++i) {
+      if (console_buffer.items[i * dwSize_X].Char.UnicodeChar == PREFIX_TOKEN) {
+        repl.home.Y = lower_cursor.Y + i;
+        match = true;
+        break;
+      }
+    }
+  }
+  assert(match && "Failed to find prefix token in console output. viewport_bound?");
+  DWORD msg_shift = (repl.msg->count + PREFIX) / dwSize_X;
+  preview.pos.Y = repl.home.Y + msg_shift + 1;
+  assert(preview.pos.X == 0);
+  if (preview.len > dwSize_X) {
+    preview.pos.X = 0;
+    ++preview.pos.Y;
+    DWORD leftover = preview.len - dwSize_X;
+    FillConsoleOutputCharacterW(repl.out, CIN_SPACE, leftover, preview.pos, &repl._filled);
+    --preview.pos.Y;
+  }
+  repl.dwSize_X = (SHORT)dwSize_X;
+  log_preview();
+  LeaveCriticalSection(&log_lock);
+  return true;
+}
 
 int main(int argc, char **argv) {
 #if !defined(_WIN32)
@@ -1697,6 +1900,7 @@ int main(int argc, char **argv) {
   // TODO: support bounded viewport (excluding scrollback) maybe VT100
   // size_t visible_lines = repl.screen_info.srWindow.Bottom - repl.screen_info.srWindow.Top;
   Console_Message *msg_tail = NULL;
+  bool resize_pending = false; // TODO: event/timer bus instead
   for (;;) {
     show_cursor();
     INPUT_RECORD input;
@@ -1713,70 +1917,14 @@ int main(int argc, char **argv) {
       hide_cursor();
       break;
     case WINDOW_BUFFER_SIZE_EVENT:
-      // NOTE: There are two important cases for when this event gets triggered:
-      // either the cursor is automatically repositioned to the tail of
-      // the user input / preview, OR it is not. The former seems way more likely,
-      // but to support the latter, we just generalize and assume the latter.
-      // A "benefit" of this is that we can use the preview before starting REPL.
-      static Console_Buffer console_buffer = {0};
-      EnterCriticalSection(&log_lock);
-      CONSOLE_SCREEN_BUFFER_INFO buffer_info;
-      if (!GetConsoleScreenBufferInfo(repl.out, &buffer_info)) {
-        log_last_error("resize", "Failed to get console screen buffer info");
-        return 1;
-      }
-      DWORD dwSize_X = (DWORD)buffer_info.dwSize.X;
-      DWORD repl_dwSize_X = (DWORD)repl.dwSize_X;
-      if (dwSize_X == repl_dwSize_X) continue;
-      // latest screen buffer cell where new home can be
-      DWORD upper_bound = cursor_to_index(buffer_info.dwCursorPosition, dwSize_X);
-      COORD lower_cursor = {.X = 0, .Y = repl.home.Y};
-      // earliest screen buffer cell where new home can be
-      DWORD lower_bound = cursor_to_index(lower_cursor, repl_dwSize_X);
-      bool bottom_up = dwSize_X > repl_dwSize_X;
-      if (bottom_up) {
-        // width increase, assume worst case where each cell was \r\n
-        lower_bound /= repl_dwSize_X;
-        lower_cursor = index_to_cursor(lower_bound, repl_dwSize_X);
-      }
-      COORD upper_cursor = buffer_info.dwCursorPosition;
-      SHORT rows = upper_cursor.Y - lower_cursor.Y + 1;
-      assert(rows >= 0);
-      SHORT cols = buffer_info.dwSize.X;
-      COORD buffer_size = {.X = cols, .Y = rows};
-      DWORD buffer_count = (DWORD)cols * (DWORD)rows;
-      array_resize(&console_buffer, buffer_count);
-      COORD region_start = {.X = 0, .Y = 0};
-      SMALL_RECT region = {.Left = 0, .Top = lower_cursor.Y, .Right = dwSize_X - 1, .Bottom = upper_cursor.Y};
-      DWORD err = 0;
-      if (!ReadConsoleOutputW(repl.out, console_buffer.items, buffer_size, region_start, &region)) {
-        log_last_error("resize", "Failed to read console output region");
-        return 1;
-      }
-      for (SHORT i = 0; i < rows; ++i) {
-        SHORT row = bottom_up ? (rows - 1 - i) : i;
-        SHORT head = row * dwSize_X;
-        if (console_buffer.items[head].Char.UnicodeChar == PREFIX_TOKEN) {
-          repl.home.Y = lower_cursor.Y + row;
-          break;
-        }
-      }
-      DWORD msg_shift = (repl.msg->count + PREFIX) / dwSize_X;
-      preview.pos.Y = repl.home.Y + msg_shift + 1;
-      if (preview.len > dwSize_X) {
-        preview.pos.X = 0;
-        ++preview.pos.Y;
-        DWORD leftover = preview.len - dwSize_X;
-        FillConsoleOutputCharacterW(repl.out, CIN_SPACE, leftover, preview.pos, &repl._filled);
-        preview.pos.X = dwSize_X;
-        --preview.pos.Y;
-      }
-      repl.dwSize_X = (SHORT)dwSize_X;
-      log_preview(false);
-      LeaveCriticalSection(&log_lock);
+      resize_pending = true;
       continue;
     default:
       continue;
+    }
+    if (resize_pending) {
+      resize_console();
+      resize_pending = false;
     }
     switch (vk) {
     case VK_RETURN: {
@@ -1967,7 +2115,8 @@ int main(int argc, char **argv) {
       break;
     }
     SHORT preview_offset = ((repl.msg->count + PREFIX) / repl.dwSize_X) + 1;
-    SHORT y_diff = repl.home.Y + preview_offset - preview.pos.Y;
+    SHORT preview_line = repl.home.Y + preview_offset;
+    SHORT y_diff = preview_line - preview.pos.Y;
     if (y_diff < 0) {
       clear_preview(repl.dwSize_X - preview.len);
     } else if (y_diff == 1) {
@@ -1976,8 +2125,8 @@ int main(int argc, char **argv) {
         clear_preview(tail_x);
       }
     }
-    log_preview(false);
-    assert(repl.cursor_info.bVisible);
+    set_preview_pos(preview_line);
+    log_preview();
   }
   if (!SetConsoleMode(repl.in, repl.in_mode)) {
     log_last_error("input", "Failed to reset in console mode");
