@@ -334,40 +334,44 @@ static inline void show_cursor(void) {
   }
 }
 
+static inline SHORT index_x(DWORD index, DWORD dwSize_X) {
+  assert(index % dwSize_X <= SHRT_MAX);
+  return (SHORT)(index % dwSize_X);
+}
+
+static inline SHORT index_x_repl(DWORD index) {
+  return index_x(PREFIX + index, repl.dwSize_X);
+}
+
+static inline SHORT index_y(DWORD index, DWORD dwSize_X) {
+  assert(index / dwSize_X <= SHRT_MAX);
+  return (SHORT)(index / dwSize_X);
+}
+
+static inline SHORT index_y_repl(DWORD index) {
+  return repl.home.Y + index_y(PREFIX + index, repl.dwSize_X);
+}
+
+static inline COORD index_to_cursor(DWORD index, DWORD dwSize_X) {
+  return (COORD){.X = index_x(index, dwSize_X), .Y = index_y(index, dwSize_X)};
+}
+
+static inline COORD index_to_cursor_repl(DWORD index) {
+  return (COORD){.X = index_x_repl(index), .Y = index_y_repl(index)};
+}
+
 static inline DWORD cursor_to_index(COORD cursor, DWORD dwSize_X) {
   assert(cursor.X >= 0);
   assert(cursor.Y >= 0);
   return (DWORD)cursor.X + ((DWORD)cursor.Y * dwSize_X);
 }
 
-static inline COORD index_to_cursor(DWORD index, DWORD dwSize_X) {
-  assert(index % dwSize_X <= SHRT_MAX);
-  assert(index / dwSize_X <= SHRT_MAX);
-  return (COORD){.X = (SHORT)(index % dwSize_X), .Y = (SHORT)(index / dwSize_X)};
-}
-
-static inline SHORT next_x(DWORD index) {
-  assert(((index + PREFIX) / (DWORD)repl.dwSize_X) <= SHRT_MAX && "SHORT overflow");
-  assert((SHORT)(SHRT_MAX - ((index + PREFIX) / (DWORD)repl.dwSize_X)) >= repl.home.Y && "SHORT overflow");
-  return (SHORT)((index + PREFIX) % (DWORD)repl.dwSize_X);
-}
-
-static inline SHORT next_y(DWORD index) {
-  assert(((index + PREFIX) / (DWORD)repl.dwSize_X) <= SHRT_MAX && "SHORT overflow");
-  assert((SHORT)(SHRT_MAX - ((index + PREFIX) / (DWORD)repl.dwSize_X)) >= repl.home.Y && "SHORT overflow");
-  return repl.home.Y + (SHORT)((index + PREFIX) / (DWORD)repl.dwSize_X);
-}
-
-static inline COORD next_cursor(DWORD index) {
-  return (COORD){.X = next_x(index), .Y = next_y(index)};
-}
-
 static inline COORD curr_cursor(void) {
-  return next_cursor(repl.msg_index);
+  return index_to_cursor_repl(repl.msg_index);
 }
 
 static inline COORD tail_cursor(void) {
-  return next_cursor(repl.msg->count);
+  return index_to_cursor_repl(repl.msg->count);
 }
 
 static inline void cursor_home(void) {
@@ -422,7 +426,7 @@ static inline BOOL GetConsoleScreenBufferInfo_safe(HANDLE hConsoleOutput, PCONSO
   SetConsoleCursorPosition(repl.out, (COORD){.X = 0, .Y = 0});
   repl.home.Y = 0;
   preview.pos.Y = 1;
-  SHORT msg_tail = next_y(repl.msg->count) + 1;
+  SHORT msg_tail = index_y_repl(repl.msg->count) + 1;
   if (msg_tail >= max_y) {
     repl.msg_index = 0;
     repl.msg->count = 0;
@@ -488,7 +492,7 @@ static inline void rewrite_post_log(void) {
   if (y_diff == -1 && preview.len > tail_x) {
     clear_preview(tail_x);
   } else if (y_diff >= 0) {
-    DWORD x = (y_diff == 0) ? min(repl.msg->count + PREFIX, width) : (DWORD)next_x(repl.msg->count);
+    DWORD x = (y_diff == 0) ? min(repl.msg->count + PREFIX, width) : index_x_repl(repl.msg->count);
     if (preview.len > x && (y_diff > 0 || x < width)) {
       clear_preview(x);
     }
@@ -1773,17 +1777,19 @@ static inline bool resize_console(void) {
   // A "benefit" of this is that we can use the preview before starting REPL.
   // TODO: update note, check types
   EnterCriticalSection(&log_lock);
+  bool ok = false;
+  hide_cursor();
   CONSOLE_SCREEN_BUFFER_INFO buffer_info;
   if (!GetConsoleScreenBufferInfo_safe(repl.out, &buffer_info)) {
-    log_last_error("resize", "Failed to get console screen buffer info");
-    return false;
+    log_last_error("resize", "Failed to read console output region");
+    goto cleanup;
   }
   assert(buffer_info.dwCursorPosition.Y < buffer_info.dwSize.Y - 1);
   DWORD dwSize_X = (DWORD)buffer_info.dwSize.X;
   DWORD repl_dwSize_X = (DWORD)repl.dwSize_X;
   if (dwSize_X == repl_dwSize_X) {
-    LeaveCriticalSection(&log_lock);
-    return true;
+    ok = true;
+    goto cleanup;
   }
   COORD upper_cursor = buffer_info.dwCursorPosition;
   DWORD upper_bound = cursor_to_index(buffer_info.dwCursorPosition, dwSize_X);
@@ -1810,7 +1816,7 @@ static inline bool resize_console(void) {
       .Bottom = upper_cursor.Y};
   if (!ReadConsoleOutputW(repl.out, console_buffer.items, buffer_size, region_start, &region)) {
     log_last_error("resize", "Failed to read console output region");
-    return false;
+    goto cleanup;
   }
   bool match = false;
   if (bottom_up) {
@@ -1839,7 +1845,7 @@ static inline bool resize_console(void) {
       region.Bottom = upper_cursor.Y;
       if (!ReadConsoleOutputW(repl.out, console_buffer.items, buffer_size, region_start, &region)) {
         log_last_error("resize", "Failed to read console output region");
-        return false;
+        goto cleanup;
       }
     }
   outer:;
@@ -1865,8 +1871,11 @@ static inline bool resize_console(void) {
   }
   repl.dwSize_X = (SHORT)dwSize_X;
   log_preview();
+  ok = true;
+cleanup:
+  show_cursor();
   LeaveCriticalSection(&log_lock);
-  return true;
+  return ok;
 }
 
 static inline bool evaluate_input(void) {
