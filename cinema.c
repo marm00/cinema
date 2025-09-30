@@ -257,12 +257,12 @@ static struct Console_Write_Buffer {
   size_t capacity;
 } write_buf = {0};
 
-static inline void wswrite(wchar_t *str) {
+static inline void wswrite(const wchar_t *str) {
   assert(wcslen(str) <= SIZE_MAX && "Corrupted string");
   WriteConsoleW(repl.out, str, (DWORD)wcslen(str), NULL, NULL);
 }
 
-static inline void wwrite(wchar_t *str, DWORD len) {
+static inline void wwrite(const wchar_t *str, DWORD len) {
   WriteConsoleW(repl.out, str, len, NULL, NULL);
 }
 
@@ -293,12 +293,12 @@ static void wvwritef(const wchar_t *format, va_list args) {
   WriteConsoleW(repl.out, wwrite_buf.items, (DWORD)len, NULL, NULL);
 }
 
-static inline void swrite(char *str) {
+static inline void swrite(const char *str) {
   assert(strlen(str) <= SIZE_MAX && "Corrupted string");
   WriteConsoleA(repl.out, str, (DWORD)strlen(str), NULL, NULL);
 }
 
-static inline void write(char *str, DWORD len) {
+static inline void write(const char *str, DWORD len) {
   WriteConsoleA(repl.out, str, len, NULL, NULL);
 }
 
@@ -1905,22 +1905,27 @@ enum Console_Timer_Type {
   _CIN_TIMER_END
 };
 
-static PTP_TIMER console_timers[_CIN_TIMER_END];
-static LONGLONG console_millis[_CIN_TIMER_END];
-static bool (*console_functions[_CIN_TIMER_END])(void);
+typedef struct Console_Timer_Ctx {
+  PTP_TIMER timer;
+  LONGLONG millis;
+  bool (*f)(void);
+} Console_Timer_Ctx;
+
+static Console_Timer_Ctx console_timers[_CIN_TIMER_END];
 
 static VOID CALLBACK console_timer_callback(PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_TIMER Timer) {
   (void)Instance;
   (void)Timer;
-  enum Console_Timer_Type type = *(enum Console_Timer_Type *)Context;
-  console_functions[type]();
+  Console_Timer_Ctx *ctx = (Console_Timer_Ctx *)Context;
+  ctx->f();
 }
 
-static inline bool register_console_timer(enum Console_Timer_Type type, bool (*fn)(void), LONGLONG millis) {
-  console_millis[type] = millis;
-  console_functions[type] = fn;
-  console_timers[type] = CreateThreadpoolTimer(console_timer_callback, &type, NULL);
-  if (console_timers[type] == NULL) {
+static inline bool register_console_timer(enum Console_Timer_Type type, bool (*f)(void), LONGLONG millis) {
+  Console_Timer_Ctx *ctx = &console_timers[type];
+  ctx->millis = millis;
+  ctx->f = f;
+  ctx->timer = CreateThreadpoolTimer(console_timer_callback, ctx, NULL);
+  if (ctx->timer == NULL) {
     log_last_error("timers", "Failed to register console timer");
     return false;
   }
@@ -1928,12 +1933,13 @@ static inline bool register_console_timer(enum Console_Timer_Type type, bool (*f
 }
 
 static inline void reset_console_timer(enum Console_Timer_Type type) {
+  Console_Timer_Ctx *ctx = &console_timers[type];
   LARGE_INTEGER t;
   FILETIME ft;
-  t.QuadPart = console_millis[type] * -10000LL;
+  t.QuadPart = ctx->millis * -10000LL;
   ft.dwHighDateTime = (DWORD)t.HighPart;
   ft.dwLowDateTime = (DWORD)t.LowPart;
-  SetThreadpoolTimer(console_timers[type], &ft, 0, 0);
+  SetThreadpoolTimer(ctx->timer, &ft, 0, 0);
 }
 
 static inline bool init_timers(void) {
@@ -1965,7 +1971,7 @@ int main(int argc, char **argv) {
   }
   setup_locals(json);
   setup_substring_search();
-  uint8_t pattern[] = "test";
+  // uint8_t pattern[] = "test";
   // document_listing(pattern, (int32_t)strlen((const char *)pattern));
   // NOTE: It seems impossible to reach outside the bounds of the viewport
   // within Windows Terminal using a custom ReadConsoleInput approach. Virtual
