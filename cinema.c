@@ -455,7 +455,7 @@ static void log_preview() {
   // set cursor to scroll down (and prep next write if < width)
   SetConsoleCursorPosition(repl.out, preview.pos);
   if (msg_len < width) {
-    WriteConsoleW(repl.out, msg2, msg_len, NULL, NULL);
+    wwrite(msg2, msg_len);
   } else if (msg_len > width) {
     array_ensure_capacity(&preview, width);
     assert(msg_len > 3);
@@ -2027,7 +2027,7 @@ int main(int argc, char **argv) {
       DWORD leftover = repl.msg->count - repl.msg_index;
       clear_tail(deleted);
       if (leftover) {
-        WriteConsoleW(repl.out, repl.msg->items + repl.msg_index, leftover, NULL, NULL);
+        wwrite(repl.msg->items + repl.msg_index, leftover);
         cursor_curr();
       }
     } break;
@@ -2046,7 +2046,7 @@ int main(int argc, char **argv) {
       clear_tail(deleted);
       if (leftover) {
         wmemmove(&repl.msg->items[repl.msg_index], &repl.msg->items[right], leftover);
-        WriteConsoleW(repl.out, repl.msg->items + repl.msg_index, leftover, NULL, NULL);
+        wwrite(repl.msg->items + repl.msg_index, leftover);
         cursor_curr();
       }
     } break;
@@ -2060,7 +2060,7 @@ int main(int argc, char **argv) {
       repl.msg->prev = repl.msg->prev->prev;
       if (repl.msg->count < prev_count) clear_tail(prev_count - repl.msg->count);
       cursor_home();
-      WriteConsoleW(repl.out, repl.msg->items, repl.msg->count, NULL, NULL);
+      wwrite(repl.msg->items, repl.msg->count);
     } break;
     case VK_DOWN: {
       if (repl.msg->next) {
@@ -2070,7 +2070,7 @@ int main(int argc, char **argv) {
         wmemcpy(repl.msg->items, repl.msg->next->items, repl.msg->next->count);
         if (repl.msg->count < prev_count) clear_tail(prev_count - repl.msg->count);
         cursor_home();
-        WriteConsoleW(repl.out, repl.msg->items, repl.msg->count, NULL, NULL);
+        wwrite(repl.msg->items, repl.msg->count);
         repl.msg->prev = repl.msg->next->prev;
         repl.msg->next = repl.msg->next->next;
         repl.msg_index = repl.msg->count;
@@ -2094,7 +2094,7 @@ int main(int argc, char **argv) {
       head = head->prev;
       if (repl.msg->count < prev_count) clear_tail(prev_count - repl.msg->count);
       cursor_home();
-      WriteConsoleW(repl.out, repl.msg->items, repl.msg->count, NULL, NULL);
+      wwrite(repl.msg->items, repl.msg->count);
     } break;
     case VK_NEXT: {
       if (msg_tail) {
@@ -2104,7 +2104,7 @@ int main(int argc, char **argv) {
         wmemcpy(repl.msg->items, msg_tail->items, msg_tail->count);
         if (repl.msg->count < prev_count) clear_tail(prev_count - repl.msg->count);
         cursor_home();
-        WriteConsoleW(repl.out, repl.msg->items, repl.msg->count, NULL, NULL);
+        wwrite(repl.msg->items, repl.msg->count);
         repl.msg->prev = msg_tail->prev;
         repl.msg->next = msg_tail->next;
         repl.msg_index = repl.msg->count;
@@ -2142,12 +2142,12 @@ int main(int argc, char **argv) {
       if (!c || c == PREFIX_TOKEN) continue;
       assert(repl.msg_index <= repl.msg->count);
       if (repl.msg_index == repl.msg->count) {
-        WriteConsoleW(repl.out, &c, 1, NULL, NULL);
+        wwrite(&c, 1);
         array_push(repl.msg, c);
         ++repl.msg_index;
       } else {
         array_insert(repl.msg, repl.msg_index, c);
-        WriteConsoleW(repl.out, repl.msg->items + repl.msg_index, repl.msg->count - repl.msg_index, NULL, NULL);
+        wwrite(repl.msg->items + repl.msg_index, repl.msg->count - repl.msg_index);
         ++repl.msg_index;
         cursor_curr();
       }
