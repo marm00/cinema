@@ -61,6 +61,15 @@ static const Cin_Log_Level GLOBAL_LOG_LEVEL = LOG_TRACE;
     }                                                                        \
   } while (0)
 
+#define array_alloc(a, cap)                           \
+  do {                                                \
+    assert((a)->capacity == 0);                       \
+    assert((cap) > 0);                                \
+    (a)->capacity = (cap);                            \
+    (a)->items = malloc((cap) * sizeof(*(a)->items)); \
+    assert((a)->items && "Memory limit exceeded");    \
+  } while (0)
+
 #define array_reserve(a, n) array_ensure_capacity((a), (a)->count + (n))
 
 #define array_resize(a, total)           \
@@ -765,6 +774,46 @@ static int32_t lcps(const uint8_t *a, const uint8_t *b) {
 }
 
 #define CIN_STRERROR_BYTES 95
+#define CONF_LINE_CAP 64
+
+static bool parse_config(const char *filename) {
+  bool ok = false;
+  FILE *file;
+  int32_t err = fopen_s(&file, filename, "rb");
+  if (err) {
+    char err_buf[CIN_STRERROR_BYTES];
+    strerror_s(err_buf, CIN_STRERROR_BYTES, err);
+    log_message(LOG_ERROR, "json", "Failed to open config file '%s': %s", filename, err_buf);
+    goto end;
+  }
+  struct {
+    char *items;
+    size_t count;
+    size_t capacity;
+  } buf = {0};
+  array_alloc(&buf, CONF_LINE_CAP);
+  while (fgets(buf.items, (int32_t)buf.capacity, file)) {
+    size_t len = strlen(buf.items);
+    if (len && buf.items[len - 1] != '\n' && !feof(file)) {
+      // need to collect remainder and grow buffer
+      assert(buf.items[len] == '\0');
+      buf.count = len;
+      int32_t c;
+      while ((c = fgetc(file)) != '\n' && c != EOF) {
+        array_push(&buf, (char)c);
+      }
+      array_push(&buf, '\0');
+      len = buf.count - 1;
+    }
+    writef("\r%s\nlen=%d (last=%d)\n", buf.items, len, buf.items[len - 2]);
+    buf.items[0] = '\0';
+    buf.count = 0;
+  }
+  ok = true;
+end:
+  fclose(file);
+  return ok;
+}
 
 static char *read_json(const char *filename) {
   if (filename == NULL || filename[0] == '\0') {
@@ -1917,7 +1966,8 @@ static VOID CALLBACK console_timer_callback(PTP_CALLBACK_INSTANCE Instance, PVOI
   (void)Instance;
   (void)Timer;
   Console_Timer_Ctx *ctx = (Console_Timer_Ctx *)Context;
-  ctx->f();
+  bool ok = ctx->f();
+  assert(ok);
 }
 
 static inline bool register_console_timer(enum Console_Timer_Type type, bool (*f)(void), LONGLONG millis) {
@@ -1958,6 +2008,9 @@ int main(int argc, char **argv) {
   if (!init_repl()) exit(1);
   InitializeCriticalSectionAndSpinCount(&log_lock, 0);
   if (!init_timers()) exit(1);
+  char *conf = "cinema.conf";
+  parse_config(conf);
+  exit(1);
   char *config_filename = "config.json";
   cJSON *json = parse_json(config_filename);
   if (json == NULL) {
