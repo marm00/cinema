@@ -774,12 +774,22 @@ static int32_t lcps(const uint8_t *a, const uint8_t *b) {
 }
 
 #define CIN_STRERROR_BYTES 95
-#define CONF_LINE_CAP 64
+#define CONF_LINE_CAP 512
+
+static inline bool lower_isalpha(char *out) {
+  if (*out >= 'A' && *out <= 'Z') *out += ('a' - 'A');
+  return *out >= 'a' && *out <= 'z';
+}
+
+static inline void conf_error(size_t row, size_t col, const char *allowed) {
+  // TODO: replace with log
+  writef("Skipping line %zu due to unexpected token at position %zu. Allowed: %s.\r\n", row + 1, col + 1, allowed);
+}
 
 static bool parse_config(const char *filename) {
   bool ok = false;
   FILE *file;
-  int32_t err = fopen_s(&file, filename, "rb");
+  int32_t err = fopen_s(&file, filename, "rt");
   if (err) {
     char err_buf[CIN_STRERROR_BYTES];
     strerror_s(err_buf, CIN_STRERROR_BYTES, err);
@@ -792,10 +802,18 @@ static bool parse_config(const char *filename) {
     size_t capacity;
   } buf = {0};
   array_alloc(&buf, CONF_LINE_CAP);
+  size_t line = 0;
   while (fgets(buf.items, (int32_t)buf.capacity, file)) {
     size_t len = strlen(buf.items);
-    if (len && buf.items[len - 1] != '\n' && !feof(file)) {
-      // need to collect remainder and grow buffer
+    if (!len) {
+      // TODO: handle
+      goto end;
+    }
+    assert(buf.capacity > 1);
+    if (buf.items[len - 1] == '\n') {
+      buf.items[len - 1] = '\0';
+    } else if (!feof(file)) {
+      // buffer too small, collect remainder and grow
       assert(buf.items[len] == '\0');
       buf.count = len;
       int32_t c;
@@ -805,10 +823,44 @@ static bool parse_config(const char *filename) {
       array_push(&buf, '\0');
       len = buf.count - 1;
     }
-    writef("\r%s\nlen=%d (last=%d)\n", buf.items, len, buf.items[len - 2]);
+    assert(buf.items[len] == '\0');
+    assert(buf.items[len - 1] != '\n');
+    char first = lower_isalpha(&buf.items[0]) ? 'a' : buf.items[0];
+    switch (first) {
+    case 'a':
+      char *p = buf.items + 1;
+      while (lower_isalpha(p)) ++p;
+      // end of lhs
+      while (*p == ' ') ++p;
+      if (*p != '=') {
+        conf_error(line, (size_t)(p - buf.items), "=");
+        goto end;
+      }
+      ++p;
+      while (*p == ' ') ++p;
+      if (!*p) {
+        conf_error(line, (size_t)(p - buf.items), "any non-empty token");
+        goto end;
+      }
+      // start of rhs
+      // expect abc=def123 or abc = def123
+      break;
+    case '[':
+      // expect abc] or [abc]
+      break;
+    case '\n':
+      break;
+    case '#':
+      break;
+    default:
+      conf_error(line, 0, "A-z, #, [, newline");
+      break;
+    }
     buf.items[0] = '\0';
     buf.count = 0;
+    ++line;
   }
+
   ok = true;
 end:
   fclose(file);
