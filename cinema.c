@@ -797,9 +797,6 @@ static int32_t lcps(const uint8_t *a, const uint8_t *b) {
   return (int32_t)(a - start);
 }
 
-#define CIN_STRERROR_BYTES 95
-#define CONF_LINE_CAP 512
-
 typedef struct Conf_Key {
   char *items;
   size_t count;
@@ -843,7 +840,10 @@ struct Conf_Scopes {
   size_t capacity;
 } conf_scopes = {0};
 
-static Conf_Scope *conf_scope = {0};
+static struct {
+  Conf_Scope *scope;
+  size_t line;
+} conf_parser = {0};
 
 static struct {
   char *items;
@@ -851,13 +851,18 @@ static struct {
   size_t capacity;
 } conf_error = {0};
 
+#define CIN_STRERROR_BYTES 95
+#define CONF_LINE_CAP 512
+#define CONF_SCOPES_CAP 16
+
 static inline bool conf_kcmp(char *k, char *str, size_t len, Conf_Scope_Type type, Conf_Key *out, bool unique) {
   if (memcmp(k, str, len) != 0) return false;
-  if (conf_scope->type != type) {
+  assert(&conf_parser.scope->type);
+  if (conf_parser.scope->type != type) {
     sarray_set(&conf_error, "Unexpected key: '");
     array_extend(&conf_error, str, len);
     sarray_extend(&conf_error, "' is only allowed ");
-    switch (conf_scope->type) {
+    switch (conf_parser.scope->type) {
     case CONF_SCOPE_ROOT:
       sarray_extend(&conf_error, "above any [table].");
       break;
@@ -885,14 +890,18 @@ static inline bool conf_kcmp(char *k, char *str, size_t len, Conf_Scope_Type typ
 static inline bool conf_kget(char *str, size_t len) {
   switch (len) {
   case 11:
-    if (conf_kcmp("directories", str, len, CONF_SCOPE_MEDIA, &conf_scope->media.directories, false)) return true;
+    if (conf_kcmp("directories", str, len, CONF_SCOPE_MEDIA, &conf_parser.scope->media.directories, false)) return true;
     break;
   case 8:
-    if (conf_kcmp("patterns", str, len, CONF_SCOPE_MEDIA, &conf_scope->media.patterns, false)) return true;
+    if (conf_kcmp("patterns", str, len, CONF_SCOPE_MEDIA, &conf_parser.scope->media.patterns, false)) return true;
+    break;
+  case 6:
+    if (conf_kcmp("window", str, len, CONF_SCOPE_LAYOUT, &conf_parser.scope->layout.window, false)) return true;
     break;
   case 4:
-    if (conf_kcmp("urls", str, len, CONF_SCOPE_MEDIA, &conf_scope->media.urls, false)) return true;
-    if (conf_kcmp("tags", str, len, CONF_SCOPE_MEDIA, &conf_scope->media.tags, false)) return true;
+    if (conf_kcmp("urls", str, len, CONF_SCOPE_MEDIA, &conf_parser.scope->media.urls, false)) return true;
+    if (conf_kcmp("tags", str, len, CONF_SCOPE_MEDIA, &conf_parser.scope->media.tags, false)) return true;
+    if (conf_kcmp("name", str, len, CONF_SCOPE_LAYOUT, &conf_parser.scope->layout.name, true)) return true;
     break;
   default:
     assert(false && "len not accounted for");
@@ -924,6 +933,9 @@ static bool parse_config(const char *filename) {
     log_message(LOG_ERROR, "json", "Failed to open config file '%s': %s", filename, err_buf);
     goto end;
   }
+  array_alloc(&conf_scopes, CONF_SCOPES_CAP);
+  conf_parser.scope = &conf_scopes.items[0];
+  conf_parser.scope->type = CONF_SCOPE_ROOT;
   struct {
     char *items;
     size_t count;
