@@ -834,43 +834,49 @@ typedef struct Conf_Scope {
   };
 } Conf_Scope;
 
-struct Conf_Scopes {
+typedef struct Conf_Scopes {
   Conf_Scope *items;
   size_t count;
   size_t capacity;
-} conf_scopes = {0};
+} Conf_Scopes;
 
-static struct {
-  Conf_Scope *scope;
-  size_t line;
-} conf_parser = {0};
-
-static struct {
+typedef struct Conf_Error {
   char *items;
   size_t count;
   size_t capacity;
-} conf_error = {0};
+} Conf_Error;
+
+static struct {
+  Conf_Scopes scopes;
+  Conf_Error error;
+  size_t line;
+} conf_parser = {0};
 
 #define CIN_STRERROR_BYTES 95
 #define CONF_LINE_CAP 512
 #define CONF_SCOPES_CAP 16
 
+static inline Conf_Scope *conf_scope(void) {
+  assert(conf_parser.scopes.count > 0);
+  return &conf_parser.scopes.items[conf_parser.scopes.count - 1];
+}
+
 static inline bool conf_kcmp(char *k, char *str, size_t len, Conf_Scope_Type type, Conf_Key *out, bool unique) {
   if (memcmp(k, str, len) != 0) return false;
-  assert(&conf_parser.scope->type);
-  if (conf_parser.scope->type != type) {
-    sarray_set(&conf_error, "Unexpected key: '");
-    array_extend(&conf_error, str, len);
-    sarray_extend(&conf_error, "' is only allowed ");
-    switch (conf_parser.scope->type) {
+  assert(&conf_scope()->type);
+  if (conf_scope()->type != type) {
+    sarray_set(&conf_parser.error, "Unexpected key: '");
+    array_extend(&conf_parser.error, str, len);
+    sarray_extend(&conf_parser.error, "' is only allowed ");
+    switch (conf_scope()->type) {
     case CONF_SCOPE_ROOT:
-      sarray_extend(&conf_error, "above any [table].");
+      sarray_extend(&conf_parser.error, "above any [table].");
       break;
     case CONF_SCOPE_LAYOUT:
-      sarray_extend(&conf_error, "under a [layout] table.");
+      sarray_extend(&conf_parser.error, "under a [layout] table.");
       break;
     case CONF_SCOPE_MEDIA:
-      sarray_extend(&conf_error, "under a [media] table.");
+      sarray_extend(&conf_parser.error, "under a [media] table.");
       break;
     default:
       assert(false && "Unexpected type");
@@ -890,21 +896,46 @@ static inline bool conf_kcmp(char *k, char *str, size_t len, Conf_Scope_Type typ
 static inline bool conf_kget(char *str, size_t len) {
   switch (len) {
   case 11:
-    if (conf_kcmp("directories", str, len, CONF_SCOPE_MEDIA, &conf_parser.scope->media.directories, false)) return true;
+    if (conf_kcmp("directories", str, len, CONF_SCOPE_MEDIA, &conf_scope()->media.directories, false)) return true;
     break;
   case 8:
-    if (conf_kcmp("patterns", str, len, CONF_SCOPE_MEDIA, &conf_parser.scope->media.patterns, false)) return true;
+    if (conf_kcmp("patterns", str, len, CONF_SCOPE_MEDIA, &conf_scope()->media.patterns, false)) return true;
     break;
   case 6:
-    if (conf_kcmp("window", str, len, CONF_SCOPE_LAYOUT, &conf_parser.scope->layout.window, false)) return true;
+    if (conf_kcmp("window", str, len, CONF_SCOPE_LAYOUT, &conf_scope()->layout.window, false)) return true;
     break;
   case 4:
-    if (conf_kcmp("urls", str, len, CONF_SCOPE_MEDIA, &conf_parser.scope->media.urls, false)) return true;
-    if (conf_kcmp("tags", str, len, CONF_SCOPE_MEDIA, &conf_parser.scope->media.tags, false)) return true;
-    if (conf_kcmp("name", str, len, CONF_SCOPE_LAYOUT, &conf_parser.scope->layout.name, true)) return true;
+    if (conf_kcmp("urls", str, len, CONF_SCOPE_MEDIA, &conf_scope()->media.urls, false)) return true;
+    if (conf_kcmp("tags", str, len, CONF_SCOPE_MEDIA, &conf_scope()->media.tags, false)) return true;
+    if (conf_kcmp("name", str, len, CONF_SCOPE_LAYOUT, &conf_scope()->layout.name, true)) return true;
     break;
   default:
-    assert(false && "len not accounted for");
+    break;
+  }
+  return false;
+}
+
+static inline void conf_enter(Conf_Scope_Type type) {
+  Conf_Scope scope = {0};
+  scope.type = type;
+  array_push(&conf_parser.scopes, scope);
+}
+
+static inline bool conf_scmp(char *s, char *str, size_t len, Conf_Scope_Type type) {
+  if (memcmp(s, str, len) != 0) return false;
+  conf_enter(type);
+  return true;
+}
+
+static inline bool conf_sget(char *str, size_t len) {
+  switch (len) {
+  case 6:
+    if (conf_scmp("layout", str, len, CONF_SCOPE_LAYOUT)) return true;
+    break;
+  case 5:
+    if (conf_scmp("media", str, len, CONF_SCOPE_MEDIA)) return true;
+    break;
+  default:
     break;
   }
   return false;
@@ -933,9 +964,8 @@ static bool parse_config(const char *filename) {
     log_message(LOG_ERROR, "json", "Failed to open config file '%s': %s", filename, err_buf);
     goto end;
   }
-  array_alloc(&conf_scopes, CONF_SCOPES_CAP);
-  conf_parser.scope = &conf_scopes.items[0];
-  conf_parser.scope->type = CONF_SCOPE_ROOT;
+  array_alloc(&conf_parser.scopes, CONF_SCOPES_CAP);
+  conf_enter(CONF_SCOPE_ROOT);
   struct {
     char *items;
     size_t count;
@@ -967,7 +997,7 @@ static bool parse_config(const char *filename) {
     assert(buf.items[len - 1] != '\n');
     char first = lower_isalpha(&buf.items[0]) ? 'a' : buf.items[0];
     switch (first) {
-    case 'a':
+    case 'a': {
       char *p = buf.items + 1;
       while (lower_isalpha(p)) ++p;
       // end of lhs
@@ -980,8 +1010,8 @@ static bool parse_config(const char *filename) {
       if (!conf_kget(buf.items, k_len)) {
         conf_error_log(line, (size_t)(p - buf.items), "key not found");
         goto end;
-      } else if (conf_error.count > 0) {
-        conf_error_log(line, (size_t)(p - buf.items), conf_error.items);
+      } else if (conf_parser.error.count > 0) {
+        conf_error_log(line, (size_t)(p - buf.items), conf_parser.error.items);
         goto end;
       }
       ++p;
@@ -992,11 +1022,21 @@ static bool parse_config(const char *filename) {
       }
       // start of rhs
       // expect abc=def123 or abc = def123
-      break;
-    case '[':
-      // TODO: switch scope
+    } break;
+    case '[': {
+      char *p = buf.items + 1;
+      while (lower_isalpha(p)) ++p;
+      size_t s_len = (size_t)(p - buf.items);
+      if (*p != ']') {
+        conf_error_log(line, s_len, "]");
+        goto end;
+      }
+      if (!conf_sget(buf.items + 1, s_len - 1)) {
+        conf_error_log(line, (size_t)(p - buf.items), "scope not found");
+        goto end;
+      }
       // expect abc] or [abc]
-      break;
+    } break;
     case '\n':
       break;
     case '#':
