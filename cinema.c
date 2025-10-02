@@ -90,6 +90,24 @@ static const Cin_Log_Level GLOBAL_LOG_LEVEL = LOG_TRACE;
     (a)->items[(a)->count++] = (item); \
   } while (0)
 
+#define array_set(a, new_items, n)                              \
+  do {                                                          \
+    array_resize((a), (n));                                     \
+    memcpy((a)->items, (new_items), (n) * sizeof(*(a)->items)); \
+  } while (0)
+
+#define warray_set(a, new_items, n)        \
+  do {                                     \
+    array_resize((a), (n));                \
+    wmemcpy((a)->items, (new_items), (n)); \
+  } while (0)
+
+#define sarray_set(a, new_items)        \
+  do {                                  \
+    size_t n = sizeof((new_items)) - 1; \
+    array_set((a), (new_items), n);     \
+  } while (0)
+
 #define array_extend(a, new_items, n)                                        \
   do {                                                                       \
     array_reserve((a), (n));                                                 \
@@ -103,6 +121,12 @@ static const Cin_Log_Level GLOBAL_LOG_LEVEL = LOG_TRACE;
     wmemcpy((a)->items + (a)->count, (new_items), (n)); \
     (a)->count += (n);                                  \
   } while (0)
+
+#define sarray_extend(a, new_items)     \
+  do {                                  \
+    size_t n = sizeof((new_items)) - 1; \
+    array_extend((a), (new_items), n);  \
+  } while (0);
 
 #define array_splice(a, i, new_items, n)                              \
   do {                                                                \
@@ -776,12 +800,116 @@ static int32_t lcps(const uint8_t *a, const uint8_t *b) {
 #define CIN_STRERROR_BYTES 95
 #define CONF_LINE_CAP 512
 
-static inline bool lower_isalpha(char *out) {
-  if (*out >= 'A' && *out <= 'Z') *out += ('a' - 'A');
-  return *out >= 'a' && *out <= 'z';
+typedef struct Conf_Key {
+  char *items;
+  size_t count;
+  size_t capacity;
+} Conf_Key;
+
+typedef struct Conf_Root {
+  Conf_Key null;
+} Conf_Root;
+
+typedef struct Conf_Media {
+  Conf_Key directories;
+  Conf_Key patterns;
+  Conf_Key urls;
+  Conf_Key tags;
+} Conf_Media;
+
+typedef struct Conf_Layout {
+  Conf_Key name;
+  Conf_Key window;
+} Conf_Layout;
+
+typedef enum {
+  CONF_SCOPE_ROOT,
+  CONF_SCOPE_MEDIA,
+  CONF_SCOPE_LAYOUT
+} Conf_Scope_Type;
+
+typedef struct Conf_Scope {
+  Conf_Scope_Type type;
+  union {
+    Conf_Root root;
+    Conf_Media media;
+    Conf_Layout layout;
+  };
+} Conf_Scope;
+
+struct Conf_Scopes {
+  Conf_Scope *items;
+  size_t count;
+  size_t capacity;
+} conf_scopes = {0};
+
+static Conf_Scope *conf_scope = {0};
+
+static struct {
+  char *items;
+  size_t count;
+  size_t capacity;
+} conf_error = {0};
+
+static inline bool conf_kcmp(char *k, char *str, size_t len, Conf_Scope_Type type, Conf_Key *out, bool unique) {
+  if (memcmp(k, str, len) != 0) return false;
+  if (conf_scope->type != type) {
+    sarray_set(&conf_error, "Unexpected key: '");
+    array_extend(&conf_error, str, len);
+    sarray_extend(&conf_error, "' is only allowed ");
+    switch (conf_scope->type) {
+    case CONF_SCOPE_ROOT:
+      sarray_extend(&conf_error, "above any [table].");
+      break;
+    case CONF_SCOPE_LAYOUT:
+      sarray_extend(&conf_error, "under a [layout] table.");
+      break;
+    case CONF_SCOPE_MEDIA:
+      sarray_extend(&conf_error, "under a [media] table.");
+      break;
+    default:
+      assert(false && "Unexpected type");
+      break;
+    }
+  } else if (unique) {
+    array_set(out, str, len);
+  } else {
+    if (out->count > 0 && out->items[out->count - 1] != ',') {
+      array_push(out, ',');
+    }
+    array_extend(out, str, len);
+  }
+  return true;
 }
 
-static inline void conf_error(size_t row, size_t col, const char *allowed) {
+static inline bool conf_kget(char *str, size_t len) {
+  switch (len) {
+  case 11:
+    if (conf_kcmp("directories", str, len, CONF_SCOPE_MEDIA, &conf_scope->media.directories, false)) return true;
+    break;
+  case 8:
+    if (conf_kcmp("patterns", str, len, CONF_SCOPE_MEDIA, &conf_scope->media.patterns, false)) return true;
+    break;
+  case 4:
+    if (conf_kcmp("urls", str, len, CONF_SCOPE_MEDIA, &conf_scope->media.urls, false)) return true;
+    if (conf_kcmp("tags", str, len, CONF_SCOPE_MEDIA, &conf_scope->media.tags, false)) return true;
+    break;
+  default:
+    assert(false && "len not accounted for");
+    break;
+  }
+  return false;
+}
+
+static inline bool lower_isalpha(char *out) {
+  if (*out <= 'Z' && *out >= 'A') {
+    *out += ('a' - 'A');
+    return true;
+  }
+  return *out <= 'z' && *out >= 'a';
+}
+
+static inline void conf_error_log(size_t row, size_t col, const char *allowed) {
   // TODO: replace with log
   writef("Skipping line %zu due to unexpected token at position %zu. Allowed: %s.\r\n", row + 1, col + 1, allowed);
 }
@@ -831,21 +959,30 @@ static bool parse_config(const char *filename) {
       char *p = buf.items + 1;
       while (lower_isalpha(p)) ++p;
       // end of lhs
+      size_t k_len = (size_t)(p - buf.items);
       while (*p == ' ') ++p;
       if (*p != '=') {
-        conf_error(line, (size_t)(p - buf.items), "=");
+        conf_error_log(line, (size_t)(p - buf.items), "=");
+        goto end;
+      }
+      if (!conf_kget(buf.items, k_len)) {
+        conf_error_log(line, (size_t)(p - buf.items), "key not found");
+        goto end;
+      } else if (conf_error.count > 0) {
+        conf_error_log(line, (size_t)(p - buf.items), conf_error.items);
         goto end;
       }
       ++p;
       while (*p == ' ') ++p;
       if (!*p) {
-        conf_error(line, (size_t)(p - buf.items), "any non-empty token");
+        conf_error_log(line, (size_t)(p - buf.items), "any non-empty token");
         goto end;
       }
       // start of rhs
       // expect abc=def123 or abc = def123
       break;
     case '[':
+      // TODO: switch scope
       // expect abc] or [abc]
       break;
     case '\n':
@@ -853,7 +990,7 @@ static bool parse_config(const char *filename) {
     case '#':
       break;
     default:
-      conf_error(line, 0, "A-z, #, [, newline");
+      conf_error_log(line, 0, "A-z, #, [, newline");
       break;
     }
     buf.items[0] = '\0';
@@ -2000,11 +2137,11 @@ static inline bool evaluate_input(void) {
   return true;
 }
 
-enum Console_Timer_Type {
+typedef enum {
   CIN_TIMER_RESIZE,
   CIN_TIMER_EVALUATE,
   _CIN_TIMER_END
-};
+} Console_Timer_Type;
 
 typedef struct Console_Timer_Ctx {
   PTP_TIMER timer;
@@ -2022,7 +2159,7 @@ static VOID CALLBACK console_timer_callback(PTP_CALLBACK_INSTANCE Instance, PVOI
   assert(ok);
 }
 
-static inline bool register_console_timer(enum Console_Timer_Type type, bool (*f)(void), LONGLONG millis) {
+static inline bool register_console_timer(Console_Timer_Type type, bool (*f)(void), LONGLONG millis) {
   Console_Timer_Ctx *ctx = &console_timers[type];
   ctx->millis = millis;
   ctx->f = f;
@@ -2034,7 +2171,7 @@ static inline bool register_console_timer(enum Console_Timer_Type type, bool (*f
   return true;
 }
 
-static inline void reset_console_timer(enum Console_Timer_Type type) {
+static inline void reset_console_timer(Console_Timer_Type type) {
   Console_Timer_Ctx *ctx = &console_timers[type];
   LARGE_INTEGER t;
   FILETIME ft;
