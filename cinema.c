@@ -1056,63 +1056,6 @@ end:
   return ok;
 }
 
-#define FOREACH_PART(k, part, len)                                                                     \
-  for (char *_left = (k)->items, *_right = (k)->items + (k)->count, *part = _left, *_comma = NULL;     \
-       _left < _right;                                                                                 \
-       _left = _comma ? _comma + 1 : _right, _left += _comma ? strspn(_left, " \t") : 0, part = _left) \
-    if ((_comma = memchr(_left, ',', (size_t)(_right - _left))),                                       \
-        (len = _comma ? (size_t)(_comma - _left) : (size_t)(_right - _left)), 1)
-
-static bool init_config(const char *filename) {
-  if (!parse_config(filename)) return false;
-  size_t len;
-  Conf_Root *root = &conf_parser.scopes.items[0].root;
-  for (size_t i = 1; i < conf_parser.scopes.count; ++i) {
-    Conf_Scope *scope = &conf_parser.scopes.items[i];
-    log_message(LOG_DEBUG, "[Scope %zu: %zu]", i, scope->type);
-    switch (scope->type) {
-    case CONF_SCOPE_LAYOUT:
-      log_message(LOG_DEBUG, "Name: %s", scope->layout.name.items);
-      FOREACH_PART(&scope->layout.screen, part, len) {
-        part[len] = '\0';
-        log_message(LOG_DEBUG, "Screen: %s", part);
-      }
-      array_free(scope->layout.name);
-      array_free(scope->layout.screen);
-      break;
-    case CONF_SCOPE_MEDIA:
-      static wchar_t wbuf[CIN_MAX_PATH];
-      FOREACH_PART(&scope->media.directories, part, len) {
-        part[len] = '\0';
-        log_message(LOG_DEBUG, "Directory: %s", part);
-      }
-      FOREACH_PART(&scope->media.patterns, part, len) {
-        part[len] = '\0';
-        log_message(LOG_DEBUG, "Pattern: %s", part);
-      }
-      FOREACH_PART(&scope->media.tags, part, len) {
-        part[len] = '\0';
-        log_message(LOG_DEBUG, "Tag: %s", part);
-      }
-      FOREACH_PART(&scope->media.urls, part, len) {
-        part[len] = '\0';
-        log_message(LOG_DEBUG, "URL: %s", part);
-      }
-      array_free(scope->media.directories);
-      array_free(scope->media.patterns);
-      array_free(scope->media.tags);
-      array_free(scope->media.urls);
-      break;
-    default:
-      assert(false && "Unexpected scope");
-      break;
-    }
-  }
-  array_free(conf_parser.scopes);
-  array_free(conf_parser.buf);
-  return true;
-}
-
 static char *read_json(const char *filename) {
   if (filename == NULL || filename[0] == '\0') {
     log_message(LOG_ERROR, "Invalid filename provided (empty string)");
@@ -1483,6 +1426,68 @@ static bool setup_url(const wchar_t *url) {
 static bool setup_tag(const wchar_t *tag) {
   utf16_to_utf8(tag, utf8_buf, -1);
   // locals_append(utf8_buf, len);
+  return true;
+}
+
+#define FOREACH_PART(k, part, len)                                                                     \
+  for (char *_left = (k)->items, *_right = (k)->items + (k)->count, *part = _left, *_comma = NULL;     \
+       _left < _right;                                                                                 \
+       _left = _comma ? _comma + 1 : _right, _left += _comma ? strspn(_left, " \t") : 0, part = _left) \
+    if ((_comma = memchr(_left, ',', (size_t)(_right - _left))),                                       \
+        (len = _comma ? (size_t)(_comma - _left) : (size_t)(_right - _left)), 1)
+
+static bool init_config(const char *filename) {
+  if (!parse_config(filename)) return false;
+  size_t len;
+  Conf_Root *root = &conf_parser.scopes.items[0].root;
+  // TODO: parallelize for large n
+  for (size_t i = 1; i < conf_parser.scopes.count; ++i) {
+    Conf_Scope *scope = &conf_parser.scopes.items[i];
+    log_message(LOG_DEBUG, "[Scope %zu: %zu]", i, scope->type);
+    switch (scope->type) {
+    case CONF_SCOPE_LAYOUT: {
+      log_message(LOG_DEBUG, "Name: %s", scope->layout.name.items);
+      FOREACH_PART(&scope->layout.screen, part, len) {
+        part[len] = '\0';
+        log_message(LOG_DEBUG, "Screen: %s", part);
+      }
+      array_free(scope->layout.name);
+      array_free(scope->layout.screen);
+    } break;
+    case CONF_SCOPE_MEDIA: {
+      static wchar_t wbuf[CIN_MAX_PATH];
+      FOREACH_PART(&scope->media.directories, part, len) {
+        part[len] = '\0';
+        int32_t len_utf16 = utf8_to_utf16_norm(part, wbuf);
+        if (len_utf16) {
+          setup_directory(wbuf, (size_t)len_utf16);
+        }
+        log_message(LOG_DEBUG, "Directory: %s", part);
+      }
+      FOREACH_PART(&scope->media.patterns, part, len) {
+        part[len] = '\0';
+        log_message(LOG_DEBUG, "Pattern: %s", part);
+      }
+      FOREACH_PART(&scope->media.tags, part, len) {
+        part[len] = '\0';
+        log_message(LOG_DEBUG, "Tag: %s", part);
+      }
+      FOREACH_PART(&scope->media.urls, part, len) {
+        part[len] = '\0';
+        log_message(LOG_DEBUG, "URL: %s", part);
+      }
+      array_free(scope->media.directories);
+      array_free(scope->media.patterns);
+      array_free(scope->media.tags);
+      array_free(scope->media.urls);
+    } break;
+    default:
+      assert(false && "Unexpected scope");
+      break;
+    }
+  }
+  array_free(conf_parser.scopes);
+  array_free(conf_parser.buf);
   return true;
 }
 
