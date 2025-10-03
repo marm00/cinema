@@ -1,4 +1,4 @@
-# cinema
+# Cinema media player
 
 A CLI tool to search and play local and online videos simultaneously, using mpv.
 

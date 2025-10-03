@@ -846,10 +846,20 @@ typedef struct Conf_Error {
   size_t capacity;
 } Conf_Error;
 
+typedef struct Conf_Buf {
+  char *items;
+  size_t count;
+  size_t capacity;
+} Conf_Buf;
+
 static struct {
   Conf_Scopes scopes;
   Conf_Error error;
+  Conf_Buf buf;
   size_t line;
+  size_t len;
+  size_t k_len;
+  char *v;
 } conf_parser = {0};
 
 #define CIN_STRERROR_BYTES 95
@@ -861,12 +871,32 @@ static inline Conf_Scope *conf_scope(void) {
   return &conf_parser.scopes.items[conf_parser.scopes.count - 1];
 }
 
-static inline bool conf_kcmp(char *k, char *str, size_t len, Conf_Scope_Type type, Conf_Key *out, bool unique) {
-  if (memcmp(k, str, len) != 0) return false;
+static inline void conf_enter_scope(Conf_Scope_Type type) {
+  Conf_Scope scope = {0};
+  scope.type = type;
+  array_push(&conf_parser.scopes, scope);
+}
+
+static inline void conf_error_log(size_t row, size_t col, const char *allowed) {
+  // TODO: replace with log
+  writef("Skipping line %zu due to unexpected token at position %zu. Allowed: %s.\r\n", row + 1, col + 1, allowed);
+}
+
+static inline bool lower_isalpha(char *out) {
+  if (*out <= 'Z' && *out >= 'A') {
+    *out += ('a' - 'A');
+    return true;
+  }
+  return *out <= 'z' && *out >= 'a';
+}
+
+static inline bool conf_kcmp(char *k, Conf_Scope_Type type, Conf_Key *out, bool unique) {
+  if (memcmp(k, conf_parser.buf.items, conf_parser.k_len) != 0) return false;
   assert(&conf_scope()->type);
+  size_t v_len = conf_parser.len - (size_t)(conf_parser.v - conf_parser.buf.items);
   if (conf_scope()->type != type) {
     sarray_set(&conf_parser.error, "Unexpected key: '");
-    array_extend(&conf_parser.error, str, len);
+    array_extend(&conf_parser.error, conf_parser.buf.items, conf_parser.k_len);
     sarray_extend(&conf_parser.error, "' is only allowed ");
     switch (conf_scope()->type) {
     case CONF_SCOPE_ROOT:
@@ -883,31 +913,32 @@ static inline bool conf_kcmp(char *k, char *str, size_t len, Conf_Scope_Type typ
       break;
     }
   } else if (unique) {
-    array_set(out, str, len);
+    // TODO: maybe warning log
+    array_set(out, conf_parser.v, v_len);
   } else {
     if (out->count > 0 && out->items[out->count - 1] != ',') {
       array_push(out, ',');
     }
-    array_extend(out, str, len);
+    array_extend(out, conf_parser.v, v_len);
   }
   return true;
 }
 
-static inline bool conf_kget(char *str, size_t len) {
-  switch (len) {
+static inline bool conf_kget(void) {
+  switch (conf_parser.k_len) {
   case 11:
-    if (conf_kcmp("directories", str, len, CONF_SCOPE_MEDIA, &conf_scope()->media.directories, false)) return true;
+    if (conf_kcmp("directories", CONF_SCOPE_MEDIA, &conf_scope()->media.directories, false)) return true;
     break;
   case 8:
-    if (conf_kcmp("patterns", str, len, CONF_SCOPE_MEDIA, &conf_scope()->media.patterns, false)) return true;
+    if (conf_kcmp("patterns", CONF_SCOPE_MEDIA, &conf_scope()->media.patterns, false)) return true;
     break;
   case 6:
-    if (conf_kcmp("window", str, len, CONF_SCOPE_LAYOUT, &conf_scope()->layout.window, false)) return true;
+    if (conf_kcmp("window", CONF_SCOPE_LAYOUT, &conf_scope()->layout.window, false)) return true;
     break;
   case 4:
-    if (conf_kcmp("urls", str, len, CONF_SCOPE_MEDIA, &conf_scope()->media.urls, false)) return true;
-    if (conf_kcmp("tags", str, len, CONF_SCOPE_MEDIA, &conf_scope()->media.tags, false)) return true;
-    if (conf_kcmp("name", str, len, CONF_SCOPE_LAYOUT, &conf_scope()->layout.name, true)) return true;
+    if (conf_kcmp("urls", CONF_SCOPE_MEDIA, &conf_scope()->media.urls, false)) return true;
+    if (conf_kcmp("tags", CONF_SCOPE_MEDIA, &conf_scope()->media.tags, false)) return true;
+    if (conf_kcmp("name", CONF_SCOPE_LAYOUT, &conf_scope()->layout.name, true)) return true;
     break;
   default:
     break;
@@ -915,43 +946,24 @@ static inline bool conf_kget(char *str, size_t len) {
   return false;
 }
 
-static inline void conf_enter(Conf_Scope_Type type) {
-  Conf_Scope scope = {0};
-  scope.type = type;
-  array_push(&conf_parser.scopes, scope);
-}
-
-static inline bool conf_scmp(char *s, char *str, size_t len, Conf_Scope_Type type) {
-  if (memcmp(s, str, len) != 0) return false;
-  conf_enter(type);
+static inline bool conf_scmp(char *s, Conf_Scope_Type type) {
+  if (memcmp(s, conf_parser.buf.items + 1, conf_parser.k_len) != 0) return false;
+  conf_enter_scope(type);
   return true;
 }
 
-static inline bool conf_sget(char *str, size_t len) {
-  switch (len) {
+static inline bool conf_sget(void) {
+  switch (conf_parser.k_len) {
   case 6:
-    if (conf_scmp("layout", str, len, CONF_SCOPE_LAYOUT)) return true;
+    if (conf_scmp("layout", CONF_SCOPE_LAYOUT)) return true;
     break;
   case 5:
-    if (conf_scmp("media", str, len, CONF_SCOPE_MEDIA)) return true;
+    if (conf_scmp("media", CONF_SCOPE_MEDIA)) return true;
     break;
   default:
     break;
   }
   return false;
-}
-
-static inline bool lower_isalpha(char *out) {
-  if (*out <= 'Z' && *out >= 'A') {
-    *out += ('a' - 'A');
-    return true;
-  }
-  return *out <= 'z' && *out >= 'a';
-}
-
-static inline void conf_error_log(size_t row, size_t col, const char *allowed) {
-  // TODO: replace with log
-  writef("Skipping line %zu due to unexpected token at position %zu. Allowed: %s.\r\n", row + 1, col + 1, allowed);
 }
 
 static bool parse_config(const char *filename) {
@@ -964,94 +976,88 @@ static bool parse_config(const char *filename) {
     log_message(LOG_ERROR, "json", "Failed to open config file '%s': %s", filename, err_buf);
     goto end;
   }
+  array_alloc(&conf_parser.buf, CONF_LINE_CAP);
   array_alloc(&conf_parser.scopes, CONF_SCOPES_CAP);
-  conf_enter(CONF_SCOPE_ROOT);
-  struct {
-    char *items;
-    size_t count;
-    size_t capacity;
-  } buf = {0};
-  array_alloc(&buf, CONF_LINE_CAP);
-  size_t line = 0;
-  while (fgets(buf.items, (int32_t)buf.capacity, file)) {
-    size_t len = strlen(buf.items);
-    if (!len) {
+  conf_enter_scope(CONF_SCOPE_ROOT);
+  while (fgets(conf_parser.buf.items, (int32_t)conf_parser.buf.capacity, file)) {
+    conf_parser.len = strlen(conf_parser.buf.items);
+    if (!conf_parser.len) {
       // TODO: handle
+      assert(false);
       goto end;
     }
-    assert(buf.capacity > 1);
-    if (buf.items[len - 1] == '\n') {
-      buf.items[len - 1] = '\0';
+    assert(conf_parser.buf.capacity > 1);
+    if (conf_parser.buf.items[conf_parser.len - 1] == '\n') {
+      conf_parser.buf.items[conf_parser.len - 1] = '\0';
     } else if (!feof(file)) {
       // buffer too small, collect remainder and grow
-      assert(buf.items[len] == '\0');
-      buf.count = len;
+      assert(conf_parser.buf.items[conf_parser.len] == '\0');
+      conf_parser.buf.count = conf_parser.len;
       int32_t c;
       while ((c = fgetc(file)) != '\n' && c != EOF) {
-        array_push(&buf, (char)c);
+        array_push(&conf_parser.buf, (char)c);
       }
-      array_push(&buf, '\0');
-      len = buf.count - 1;
+      array_push(&conf_parser.buf, '\0');
+      conf_parser.len = conf_parser.buf.count - 1;
     }
-    assert(buf.items[len] == '\0');
-    assert(buf.items[len - 1] != '\n');
-    char first = lower_isalpha(&buf.items[0]) ? 'a' : buf.items[0];
+    assert(conf_parser.buf.items[conf_parser.len] == '\0');
+    assert(conf_parser.buf.items[conf_parser.len - 1] != '\n');
+    char first = lower_isalpha(&conf_parser.buf.items[0]) ? 'a' : conf_parser.buf.items[0];
     switch (first) {
     case 'a': {
-      char *p = buf.items + 1;
+      // expect abc=def123 or abc = def123
+      char *p = conf_parser.buf.items + 1;
       while (lower_isalpha(p)) ++p;
-      // end of lhs
-      size_t k_len = (size_t)(p - buf.items);
+      conf_parser.k_len = (size_t)(p - conf_parser.buf.items);
       while (*p == ' ') ++p;
       if (*p != '=') {
-        conf_error_log(line, (size_t)(p - buf.items), "=");
-        goto end;
-      }
-      if (!conf_kget(buf.items, k_len)) {
-        conf_error_log(line, (size_t)(p - buf.items), "key not found");
-        goto end;
-      } else if (conf_parser.error.count > 0) {
-        conf_error_log(line, (size_t)(p - buf.items), conf_parser.error.items);
+        conf_error_log(conf_parser.line, (size_t)(p - conf_parser.buf.items), "=");
         goto end;
       }
       ++p;
       while (*p == ' ') ++p;
       if (!*p) {
-        conf_error_log(line, (size_t)(p - buf.items), "any non-empty token");
+        conf_error_log(conf_parser.line, (size_t)(p - conf_parser.buf.items), "any non-empty token");
         goto end;
       }
-      // start of rhs
-      // expect abc=def123 or abc = def123
+      conf_parser.v = p;
+      if (!conf_kget()) {
+        conf_error_log(conf_parser.line, (size_t)(p - conf_parser.buf.items), "key not found");
+        goto end;
+      } else if (conf_parser.error.count > 0) {
+        conf_error_log(conf_parser.line, (size_t)(p - conf_parser.buf.items), conf_parser.error.items);
+        goto end;
+      }
     } break;
     case '[': {
-      char *p = buf.items + 1;
+      // expect abc]
+      char *p = conf_parser.buf.items + 1;
       while (lower_isalpha(p)) ++p;
-      size_t s_len = (size_t)(p - buf.items);
+      conf_parser.k_len = (size_t)(p - conf_parser.buf.items) - 1;
       if (*p != ']') {
-        conf_error_log(line, s_len, "]");
+        conf_error_log(conf_parser.line, conf_parser.k_len, "]");
         goto end;
       }
-      if (!conf_sget(buf.items + 1, s_len - 1)) {
-        conf_error_log(line, (size_t)(p - buf.items), "scope not found");
+      if (!conf_sget()) {
+        conf_error_log(conf_parser.line, (size_t)(p - conf_parser.buf.items), "scope not found");
         goto end;
       }
-      // expect abc] or [abc]
     } break;
-    case '\n':
-      break;
     case '#':
       break;
-    default:
-      conf_error_log(line, 0, "A-z, #, [, newline");
+    case '\0':
       break;
+    default:
+      conf_error_log(conf_parser.line, 0, "A-z, #, [, newline");
+      goto end;
     }
-    buf.items[0] = '\0';
-    buf.count = 0;
-    ++line;
+    conf_parser.buf.items[0] = '\0';
+    conf_parser.buf.count = 0;
+    ++conf_parser.line;
   }
-
   ok = true;
 end:
+  // TODO: free memory
   fclose(file);
   return ok;
 }
