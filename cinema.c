@@ -47,6 +47,7 @@ typedef enum {
 } Cin_Log_Level;
 
 static const Cin_Log_Level GLOBAL_LOG_LEVEL = LOG_TRACE;
+static const char *LOG_LEVELS[LOG_TRACE + 1] = {"ERROR", "WARNING", "INFO", "DEBUG", "TRACE"};
 
 #define CIN_ARRAY_CAP 256
 #define CIN_ARRAY_GROWTH 2
@@ -190,23 +191,6 @@ static const Cin_Log_Level GLOBAL_LOG_LEVEL = LOG_TRACE;
 #define CIN_MAX_WRITABLE_PATH_BYTES (MAX_PATH - 12) * 4
 #define CIN_COMMAND_PROMPT_LIMIT 8191
 #define CIN_MAX_LOG_MESSAGE 1024
-
-static const char *level_to_str(Cin_Log_Level level) {
-  switch (level) {
-  case LOG_ERROR:
-    return "ERROR";
-  case LOG_WARNING:
-    return "WARNING";
-  case LOG_INFO:
-    return "INFO";
-  case LOG_DEBUG:
-    return "DEBUG";
-  case LOG_TRACE:
-    return "TRACE";
-  default:
-    return "LOG";
-  }
-}
 
 typedef struct Console_Message {
   wchar_t *items;
@@ -555,14 +539,14 @@ static inline void rewrite_post_log(void) {
 
 static CRITICAL_SECTION log_lock;
 
-static void log_message(Cin_Log_Level level, const char *location, const char *message, ...) {
+static void log_message(Cin_Log_Level level, const char *message, ...) {
   if (level > GLOBAL_LOG_LEVEL) {
     return;
   }
   EnterCriticalSection(&log_lock);
   hide_cursor();
   cursor_home();
-  writef(CR "[%s] [%s] ", level_to_str(level), location);
+  writef(CR "[%s] ", LOG_LEVELS[level]);
   va_list args;
   va_start(args, message);
   vwritef(message, args);
@@ -603,25 +587,25 @@ static int utf8_to_utf16_norm(const char *str, wchar_t *buf) {
   // uses winapi to lowercase the string, and ensures it is not empty
   int len = utf8_to_utf16(str, buf, CIN_MAX_PATH);
   if (len <= 1) {
-    log_message(LOG_DEBUG, "normalize", "Converted '%s' to empty string.", str);
+    log_message(LOG_DEBUG, "Converted '%s' to empty string.", str);
     return 0;
   }
   DWORD lower = CharLowerBuffW(buf, (DWORD)(len - 1)); // ignore \0
   if ((DWORD)(len - 1) != lower) {
-    log_message(LOG_ERROR, "normalize", "Processed unexpected n (%d != %d)", lower, len);
+    log_message(LOG_ERROR, "Processed unexpected n (%d != %d)", lower, len);
     return 0;
   }
   return len;
 }
 
-static void log_wmessage(Cin_Log_Level level, const char *location, const wchar_t *wmessage, ...) {
+static void log_wmessage(Cin_Log_Level level, const wchar_t *wmessage, ...) {
   if (level > GLOBAL_LOG_LEVEL) {
     return;
   }
   EnterCriticalSection(&log_lock);
   hide_cursor();
   cursor_home();
-  writef(CR "[%s] [%s] ", level_to_str(level), location);
+  writef(CR "[%s] ", LOG_LEVELS[level]);
   va_list args;
   va_start(args, wmessage);
   wvwritef(wmessage, args);
@@ -630,8 +614,7 @@ static void log_wmessage(Cin_Log_Level level, const char *location, const wchar_
   LeaveCriticalSection(&log_lock);
 }
 
-static void log_last_error(const char *location, const char *message, ...) {
-  static const char *log_level = "ERROR";
+static void log_last_error(const char *message, ...) {
   static const DWORD dw_flags = FORMAT_MESSAGE_ALLOCATE_BUFFER |
                                 FORMAT_MESSAGE_FROM_SYSTEM |
                                 FORMAT_MESSAGE_IGNORE_INSERTS;
@@ -639,7 +622,7 @@ static void log_last_error(const char *location, const char *message, ...) {
   LPVOID buffer;
   DWORD code = GetLastError();
   if (!FormatMessageA(dw_flags, NULL, code, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPTSTR)&buffer, 0, NULL)) {
-    log_message(LOG_ERROR, location, "Failed to log GLE=%d - error with GLE=%d", code, GetLastError());
+    log_message(LOG_ERROR, "Failed to log GLE=%d - error with GLE=%d", code, GetLastError());
     return;
   }
   // remove trailing \r\n
@@ -652,7 +635,7 @@ static void log_last_error(const char *location, const char *message, ...) {
   str[--len] = '\0';
   hide_cursor();
   cursor_home();
-  writef(CR "[%s] [%s] ", log_level, location);
+  writef(CR "[%s] ", LOG_LEVELS[LOG_ERROR]);
   va_list args;
   va_start(args, message);
   vwritef(message, args);
@@ -902,11 +885,11 @@ static inline bool conf_kcmp(char *k, Conf_Scope_Type type, Conf_Key *out, bool 
       break;
     }
     conf_parser.buf.items[conf_parser.k_len] = '\0';
-    log_message(LOG_ERROR, "conf", "Unexpected key on line %zu: '%s' is not allowed %s",
+    log_message(LOG_ERROR, "Unexpected key on line %zu: '%s' is not allowed %s",
                 conf_parser.line, conf_parser.buf.items, scope_msg);
   } else if (unique) {
     if (out->count > 0) {
-      log_message(LOG_WARNING, "conf", "Overwriting existing value on line %zu for key '%s': %s => %s",
+      log_message(LOG_WARNING, "Overwriting existing value on line %zu for key '%s': %s => %s",
                   conf_parser.line, k, out->items, conf_parser.v);
     }
     array_set(out, conf_parser.v, v_len);
@@ -968,7 +951,7 @@ static bool parse_config(const char *filename) {
   if (err) {
     char err_buf[CIN_STRERROR_BYTES];
     strerror_s(err_buf, CIN_STRERROR_BYTES, err);
-    log_message(LOG_ERROR, "json", "Failed to open config file '%s': %s", filename, err_buf);
+    log_message(LOG_ERROR, "Failed to open config file '%s': %s", filename, err_buf);
     goto end;
   }
   array_alloc(&conf_parser.buf, CONF_LINE_CAP);
@@ -1007,7 +990,7 @@ static bool parse_config(const char *filename) {
       conf_parser.k_len = (size_t)(p - conf_parser.buf.items);
       while (*p == ' ') ++p;
       if (*p != '=') {
-        log_message(LOG_ERROR, "conf", "Token on line %zu at position %zu must be '=', not '%c'",
+        log_message(LOG_ERROR, "Token on line %zu at position %zu must be '=', not '%c'",
                     conf_parser.line, (size_t)(p - conf_parser.buf.items) + 1, *p);
         goto end;
       }
@@ -1015,15 +998,15 @@ static bool parse_config(const char *filename) {
       while (*p == ' ') ++p;
       if (!*p) {
         conf_parser.buf.items[conf_parser.k_len] = '\0';
-        log_message(LOG_ERROR, "conf", "Token on line %zu at position %zu must not be empty."
-                                       " Set the value for key '%s = ...'",
+        log_message(LOG_ERROR, "Token on line %zu at position %zu must not be empty."
+                               " Set the value for key '%s = ...'",
                     conf_parser.line, (size_t)(p - conf_parser.buf.items), conf_parser.buf.items);
         goto end;
       }
       conf_parser.v = p;
       if (!conf_kget()) {
         conf_parser.buf.items[conf_parser.k_len] = '\0';
-        log_message(LOG_ERROR, "conf", "Unknown key '%s' on line %zu, please check for typos",
+        log_message(LOG_ERROR, "Unknown key '%s' on line %zu, please check for typos",
                     conf_parser.buf.items, conf_parser.line);
         goto end;
       } else if (conf_parser.error) {
@@ -1037,14 +1020,14 @@ static bool parse_config(const char *filename) {
       conf_parser.k_len = (size_t)(p - conf_parser.buf.items) - 1;
       if (*p != ']') {
         conf_parser.buf.items[conf_parser.k_len + 1] = '\0';
-        log_message(LOG_ERROR, "conf", "Line %zu wrongly creates a new scope '%s',"
-                                       " close it with ']' at position %zu",
+        log_message(LOG_ERROR, "Line %zu wrongly creates a new scope '%s',"
+                               " close it with ']' at position %zu",
                     conf_parser.line, conf_parser.buf.items, conf_parser.k_len + 2);
         goto end;
       }
       if (!conf_sget()) {
         conf_parser.buf.items[conf_parser.k_len + 2] = '\0';
-        log_message(LOG_ERROR, "conf", "Scope '%s' at line %zu is unknown, please check for typos",
+        log_message(LOG_ERROR, "Scope '%s' at line %zu is unknown, please check for typos",
                     conf_parser.buf.items, conf_parser.line);
         goto end;
       }
@@ -1054,8 +1037,8 @@ static bool parse_config(const char *filename) {
     case '\0':
       break;
     default:
-      log_message(LOG_ERROR, "conf", "Line %zu starts with unexpected token '%c'. Only letters,"
-                                     " #, [, and empty lines are allowed here.",
+      log_message(LOG_ERROR, "Line %zu starts with unexpected token '%c'. Only letters,"
+                             " #, [, and empty lines are allowed here.",
                   conf_parser.line, conf_parser.buf.items[0]);
       goto end;
     }
@@ -1072,7 +1055,7 @@ end:
 
 static char *read_json(const char *filename) {
   if (filename == NULL || filename[0] == '\0') {
-    log_message(LOG_ERROR, "json", "Invalid filename provided (empty string)");
+    log_message(LOG_ERROR, "Invalid filename provided (empty string)");
     return NULL;
   }
   FILE *file;
@@ -1080,7 +1063,7 @@ static char *read_json(const char *filename) {
   if (result != 0) {
     char err_buf[CIN_STRERROR_BYTES];
     strerror_s(err_buf, CIN_STRERROR_BYTES, result);
-    log_message(LOG_ERROR, "json", "Failed to open config file '%s': %s", filename, err_buf);
+    log_message(LOG_ERROR, "Failed to open config file '%s': %s", filename, err_buf);
     return NULL;
   }
   // Move pointer to get size in bytes and back
@@ -1088,7 +1071,7 @@ static char *read_json(const char *filename) {
   long filesize = ftell(file);
   rewind(file);
   if (filesize < 0L) {
-    log_message(LOG_ERROR, "json", "Failed to get valid file position");
+    log_message(LOG_ERROR, "Failed to get valid file position");
     fclose(file);
     return NULL;
   }
@@ -1097,7 +1080,7 @@ static char *read_json(const char *filename) {
   if (json_content == NULL) {
     char err_buf[CIN_STRERROR_BYTES];
     _strerror_s(err_buf, CIN_STRERROR_BYTES, NULL);
-    log_message(LOG_ERROR, "json", "Failed to allocate memory for file '%s' with size '%ld': %s",
+    log_message(LOG_ERROR, "Failed to allocate memory for file '%s' with size '%ld': %s",
                 filename, filesize + 1, err_buf);
     fclose(file);
     return NULL;
@@ -1118,7 +1101,7 @@ static cJSON *parse_json(const char *filename) {
   if (json == NULL) {
     const char *error_ptr = cJSON_GetErrorPtr();
     if (error_ptr != NULL) {
-      log_message(LOG_ERROR, "json", "JSON parsing error in file '%s' for contents: %s", filename, error_ptr);
+      log_message(LOG_ERROR, "JSON parsing error in file '%s' for contents: %s", filename, error_ptr);
     }
   }
   free(json_string);
@@ -1131,14 +1114,14 @@ static int setup_int(const cJSON *json, const char *key, int default_val) {
   if (cJSON_IsNumber(option)) {
     result = option->valueint;
   } else {
-    log_message(LOG_WARNING, "json", "Defaulting '%s' to '%d': did not find number in JSON", key, default_val);
+    log_message(LOG_WARNING, "Defaulting '%s' to '%d': did not find number in JSON", key, default_val);
   }
   return result;
 }
 
 static double parse_percentage(const char *input, double default_val) {
   if (input == NULL || input[0] == '\0') {
-    log_message(LOG_WARNING, "json", "Defaulting percentage to '%f': empty input", input);
+    log_message(LOG_WARNING, "Defaulting percentage to '%f': empty input", input);
     return default_val;
   }
   int chars_read = 0;
@@ -1153,7 +1136,7 @@ static double parse_percentage(const char *input, double default_val) {
   if (success == 1 && input[chars_read] == '\0') {
     return double_result;
   }
-  log_message(LOG_WARNING, "json", "Defaulting percentage '%s' to '%f': failed to parse", input, default_val);
+  log_message(LOG_WARNING, "Defaulting percentage '%s' to '%f': failed to parse", input, default_val);
   return default_val;
 }
 
@@ -1167,19 +1150,19 @@ static int setup_screen_value(const cJSON *json, const char *key, int default_va
     if (percentage >= 0 && percentage <= 100) {
       result = (int)(percentage * monitor_dimension / 100 + 0.5);
     } else {
-      log_message(LOG_WARNING, "json", "Defaulting '%s' to '%d': percentage '%f' is out of bounds",
+      log_message(LOG_WARNING, "Defaulting '%s' to '%d': percentage '%f' is out of bounds",
                   key, default_val, percentage);
       result = default_val;
     }
   } else {
-    log_message(LOG_WARNING, "json", "Defaulting '%s' to '%d': did not find number in JSON", key, default_val);
+    log_message(LOG_WARNING, "Defaulting '%s' to '%d': did not find number in JSON", key, default_val);
   }
   return result;
 }
 
 static bool setup_bool(const cJSON *json, const char *key, int default_val) {
   if (default_val != 0 && default_val != 1) {
-    log_message(LOG_WARNING, "json", "Default value '%d' invalid for '%s'; defaulting to '0'", default_val, key);
+    log_message(LOG_WARNING, "Default value '%d' invalid for '%s'; defaulting to '0'", default_val, key);
     default_val = 0;
   }
   int result = default_val;
@@ -1187,7 +1170,7 @@ static bool setup_bool(const cJSON *json, const char *key, int default_val) {
   if (cJSON_IsBool(option)) {
     result = cJSON_IsTrue(option) ? true : false;
   } else {
-    log_message(LOG_WARNING, "json", "Defaulting '%s' to '%d': did not find boolean in JSON", key, default_val);
+    log_message(LOG_WARNING, "Defaulting '%s' to '%d': did not find boolean in JSON", key, default_val);
   }
   return result;
 }
@@ -1195,7 +1178,7 @@ static bool setup_bool(const cJSON *json, const char *key, int default_val) {
 // TODO: remove this function
 static wchar_t *setup_wstring(const cJSON *json, const char *key, const wchar_t *default_val) {
   if (default_val == NULL) {
-    log_message(LOG_DEBUG, "json", "Passed NULL as default value for setup_wstring");
+    log_message(LOG_DEBUG, "Passed NULL as default value for setup_wstring");
   }
   cJSON *option = cJSON_GetObjectItemCaseSensitive(json, key);
   wchar_t *result = NULL;
@@ -1203,17 +1186,17 @@ static wchar_t *setup_wstring(const cJSON *json, const char *key, const wchar_t 
     result = malloc(sizeof(wchar_t) * CIN_MAX_PATH);
     utf8_to_utf16(option->valuestring, result, CIN_MAX_PATH);
     if (result == NULL) {
-      log_wmessage(LOG_WARNING, "json", L"Failed to convert JSON string '%s' for key '%s' to UTF-16",
+      log_wmessage(LOG_WARNING, L"Failed to convert JSON string '%s' for key '%s' to UTF-16",
                    option->valuestring, key);
     }
   }
   if (result == NULL) {
     if (default_val != NULL) {
-      log_wmessage(LOG_WARNING, "json", L"Defaulting '%s' to '%ls': did not find valid string in JSON",
+      log_wmessage(LOG_WARNING, L"Defaulting '%s' to '%ls': did not find valid string in JSON",
                    key, default_val);
       result = _wcsdup(default_val);
     } else {
-      log_message(LOG_WARNING, "json", "Returning NULL for '%s': did not find valid string in JSON or default", key);
+      log_message(LOG_WARNING, "Returning NULL for '%s': did not find valid string in JSON or default", key);
     }
   }
   return result;
@@ -1263,7 +1246,7 @@ static void locals_append(const char *utf8, int len) {
     }
   }
   if (dst == NULL) {
-    log_message(LOG_ERROR, "locals", "Failed to reallocate memory");
+    log_message(LOG_ERROR, "Failed to reallocate memory");
   } else {
     memcpy(dst, utf8, (size_t)len);
     locals.bytes += len;
@@ -1279,7 +1262,7 @@ static cJSON *setup_entry_collection(cJSON *entry, const char *name) {
   cJSON *key = cJSON_GetObjectItemCaseSensitive(entry, name);
   cJSON *result = NULL;
   if (key == NULL) {
-    log_message(LOG_DEBUG, "media_library", "Could not find key \"%s\"", name);
+    log_message(LOG_DEBUG, "Could not find key \"%s\"", name);
   } else if (cJSON_IsArray(key)) {
     result = key;
   } else if (cJSON_IsString(key)) {
@@ -1290,7 +1273,7 @@ static cJSON *setup_entry_collection(cJSON *entry, const char *name) {
       cJSON_ReplaceItemInObjectCaseSensitive(entry, name, arr);
       result = arr;
     } else {
-      log_message(LOG_WARNING, "media_library",
+      log_message(LOG_WARNING,
                   "Failed to convert string to array for \"%s\": %s",
                   name, cJSON_Print(key));
       if (arr != NULL) {
@@ -1301,7 +1284,7 @@ static cJSON *setup_entry_collection(cJSON *entry, const char *name) {
       }
     }
   } else {
-    log_message(LOG_WARNING, "media_library", "Unexpected type for \"%s\": %s",
+    log_message(LOG_WARNING, "Unexpected type for \"%s\": %s",
                 name, cJSON_Print(key));
   }
   return result;
@@ -1332,7 +1315,7 @@ static bool setup_directory(wchar_t *path, size_t len) {
   len--;
   path[len] = L'\0';
   if (search == INVALID_HANDLE_VALUE) {
-    log_last_error("directories", "Failed to match directory '%ls'", path);
+    log_last_error("Failed to match directory '%ls'", path);
     return false;
   }
   bool ok = true;
@@ -1362,7 +1345,7 @@ static bool setup_directory(wchar_t *path, size_t len) {
     }
   } while (FindNextFileW(search, &data) != 0);
   if (GetLastError() != ERROR_NO_MORE_FILES) {
-    log_last_error("directories", "Failed to find next file");
+    log_last_error("Failed to find next file");
     ok = false;
   }
   FindClose(search);
@@ -1401,7 +1384,7 @@ static bool setup_pattern(const wchar_t *pattern) {
                                    FindExSearchNameMatch, NULL,
                                    FIND_FIRST_EX_LARGE_FETCH);
   if (search == INVALID_HANDLE_VALUE) {
-    log_last_error("directories", "Failed to match pattern '%ls'", pattern);
+    log_last_error("Failed to match pattern '%ls'", pattern);
     return false;
   }
   static const DWORD file_mask = FILE_ATTRIBUTE_DIRECTORY |
@@ -1424,7 +1407,7 @@ static bool setup_pattern(const wchar_t *pattern) {
     locals_append(utf8_buf, len);
   } while (FindNextFileW(search, &data) != 0);
   if (GetLastError() != ERROR_NO_MORE_FILES) {
-    log_last_error("directories", "Failed to find next file");
+    log_last_error("Failed to find next file");
     ok = false;
   }
   FindClose(search);
@@ -1454,7 +1437,7 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len) {
     // pattern = abc, left = abd
     // l_lcp = 2, pattern_len = 3, 2 < 3
     // pattern[l_lcp] = c, text[left + l_lcp] = d, c < d
-    log_message(LOG_DEBUG, "documents", "Pattern is smaller than first suffix");
+    log_message(LOG_DEBUG, "Pattern is smaller than first suffix");
     return;
   }
   if (r_lcp < pattern_len &&
@@ -1463,7 +1446,7 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len) {
     // pattern = abd, right = abc
     // r_lcp = 2, pattern_len = 3, 2 < 3
     // pattern[r_lcp] = d, text[right + r_lcp] = c, d > c
-    log_message(LOG_DEBUG, "documents", "Pattern is larger than last suffix");
+    log_message(LOG_DEBUG, "Pattern is larger than last suffix");
     return;
   }
   int32_t tmp_right = right;
@@ -1488,7 +1471,7 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len) {
     }
   }
   if (!found && lcps(pattern, locals.text + gsa[left]) < pattern_len) {
-    log_message(LOG_DEBUG, "documents", "No suffix has pattern as prefix");
+    log_message(LOG_DEBUG, "No suffix has pattern as prefix");
     return;
   }
   int32_t l_bound = left;
@@ -1511,14 +1494,14 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len) {
     }
     r_bound = left;
   }
-  log_message(LOG_DEBUG, "documents", "Boundaries are [%d, %d] or [%s, %s]", l_bound, r_bound,
+  log_message(LOG_DEBUG, "Boundaries are [%d, %d] or [%s, %s]", l_bound, r_bound,
               locals.text + gsa[l_bound], locals.text + gsa[r_bound]);
   static uint16_t dedup_counter = 1;
   for (int32_t i = l_bound; i <= r_bound; ++i) {
     int32_t doc = suffix_to_doc[i];
     if (dedup_counters[doc] != dedup_counter) {
       dedup_counters[doc] = dedup_counter;
-      log_message(LOG_TRACE, "documents", "gsa[%7d] = %-25.25s (%7d)| (%7d) = %-30.30s counter=%d", i, locals.text + gsa[i], gsa[i], doc, locals.text + doc, dedup_counter);
+      log_message(LOG_TRACE, "gsa[%7d] = %-25.25s (%7d)| (%7d) = %-30.30s counter=%d", i, locals.text + gsa[i], gsa[i], doc, locals.text + doc, dedup_counter);
     }
   }
   if (++dedup_counter == 0) {
@@ -1531,7 +1514,7 @@ static bool setup_locals(const cJSON *json) {
   // TODO: deduplicate while setting up
   cJSON *lib = cJSON_GetObjectItemCaseSensitive(json, "media_library");
   if (lib == NULL || !cJSON_IsArray(lib)) {
-    log_message(LOG_ERROR, "media_library", "Could not find media_library array in JSON");
+    log_message(LOG_ERROR, "Could not find media_library array in JSON");
     return false;
   }
   cJSON *entry = NULL;
@@ -1568,7 +1551,7 @@ static bool setup_locals(const cJSON *json) {
     //     locals_append(cursor->valuestring, strlen(cursor->valuestring));
     //   }
     // }
-    log_message(LOG_INFO, "media_library", "Processing entry: %s", cJSON_PrintUnformatted(entry));
+    log_message(LOG_INFO, "Processing entry: %s", cJSON_PrintUnformatted(entry));
   }
   if (locals.bytes < locals.max_bytes) {
     uint8_t *tight = realloc(locals.text, (size_t)locals.bytes);
@@ -1579,7 +1562,7 @@ static bool setup_locals(const cJSON *json) {
     locals.bytes_mul32 = (size_t)locals.bytes * sizeof(int32_t);
     locals.doc_mul32 = (size_t)locals.doc_count * sizeof(int32_t);
   }
-  log_message(LOG_INFO, "media_library", "Setup media library with %d items (%d bytes)",
+  log_message(LOG_INFO, "Setup media library with %d items (%d bytes)",
               locals.doc_count, locals.bytes);
   return true;
 }
@@ -1592,7 +1575,7 @@ static bool setup_substring_search(void) {
   int32_t result = libsais_gsa(locals.text, gsa, locals.bytes, 0, NULL);
 #endif
   if (result != 0) {
-    log_message(LOG_ERROR, "media_library", "Failed to build SA");
+    log_message(LOG_ERROR, "Failed to build SA");
     return false;
   }
   int32_t *plcp = malloc(locals.bytes_mul32);
@@ -1602,7 +1585,7 @@ static bool setup_substring_search(void) {
   result = libsais_plcp_gsa(locals.text, gsa, plcp, locals.bytes);
 #endif
   if (result != 0) {
-    log_message(LOG_ERROR, "media_library", "Failed to build PLCP array");
+    log_message(LOG_ERROR, "Failed to build PLCP array");
     return false;
   }
   lcp = malloc(locals.bytes_mul32);
@@ -1612,7 +1595,7 @@ static bool setup_substring_search(void) {
   result = libsais_lcp(plcp, gsa, lcp, locals.bytes);
 #endif
   if (result != 0) {
-    log_message(LOG_ERROR, "media_library", "Failed to build LCP array");
+    log_message(LOG_ERROR, "Failed to build LCP array");
     return false;
   }
   free(plcp);
@@ -1652,26 +1635,26 @@ static bool setup_layouts(const cJSON *layouts) {
   int monitor_width = GetSystemMetrics(SM_CXSCREEN);
   int monitor_height = GetSystemMetrics(SM_CYSCREEN);
   if (monitor_width == 0 || monitor_height == 0) {
-    log_message(LOG_ERROR, "layouts", "Failed to scan monitor for screen dimensions.");
+    log_message(LOG_ERROR, "Failed to scan monitor for screen dimensions.");
     return false;
   }
-  log_message(LOG_INFO, "layouts", "Monitor dimensions: %dx%d", monitor_width, monitor_height);
+  log_message(LOG_INFO, "Monitor dimensions: %dx%d", monitor_width, monitor_height);
   const cJSON *layout = layouts->child;
   while (layout != NULL) {
-    log_message(LOG_DEBUG, "layouts", "Processing layout '%s'", layout->string);
+    log_message(LOG_DEBUG, "Processing layout '%s'", layout->string);
     if (!cJSON_IsArray(layout)) {
-      log_message(LOG_ERROR, "layouts", "Layout '%s' is not an Array", layout->string);
+      log_message(LOG_ERROR, "Layout '%s' is not an Array", layout->string);
       return false;
     }
     const cJSON *screen = layout->child;
     int i = 0;
     while (screen != NULL) {
-      log_message(LOG_DEBUG, "layouts", "Adding screen %d", i);
+      log_message(LOG_DEBUG, "Adding screen %d", i);
       int left = setup_screen_value(screen, "left", 0, monitor_width);
       int top = setup_screen_value(screen, "top", 0, monitor_height);
       int width = setup_screen_value(screen, "width", 0, monitor_width);
       int height = setup_screen_value(screen, "height", 0, monitor_height);
-      log_message(LOG_DEBUG, "layouts", "left=%d top=%d width=%d height=%d", left, top, width, height);
+      log_message(LOG_DEBUG, "left=%d top=%d width=%d height=%d", left, top, width, height);
       screen = screen->next;
       ++i;
     }
@@ -1726,7 +1709,7 @@ static bool create_process(Instance *instance, const wchar_t *pipe_name, const w
            L" --input-ipc-server=%ls",
            file_name,
            pipe_name);
-  log_wmessage(LOG_INFO, "instance", command);
+  log_wmessage(LOG_INFO, command);
   STARTUPINFOW si = {0};
   si.cb = sizeof(si);
   PROCESS_INFORMATION pi = {0};
@@ -1736,9 +1719,9 @@ static bool create_process(Instance *instance, const wchar_t *pipe_name, const w
       // mpv binary not found
       // TODO: link to somewhere to get the binary
       // TODO: check for yt-dlp binary for streams
-      log_last_error("instance", "Failed to find mpv binary");
+      log_last_error("Failed to find mpv binary");
     } else {
-      log_last_error("instance", "Failed to start mpv even though it was found");
+      log_last_error("Failed to start mpv even though it was found");
     }
     return false;
   };
@@ -1765,31 +1748,31 @@ static bool create_pipe(Instance *instance, const wchar_t *name) {
       // Wait for the IPC server to start with timeout
       unfound_duration += UNFOUND_WAIT;
       if (unfound_duration >= UNFOUND_TIMEOUT) {
-        log_message(LOG_ERROR, "pipe", "Failed to find pipe in time: %dms/%dms", unfound_duration, UNFOUND_TIMEOUT);
+        log_message(LOG_ERROR, "Failed to find pipe in time: %dms/%dms", unfound_duration, UNFOUND_TIMEOUT);
         return false;
       }
-      log_message(LOG_DEBUG, "pipe", "Failed to find pipe. Trying again in %dms...", UNFOUND_WAIT);
+      log_message(LOG_DEBUG, "Failed to find pipe. Trying again in %dms...", UNFOUND_WAIT);
       Sleep(UNFOUND_WAIT);
     } else {
       // Unlikely error, try to resolve by waiting
-      log_last_error("pipe", "Could not connect to pipe - Waiting for %dms", FOUND_TIMEOUT);
+      log_last_error("Could not connect to pipe - Waiting for %dms", FOUND_TIMEOUT);
       if (!WaitNamedPipeW(name, FOUND_TIMEOUT)) {
-        log_last_error("pipe", "Failed to connect to pipe");
+        log_last_error("Failed to connect to pipe");
         return false;
       }
     }
   }
   instance->pipe = hPipe;
-  log_message(LOG_TRACE, "pipe", "Successfully created pipe (HANDLE) %p", (void *)instance->pipe);
+  log_message(LOG_TRACE, "Successfully created pipe (HANDLE) %p", (void *)instance->pipe);
   return true;
 }
 
 static bool overlap_read(Instance *instance) {
-  log_message(LOG_TRACE, "read", "Initializing read on PID %lu", instance->pi.dwProcessId);
+  log_message(LOG_TRACE, "Initializing read on PID %lu", instance->pi.dwProcessId);
   ZeroMemory(&instance->ovl_context.ovl, sizeof(OVERLAPPED));
   if (!ReadFile(instance->pipe, instance->read_buffer, (PIPE_READ_BUFFER)-1, NULL, &instance->ovl_context.ovl)) {
     if (GetLastError() != ERROR_IO_PENDING) {
-      log_last_error("read", "Failed to initialize read");
+      log_last_error("Failed to initialize read");
       return false;
     }
   }
@@ -1825,21 +1808,21 @@ end:
 
 static bool overlap_write(Instance *instance, cJSON *command) {
   // TODO: dont use cjson, use static buffer
-  log_message(LOG_TRACE, "write", "Initializing write on PID %lu", instance->pi.dwProcessId);
+  log_message(LOG_TRACE, "Initializing write on PID %lu", instance->pi.dwProcessId);
   char *command_str = cJSON_PrintUnformatted(command);
   cJSON_Delete(command);
   if (command_str == NULL) {
-    log_message(LOG_ERROR, "write", "Failed to cJSON_PrintUnformatted the mpv command.");
+    log_message(LOG_ERROR, "Failed to cJSON_PrintUnformatted the mpv command.");
     return false;
   }
   size_t len = strlen(command_str);
   Overlapped_Write *write = calloc(1, sizeof(*write));
   if (write == NULL) {
-    log_message(LOG_ERROR, "write", "Failed to allocate memory.");
+    log_message(LOG_ERROR, "Failed to allocate memory.");
     return false;
   }
   if (len >= sizeof(write->buffer)) {
-    log_message(LOG_ERROR, "write", "Message len '%d' bigger than buffer '%d'", len, sizeof(write->buffer));
+    log_message(LOG_ERROR, "Message len '%d' bigger than buffer '%d'", len, sizeof(write->buffer));
     return false;
   }
   // shift \0 up to insert \n
@@ -1850,24 +1833,24 @@ static bool overlap_write(Instance *instance, cJSON *command) {
   write->ovl_context.is_write = true;
   write->bytes = len;
   write->request_id = instance->request_id - 1;
-  log_message(LOG_DEBUG, "write", "Writing message: %.*s", len - 2, write->buffer);
+  log_message(LOG_DEBUG, "Writing message: %.*s", len - 2, write->buffer);
   free(command_str);
   if (!WriteFile(instance->pipe, write->buffer, (DWORD)len, NULL, &write->ovl_context.ovl)) {
     switch (GetLastError()) {
     case ERROR_IO_PENDING:
       // iocp will free write
-      log_message(LOG_TRACE, "write", "Pending write call, handled by iocp.");
+      log_message(LOG_TRACE, "Pending write call, handled by iocp.");
       return true;
     case ERROR_INVALID_HANDLE:
       // Code 6: The handle is invalid
-      log_message(LOG_DEBUG, "write", "\t(ERR_START)\n\t%.*s\n\t(ERR_END)\n", (int)len - 2, write->buffer);
+      log_message(LOG_DEBUG, "\t(ERR_START)\n\t%.*s\n\t(ERR_END)\n", (int)len - 2, write->buffer);
       break;
     }
-    log_last_error("write", "Failed to initialize write");
+    log_last_error("Failed to initialize write");
     free(write);
     return false;
   }
-  log_message(LOG_TRACE, "write", "Write call completed immediately.");
+  log_message(LOG_TRACE, "Write call completed immediately.");
   return true;
 }
 
@@ -1890,7 +1873,7 @@ static bool create_instance(Instance *instance, const wchar_t *name, const wchar
   }
   // Does not create a new iocp if pointer is invalid since Existing is provided
   if (CreateIoCompletionPort(instance->pipe, iocp, (ULONG_PTR)instance, 0) == NULL) {
-    log_last_error("iocp", "Failed to associate pipe with iocp");
+    log_last_error("Failed to associate pipe with iocp");
     return false;
   }
   if (!overlap_read(instance)) {
@@ -1903,7 +1886,7 @@ static bool process_layout(size_t count, Instance *instances, const wchar_t *fil
   static const wchar_t PIPE_PREFIXW[] = L"\\\\.\\pipe\\cinema_mpv_";
   static const int PIPE_NAME_BUFFER = 32;
   if (count <= 0) {
-    log_message(LOG_TRACE, "layout", "Count of %d, nothing to process.", count);
+    log_message(LOG_TRACE, "Count of %d, nothing to process.", count);
     return false;
   }
   wchar_t pipe_name[PIPE_NAME_BUFFER];
@@ -1911,7 +1894,7 @@ static bool process_layout(size_t count, Instance *instances, const wchar_t *fil
     swprintf(pipe_name, PIPE_NAME_BUFFER, L"%ls%d", PIPE_PREFIXW, i);
     if (!create_instance(&instances[i], pipe_name, file_name, iocp)) {
       free(instances);
-      log_message(LOG_ERROR, "layout", "Failed to create instance");
+      log_message(LOG_ERROR, "Failed to create instance");
       return false;
     }
   }
@@ -1923,15 +1906,15 @@ static Overlapped_Write *find_write(Instance *instance, int64_t request_id) {
   // The request_id should always find a pair in this scenario
   // as the incoming request_id was sent as a targeted response.
   if (instance == NULL) {
-    log_message(LOG_ERROR, "find_write", "Tried to find '%" PRId64 "' on NULL instance", request_id);
+    log_message(LOG_ERROR, "Tried to find '%" PRId64 "' on NULL instance", request_id);
     return NULL;
   }
   if (instance->pending_writes.count == 0) {
-    log_message(LOG_ERROR, "find_write", "Tried to find '%" PRId64 "' without pending writes", request_id);
+    log_message(LOG_ERROR, "Tried to find '%" PRId64 "' without pending writes", request_id);
     return NULL;
   }
   if (instance->pending_writes.items == NULL) {
-    log_message(LOG_ERROR, "find_write", "Tried to find '%" PRId64 "' on NULL items", request_id);
+    log_message(LOG_ERROR, "Tried to find '%" PRId64 "' on NULL items", request_id);
     return NULL;
   }
   size_t left = 0;
@@ -1950,7 +1933,7 @@ static Overlapped_Write *find_write(Instance *instance, int64_t request_id) {
       return instance->pending_writes.items[middle];
     }
   }
-  log_message(LOG_ERROR, "find_write", "Tried to find '%" PRId64 "' but could not find it", request_id);
+  log_message(LOG_ERROR, "Tried to find '%" PRId64 "' but could not find it", request_id);
   return NULL;
 }
 
@@ -1961,12 +1944,12 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
     ULONG_PTR completion_key;
     OVERLAPPED *ovl;
     if (!GetQueuedCompletionStatus(iocp, &bytes, &completion_key, &ovl, INFINITE)) {
-      log_last_error("listener", "Failed to dequeue packet");
+      log_last_error("Failed to dequeue packet");
       // TODO: when observed, resolve instead of break
       // https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-getqueuedcompletionstatus#remarks
       break;
     }
-    log_message(LOG_TRACE, "listener", "Processing dequeued completion packet from successful I/O operation");
+    log_message(LOG_TRACE, "Processing dequeued completion packet from successful I/O operation");
     Instance *instance = (Instance *)completion_key;
     Overlapped_Ctx *ctx = (Overlapped_Ctx *)ovl;
     if (ctx->is_write) {
@@ -1976,13 +1959,13 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
         pending->capacity = pending->capacity * 2;
         pending->items = realloc(pending->items, sizeof(Overlapped_Write *) * pending->capacity);
         if (pending->items == NULL) {
-          log_message(LOG_ERROR, "listener", "Failed to reallocate memory of pending writes");
+          log_message(LOG_ERROR, "Failed to reallocate memory of pending writes");
           break;
         }
       }
       pending->items[pending->count++] = write;
       if (write->bytes != bytes) {
-        log_message(LOG_ERROR, "listener", "Expected '%ld' bytes but received '%ld'", write->bytes, bytes);
+        log_message(LOG_ERROR, "Expected '%ld' bytes but received '%ld'", write->bytes, bytes);
         // TODO: when observed, resolve instead of break
         break;
       }
@@ -1990,21 +1973,21 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
       cJSON *json = cJSON_Parse(instance->read_buffer);
       if (json == NULL) {
         // TODO: when observed, resolve instead of break
-        log_message(LOG_ERROR, "listener", "Failed to parse instance read buffer as JSON");
+        log_message(LOG_ERROR, "Failed to parse instance read buffer as JSON");
         break;
       }
       cJSON *request_id = cJSON_GetObjectItemCaseSensitive(json, "request_id");
       if (cJSON_IsNumber(request_id)) {
         Overlapped_Write *write = find_write(instance, request_id->valueint);
-        log_message(LOG_DEBUG, "listener", "Written to pipe    (%p): %.*s", (void *)instance->pipe, strlen(write->buffer) - 1, write->buffer);
+        log_message(LOG_DEBUG, "Written to pipe    (%p): %.*s", (void *)instance->pipe, strlen(write->buffer) - 1, write->buffer);
         // TODO: free the write struct and prune pending_writes
         // TODO: handle different return cases beyond request_id
       }
       // TODO: read each line (separated by \n character) separately
       // TODO: Currently, embedded 0 bytes terminate the current line, but you should not rely on this.
       instance->read_buffer[bytes] = '\0'; // TODO: handle buffer gracefully
-      log_message(LOG_DEBUG, "listener", "Got data from pipe (%p): %.*s", (void *)instance->pipe, strlen(instance->read_buffer) - 1, instance->read_buffer);
-      log_message(LOG_DEBUG, "listener", "END data from pipe (%p)", (void *)instance->pipe);
+      log_message(LOG_DEBUG, "Got data from pipe (%p): %.*s", (void *)instance->pipe, strlen(instance->read_buffer) - 1, instance->read_buffer);
+      log_message(LOG_DEBUG, "END data from pipe (%p)", (void *)instance->pipe);
       cJSON_Delete(json);
       if (!overlap_read((Instance *)completion_key)) {
         // TODO: when observed, resolve instead of break
@@ -2102,7 +2085,7 @@ static inline bool resize_console(void) {
   hide_cursor();
   CONSOLE_SCREEN_BUFFER_INFO buffer_info;
   if (!GetConsoleScreenBufferInfo_safe(repl.out, &buffer_info)) {
-    log_last_error("resize", "Failed to read console output region");
+    log_last_error("Failed to read console output region");
     goto cleanup;
   }
   assert(buffer_info.dwCursorPosition.Y < buffer_info.dwSize.Y - 1);
@@ -2135,7 +2118,7 @@ static inline bool resize_console(void) {
       .Right = cols - 1,
       .Bottom = upper_cursor.Y};
   if (!ReadConsoleOutputW(repl.out, console_buffer.items, buffer_size, region_start, &region)) {
-    log_last_error("resize", "Failed to read console output region");
+    log_last_error("Failed to read console output region");
     goto cleanup;
   }
   bool match = false;
@@ -2165,7 +2148,7 @@ static inline bool resize_console(void) {
       region.Right = cols - 1;
       region.Bottom = upper_cursor.Y;
       if (!ReadConsoleOutputW(repl.out, console_buffer.items, buffer_size, region_start, &region)) {
-        log_last_error("resize", "Failed to read console output region");
+        log_last_error("Failed to read console output region");
         goto cleanup;
       }
     }
@@ -2231,7 +2214,7 @@ static inline bool register_console_timer(Console_Timer_Type type, bool (*f)(voi
   ctx->f = f;
   ctx->timer = CreateThreadpoolTimer(console_timer_callback, ctx, NULL);
   if (ctx->timer == NULL) {
-    log_last_error("timers", "Failed to register console timer");
+    log_last_error("Failed to register console timer");
     return false;
   }
   return true;
@@ -2273,9 +2256,9 @@ int main(int argc, char **argv) {
   }
   char *string = cJSON_Print(json);
   if (string == NULL) {
-    log_message(LOG_ERROR, "main", "Failed to print cJSON items from config tree with cJSON_Print.");
+    log_message(LOG_ERROR, "Failed to print cJSON items from config tree with cJSON_Print.");
   } else {
-    // log_message(LOG_INFO, "main", string);
+    // log_message(LOG_INFO,  string);
   }
   setup_locals(json);
   setup_substring_search();
@@ -2296,7 +2279,7 @@ int main(int argc, char **argv) {
     INPUT_RECORD input;
     DWORD read;
     if (!ReadConsoleInputW(repl.in, &input, 1, &read)) {
-      log_last_error("input", "Failed to read console input");
+      log_last_error("Failed to read console input");
       break;
     }
     wchar_t c = input.Event.KeyEvent.uChar.UnicodeChar;
@@ -2496,7 +2479,7 @@ int main(int argc, char **argv) {
         ++repl.msg_index;
         cursor_curr();
       }
-      log_wmessage(LOG_TRACE, "input", L"char=%hu (%lc), v=%hu (%lc), pressed=%d, ctrl=%d",
+      log_wmessage(LOG_TRACE, L"char=%hu (%lc), v=%hu (%lc), pressed=%d, ctrl=%d",
                    c, c, vk, vk ? vk : L' ', input.Event.KeyEvent.bKeyDown, ctrl_on(&input));
       break;
     }
@@ -2515,13 +2498,13 @@ int main(int argc, char **argv) {
     log_preview();
   }
   if (!SetConsoleMode(repl.in, repl.in_mode)) {
-    log_last_error("input", "Failed to reset in console mode");
+    log_last_error("Failed to reset in console mode");
     return 1;
   }
   if (repl.viewport_bound) {
     // TODO: enable if using virtual terminal sequences if viewport_bound
     // if (!SetConsoleMode(repl.out, console_mode_out)) {
-    //   log_last_error("input", "Failed to reset out console mode");
+    //   log_last_error( "Failed to reset out console mode");
     //   return 1;
     // }
   }
@@ -2529,7 +2512,7 @@ int main(int argc, char **argv) {
 
   wchar_t *name = setup_wstring(json, "path", NULL);
   if (name == NULL) {
-    log_message(LOG_ERROR, "main", "No valid 'path' found in config");
+    log_message(LOG_ERROR, "No valid 'path' found in config");
     return 1;
   }
 
@@ -2537,21 +2520,21 @@ int main(int argc, char **argv) {
   DWORD listener_id;
   HANDLE listener = CreateThread(NULL, 0, iocp_listener, (LPVOID)iocp, 0, &listener_id);
   if (listener == NULL) {
-    log_last_error("main", "Failed to create listener thread");
+    log_last_error("Failed to create listener thread");
     return 1;
   }
 
   size_t count = 1;
   Instance *pipes = malloc(count * sizeof(Instance));
   if (pipes == NULL) {
-    log_message(LOG_ERROR, "main", "Failed to allocate memory for count=%d", count);
+    log_message(LOG_ERROR, "Failed to allocate memory for count=%d", count);
     return false;
   }
 
   process_layout(count, pipes, name, iocp);
   free(name);
   for (size_t i = 0; i < count; ++i) {
-    log_message(LOG_INFO, "main", "Instance[%zu] Process ID: %lu", i, (unsigned long)pipes[i].pi.dwProcessId);
+    log_message(LOG_INFO, "Instance[%zu] Process ID: %lu", i, (unsigned long)pipes[i].pi.dwProcessId);
   }
 
   Sleep(2000);
