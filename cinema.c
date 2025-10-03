@@ -363,17 +363,13 @@ static void vwritef(const char *format, va_list args) {
 }
 
 static inline void hide_cursor(void) {
-  if (repl.cursor_info.bVisible) {
-    repl.cursor_info.bVisible = false;
-    SetConsoleCursorInfo(repl.out, &repl.cursor_info);
-  }
+  repl.cursor_info.bVisible = false;
+  SetConsoleCursorInfo(repl.out, &repl.cursor_info);
 }
 
 static inline void show_cursor(void) {
-  if (!repl.cursor_info.bVisible) {
-    repl.cursor_info.bVisible = true;
-    SetConsoleCursorInfo(repl.out, &repl.cursor_info);
-  }
+  repl.cursor_info.bVisible = true;
+  SetConsoleCursorInfo(repl.out, &repl.cursor_info);
 }
 
 static inline SHORT index_x(DWORD index, DWORD dwSize_X) {
