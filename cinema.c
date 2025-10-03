@@ -840,12 +840,6 @@ typedef struct Conf_Scopes {
   size_t capacity;
 } Conf_Scopes;
 
-typedef struct Conf_Error {
-  char *items;
-  size_t count;
-  size_t capacity;
-} Conf_Error;
-
 typedef struct Conf_Buf {
   char *items;
   size_t count;
@@ -854,7 +848,7 @@ typedef struct Conf_Buf {
 
 static struct {
   Conf_Scopes scopes;
-  Conf_Error error;
+  bool error;
   Conf_Buf buf;
   size_t line;
   size_t len;
@@ -895,25 +889,30 @@ static inline bool conf_kcmp(char *k, Conf_Scope_Type type, Conf_Key *out, bool 
   assert(&conf_scope()->type);
   size_t v_len = conf_parser.len - (size_t)(conf_parser.v - conf_parser.buf.items);
   if (conf_scope()->type != type) {
-    sarray_set(&conf_parser.error, "Unexpected key: '");
-    array_extend(&conf_parser.error, conf_parser.buf.items, conf_parser.k_len);
-    sarray_extend(&conf_parser.error, "' is only allowed ");
+    conf_parser.error = true;
+    char *scope_msg;
     switch (conf_scope()->type) {
     case CONF_SCOPE_ROOT:
-      sarray_extend(&conf_parser.error, "above any [table].");
+      scope_msg = "above any [table]";
       break;
     case CONF_SCOPE_LAYOUT:
-      sarray_extend(&conf_parser.error, "under a [layout] table.");
+      scope_msg = "under a [layout] table";
       break;
     case CONF_SCOPE_MEDIA:
-      sarray_extend(&conf_parser.error, "under a [media] table.");
+      scope_msg = "under a [media] table";
       break;
     default:
       assert(false && "Unexpected type");
       break;
     }
+    conf_parser.buf.items[conf_parser.k_len] = '\0';
+    log_message(LOG_ERROR, "conf", "Unexpected key on line %zu: '%s' is not allowed %s",
+                conf_parser.line, conf_parser.buf.items, scope_msg);
   } else if (unique) {
-    // TODO: maybe warning log
+    if (out->count > 0) {
+      log_message(LOG_WARNING, "conf", "Overwriting existing value on line %zu for key '%s': %s => %s",
+                  conf_parser.line, k, out->items, conf_parser.v);
+    }
     array_set(out, conf_parser.v, v_len);
   } else {
     if (out->count > 0 && out->items[out->count - 1] != ',') {
@@ -979,6 +978,7 @@ static bool parse_config(const char *filename) {
   array_alloc(&conf_parser.buf, CONF_LINE_CAP);
   array_alloc(&conf_parser.scopes, CONF_SCOPES_CAP);
   conf_enter_scope(CONF_SCOPE_ROOT);
+  conf_parser.line = 1;
   while (fgets(conf_parser.buf.items, (int32_t)conf_parser.buf.capacity, file)) {
     conf_parser.len = strlen(conf_parser.buf.items);
     if (!conf_parser.len) {
@@ -1005,27 +1005,32 @@ static bool parse_config(const char *filename) {
     char first = lower_isalpha(&conf_parser.buf.items[0]) ? 'a' : conf_parser.buf.items[0];
     switch (first) {
     case 'a': {
-      // expect abc=def123 or abc = def123
+      // expect abc=def123 or zyx  = wvu123
       char *p = conf_parser.buf.items + 1;
       while (lower_isalpha(p)) ++p;
       conf_parser.k_len = (size_t)(p - conf_parser.buf.items);
       while (*p == ' ') ++p;
       if (*p != '=') {
-        conf_error_log(conf_parser.line, (size_t)(p - conf_parser.buf.items), "=");
+        log_message(LOG_ERROR, "conf", "Token on line %zu at position %zu must be '=', not '%c'",
+                    conf_parser.line, (size_t)(p - conf_parser.buf.items) + 1, *p);
         goto end;
       }
       ++p;
       while (*p == ' ') ++p;
       if (!*p) {
-        conf_error_log(conf_parser.line, (size_t)(p - conf_parser.buf.items), "any non-empty token");
+        conf_parser.buf.items[conf_parser.k_len] = '\0';
+        log_message(LOG_ERROR, "conf", "Token on line %zu at position %zu must not be empty."
+                                       " Set the value for key '%s = ...'",
+                    conf_parser.line, (size_t)(p - conf_parser.buf.items), conf_parser.buf.items);
         goto end;
       }
       conf_parser.v = p;
       if (!conf_kget()) {
-        conf_error_log(conf_parser.line, (size_t)(p - conf_parser.buf.items), "key not found");
+        conf_parser.buf.items[conf_parser.k_len] = '\0';
+        log_message(LOG_ERROR, "conf", "Unknown key '%s' on line %zu, please check for typos",
+                    conf_parser.buf.items, conf_parser.line);
         goto end;
-      } else if (conf_parser.error.count > 0) {
-        conf_error_log(conf_parser.line, (size_t)(p - conf_parser.buf.items), conf_parser.error.items);
+      } else if (conf_parser.error) {
         goto end;
       }
     } break;
@@ -1035,11 +1040,16 @@ static bool parse_config(const char *filename) {
       while (lower_isalpha(p)) ++p;
       conf_parser.k_len = (size_t)(p - conf_parser.buf.items) - 1;
       if (*p != ']') {
-        conf_error_log(conf_parser.line, conf_parser.k_len, "]");
+        conf_parser.buf.items[conf_parser.k_len + 1] = '\0';
+        log_message(LOG_ERROR, "conf", "Line %zu wrongly creates a new scope '%s',"
+                                       " close it with ']' at position %zu",
+                    conf_parser.line, conf_parser.buf.items, conf_parser.k_len + 2);
         goto end;
       }
       if (!conf_sget()) {
-        conf_error_log(conf_parser.line, (size_t)(p - conf_parser.buf.items), "scope not found");
+        conf_parser.buf.items[conf_parser.k_len + 2] = '\0';
+        log_message(LOG_ERROR, "conf", "Scope '%s' at line %zu is unknown, please check for typos",
+                    conf_parser.buf.items, conf_parser.line);
         goto end;
       }
     } break;
@@ -1048,7 +1058,9 @@ static bool parse_config(const char *filename) {
     case '\0':
       break;
     default:
-      conf_error_log(conf_parser.line, 0, "A-z, #, [, newline");
+      log_message(LOG_ERROR, "conf", "Line %zu starts with unexpected token '%c'. Only letters,"
+                                     " #, [, and empty lines are allowed here.",
+                  conf_parser.line, conf_parser.buf.items[0]);
       goto end;
     }
     conf_parser.buf.items[0] = '\0';
