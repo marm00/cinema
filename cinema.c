@@ -797,7 +797,7 @@ typedef struct Conf_Media {
 
 typedef struct Conf_Layout {
   Conf_Key name;
-  Conf_Key window;
+  Conf_Key screen;
 } Conf_Layout;
 
 typedef enum {
@@ -915,7 +915,7 @@ static inline bool conf_kget(void) {
     if (conf_kcmp("patterns", CONF_SCOPE_MEDIA, &conf_scope()->media.patterns, false)) return true;
     break;
   case 6:
-    if (conf_kcmp("window", CONF_SCOPE_LAYOUT, &conf_scope()->layout.window, false)) return true;
+    if (conf_kcmp("screen", CONF_SCOPE_LAYOUT, &conf_scope()->layout.screen, false)) return true;
     break;
   case 4:
     if (conf_kcmp("urls", CONF_SCOPE_MEDIA, &conf_scope()->media.urls, false)) return true;
@@ -1073,12 +1073,12 @@ static bool init_config(const char *filename) {
     switch (scope->type) {
     case CONF_SCOPE_LAYOUT:
       log_message(LOG_DEBUG, "Name: %s", scope->layout.name.items);
-      FOREACH_PART(&scope->layout.window, part, len) {
+      FOREACH_PART(&scope->layout.screen, part, len) {
         part[len] = '\0';
-        log_message(LOG_DEBUG, "Window: %s", part);
+        log_message(LOG_DEBUG, "Screen: %s", part);
       }
       array_free(scope->layout.name);
-      array_free(scope->layout.window);
+      array_free(scope->layout.screen);
       break;
     case CONF_SCOPE_MEDIA:
       static wchar_t wbuf[CIN_MAX_PATH];
