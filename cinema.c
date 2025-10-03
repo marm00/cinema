@@ -71,6 +71,8 @@ static const char *LOG_LEVELS[LOG_TRACE + 1] = {"ERROR", "WARNING", "INFO", "DEB
     assert((a)->items && "Memory limit exceeded");    \
   } while (0)
 
+#define array_free(a) free((a).items)
+
 #define array_reserve(a, n) array_ensure_capacity((a), (a)->count + (n))
 
 #define array_resize(a, total)           \
@@ -827,12 +829,12 @@ typedef struct Conf_Buf {
 
 static struct {
   Conf_Scopes scopes;
-  bool error;
-  Conf_Buf buf;
   size_t line;
+  Conf_Buf buf;
   size_t len;
   size_t k_len;
   char *v;
+  bool error;
 } conf_parser = {0};
 
 #define CIN_STRERROR_BYTES 95
@@ -1048,9 +1050,33 @@ static bool parse_config(const char *filename) {
   }
   ok = true;
 end:
-  // TODO: free memory
   fclose(file);
   return ok;
+}
+
+static bool init_config(const char *filename) {
+  if (!parse_config(filename)) return false;
+  for (size_t i = 1; i < conf_parser.scopes.count; ++i) {
+    Conf_Scope *scope = &conf_parser.scopes.items[i];
+    switch (scope->type) {
+    case CONF_SCOPE_LAYOUT:
+      array_free(scope->layout.name);
+      array_free(scope->layout.window);
+      break;
+    case CONF_SCOPE_MEDIA:
+      array_free(scope->media.directories);
+      array_free(scope->media.patterns);
+      array_free(scope->media.tags);
+      array_free(scope->media.urls);
+      break;
+    default:
+      assert(false && "Unexpected scope");
+      break;
+    }
+  }
+  array_free(conf_parser.scopes);
+  array_free(conf_parser.buf);
+  return true;
 }
 
 static char *read_json(const char *filename) {
@@ -2246,8 +2272,7 @@ int main(int argc, char **argv) {
   if (!init_repl()) exit(1);
   InitializeCriticalSectionAndSpinCount(&log_lock, 0);
   if (!init_timers()) exit(1);
-  char *conf = "cinema.conf";
-  parse_config(conf);
+  if (!init_config("cinema.conf")) exit(1);
   exit(1);
   char *config_filename = "config.json";
   cJSON *json = parse_json(config_filename);
