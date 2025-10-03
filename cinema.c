@@ -1466,6 +1466,10 @@ static bool init_config(const char *filename) {
       }
       FOREACH_PART(&scope->media.patterns, part, len) {
         part[len] = '\0';
+        int32_t len_utf16 = utf8_to_utf16_norm(part, wbuf);
+        if (len_utf16) {
+          setup_pattern(wbuf);
+        }
         log_message(LOG_DEBUG, "Pattern: %s", part);
       }
       FOREACH_PART(&scope->media.tags, part, len) {
@@ -1474,6 +1478,10 @@ static bool init_config(const char *filename) {
       }
       FOREACH_PART(&scope->media.urls, part, len) {
         part[len] = '\0';
+        int32_t len_utf16 = utf8_to_utf16_norm(part, wbuf);
+        if (len_utf16) {
+          setup_url(wbuf);
+        }
         log_message(LOG_DEBUG, "URL: %s", part);
       }
       array_free(scope->media.directories);
@@ -1488,6 +1496,17 @@ static bool init_config(const char *filename) {
   }
   array_free(conf_parser.scopes);
   array_free(conf_parser.buf);
+  if (locals.bytes < locals.max_bytes) {
+    uint8_t *tight = realloc(locals.text, (size_t)locals.bytes);
+    if (tight != NULL) {
+      locals.text = tight;
+    }
+    locals.max_bytes = locals.bytes;
+    locals.bytes_mul32 = (size_t)locals.bytes * sizeof(int32_t);
+    locals.doc_mul32 = (size_t)locals.doc_count * sizeof(int32_t);
+  }
+  log_message(LOG_INFO, "Setup media library with %d items (%d bytes)",
+              locals.doc_count, locals.bytes);
   return true;
 }
 
@@ -1573,63 +1592,6 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len) {
     memset(dedup_counters, 0, (size_t)locals.bytes * sizeof(uint16_t));
     dedup_counter = 1;
   }
-}
-
-static bool setup_locals(const cJSON *json) {
-  // TODO: deduplicate while setting up
-  cJSON *lib = cJSON_GetObjectItemCaseSensitive(json, "media_library");
-  if (lib == NULL || !cJSON_IsArray(lib)) {
-    log_message(LOG_ERROR, "Could not find media_library array in JSON");
-    return false;
-  }
-  cJSON *entry = NULL;
-  // TODO: parallelize with openmp
-  static wchar_t buf[CIN_MAX_PATH];
-  cJSON_ArrayForEach(entry, lib) {
-    cJSON *cursor = NULL;
-    cJSON *directories = setup_entry_collection(entry, "directories");
-    cJSON_ArrayForEach(cursor, directories) {
-      int len = utf8_to_utf16_norm(cursor->valuestring, buf);
-      if (len) {
-        setup_directory(buf, (size_t)len);
-      }
-    }
-    cJSON *patterns = setup_entry_collection(entry, "patterns");
-    cJSON_ArrayForEach(cursor, patterns) {
-      int len = utf8_to_utf16_norm(cursor->valuestring, buf);
-      if (len) {
-        setup_pattern(buf);
-      }
-    }
-    cJSON *urls = setup_entry_collection(entry, "urls");
-    cJSON_ArrayForEach(cursor, urls) {
-      int len = utf8_to_utf16_norm(cursor->valuestring, buf);
-      if (len) {
-        setup_url(buf);
-      }
-    }
-    // TODO: put tags in separate structure
-    // cJSON *tags = setup_entry_collection(entry, "tags");
-    // cJSON_ArrayForEach(cursor, tags) {
-    //   if (cursor->valuestring != NULL && strlen(cursor->valuestring) > 0) {
-    //     setup_tag(cursor->valuestring);
-    //     locals_append(cursor->valuestring, strlen(cursor->valuestring));
-    //   }
-    // }
-    log_message(LOG_INFO, "Processing entry: %s", cJSON_PrintUnformatted(entry));
-  }
-  if (locals.bytes < locals.max_bytes) {
-    uint8_t *tight = realloc(locals.text, (size_t)locals.bytes);
-    if (tight != NULL) {
-      locals.text = tight;
-    }
-    locals.max_bytes = locals.bytes;
-    locals.bytes_mul32 = (size_t)locals.bytes * sizeof(int32_t);
-    locals.doc_mul32 = (size_t)locals.doc_count * sizeof(int32_t);
-  }
-  log_message(LOG_INFO, "Setup media library with %d items (%d bytes)",
-              locals.doc_count, locals.bytes);
-  return true;
 }
 
 static bool setup_substring_search(void) {
@@ -2324,7 +2286,6 @@ int main(int argc, char **argv) {
   } else {
     // log_message(LOG_INFO,  string);
   }
-  setup_locals(json);
   setup_substring_search();
   // uint8_t pattern[] = "test";
   // document_listing(pattern, (int32_t)strlen((const char *)pattern));
