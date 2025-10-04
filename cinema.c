@@ -1041,7 +1041,7 @@ static bool parse_config(const char *filename) {
     case '\0':
       break;
     default:
-      log_message(LOG_ERROR, "Line %zu starts with unexpected token '%c'. Only letters,"
+      log_message(LOG_ERROR, "Line %zu starts with unexpected token '%d'. Only letters,"
                              " #, [, and empty lines are allowed here.",
                   conf_parser.line, conf_parser.buf.items[0]);
       goto end;
@@ -2263,6 +2263,80 @@ static inline bool init_timers(void) {
   return true;
 }
 
+#define COMMAND_ALPHABET 26
+
+typedef struct PatriciaNode {
+  struct PatriciaNode *edges[COMMAND_ALPHABET];
+  const char *suffix;
+  size_t len;
+  void *value;
+} PatriciaNode;
+
+static inline PatriciaNode *patricia_node(void) {
+  // NOTE: can use arena for nodes, only allocate edges if non-leaf
+  PatriciaNode *node = malloc(sizeof(PatriciaNode));
+  assert(node);
+  for (size_t i = 0; i < COMMAND_ALPHABET; ++i) {
+    node->edges[i] = NULL;
+  }
+  node->len = 0;
+  node->suffix = NULL;
+  node->value = NULL;
+  return node;
+}
+
+static inline void patricia_query(const PatriciaNode *root, const char *pattern, size_t pattern_len) {
+  assert(strlen(pattern) > 0);
+  assert(*pattern >= 'a' && *pattern <= 'z');
+  PatriciaNode *edge = root->edges[*pattern - 'a'];
+  size_t pattern_index = 0;
+  if (edge == NULL) {
+  } else {
+    assert(edge->suffix != NULL);
+    size_t i;
+    if ((pattern_len - pattern_index) < edge->len) {
+    }
+    for (i = 0; i < edge->len; ++i) {
+      if (edge->suffix[i] != pattern[i + pattern_index]) {
+        break;
+      }
+    }
+    pattern_index += i;
+    if (pattern_index < pattern_len) {
+    }
+    if (i == edge->len) {
+      if (pattern_index == pattern_len) {
+      } else {
+        edge = edge->edges[pattern[pattern_index]];
+        if (edge == NULL) {
+        }
+      }
+    }
+  }
+}
+
+static inline void patricia_insert(const PatriciaNode *root, const char *str) {
+  assert(strlen(str) > 0);
+  assert(*str >= 'a' && *str <= 'z');
+  PatriciaNode *edge = root->edges[*str - 'a'];
+  size_t str_index = 0;
+  if (edge == NULL) {
+  } else {
+    size_t len = 0;
+    while (edge->suffix[len] == str[len + str_index]) {
+      ++len;
+    }
+    if (len == edge->len) {
+    } else {
+    }
+  }
+}
+
+static void patricia_trie(void) {
+  PatriciaNode *root = patricia_node();
+}
+
+
 int main(int argc, char **argv) {
   (void)argc;
   (void)argv;
@@ -2274,6 +2348,7 @@ int main(int argc, char **argv) {
   InitializeCriticalSectionAndSpinCount(&log_lock, 0);
   if (!init_timers()) exit(1);
   if (!init_config("cinema.conf")) exit(1);
+  patricia_trie();
   exit(1);
   char *config_filename = "config.json";
   cJSON *json = parse_json(config_filename);
