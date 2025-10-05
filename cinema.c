@@ -2274,14 +2274,8 @@ typedef struct PatriciaNode {
 
 static inline PatriciaNode *patricia_node(void) {
   // NOTE: can use arena for nodes, only allocate edges if non-leaf
-  PatriciaNode *node = malloc(sizeof(PatriciaNode));
+  PatriciaNode *node = calloc(1, sizeof(PatriciaNode));
   assert(node);
-  for (size_t i = 0; i < COMMAND_ALPHABET; ++i) {
-    node->edges[i] = NULL;
-  }
-  node->len = 0;
-  node->suffix = NULL;
-  node->value = NULL;
   return node;
 }
 
@@ -2321,13 +2315,41 @@ static inline void patricia_insert(const PatriciaNode *root, const char *str) {
   PatriciaNode *edge = root->edges[*str - 'a'];
   size_t str_index = 0;
   if (edge == NULL) {
+    edge = patricia_node();
+    edge->len = strlen(str);
+    edge->suffix = str;
   } else {
-    size_t len = 0;
-    while (edge->suffix[len] == str[len + str_index]) {
-      ++len;
+    size_t i;
+    for (i = 0; i < edge->len; ++i) {
+      if (edge->suffix[i] != str[i + str_index]) {
+        break;
+      }
     }
-    if (len == edge->len) {
+    if (i == edge->len) {
+      if (str[i + str_index] == '\0') {
+      } else {
+        edge = edge->edges[str[i + str_index]];
+        if (edge == NULL) {
+          edge = patricia_node();
+          edge->len = strlen(str) - (i + str_index);
+          edge->suffix = str + (i + str_index);
+        } else {
+        }
+      }
     } else {
+      edge->len = i;
+      PatriciaNode *repositioned = patricia_node();
+      for (size_t i = 0; i < COMMAND_ALPHABET; ++i) {
+        repositioned->edges[i] = edge->edges[i];
+        edge->edges[i] = NULL;
+      }
+      repositioned->suffix = &edge->suffix[i];
+      repositioned->len = strlen(&edge->suffix[i]) + 1;
+      edge->edges[edge->suffix[i]] = repositioned;
+      PatriciaNode *new = patricia_node();
+      new->suffix = &str[i + str_index];
+      new->len = strlen(&str[i + str_index]) + 1;
+      edge->edges[str[i + str_index]] = new;
     }
   }
 }
@@ -2335,7 +2357,6 @@ static inline void patricia_insert(const PatriciaNode *root, const char *str) {
 static void patricia_trie(void) {
   PatriciaNode *root = patricia_node();
 }
-
 
 int main(int argc, char **argv) {
   (void)argc;
