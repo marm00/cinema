@@ -2265,97 +2265,122 @@ static inline bool init_timers(void) {
 
 #define COMMAND_ALPHABET 26
 
+typedef void (*patricia_fn)(void);
+
 typedef struct PatriciaNode {
   struct PatriciaNode *edges[COMMAND_ALPHABET];
   const char *suffix;
   size_t len;
-  void *value;
+  patricia_fn fn;
 } PatriciaNode;
 
-static inline PatriciaNode *patricia_node(void) {
-  // NOTE: can use arena for nodes, only allocate edges if non-leaf
+static inline PatriciaNode *patricia_node(const char *suffix, size_t len) {
   PatriciaNode *node = calloc(1, sizeof(PatriciaNode));
   assert(node);
+  node->suffix = suffix;
+  node->len = len;
   return node;
 }
 
-static inline void patricia_query(const PatriciaNode *root, const char *pattern, size_t pattern_len) {
+static inline size_t patricia_lcp(const char *a, const char *b, size_t max) {
+  size_t i = 0;
+  while (i < max && a[i] && a[i] == b[i]) i++;
+  return i;
+}
+
+static inline patricia_fn patricia_query(PatriciaNode *root, const char *pattern) {
+  assert(root);
   assert(strlen(pattern) > 0);
   assert(*pattern >= 'a' && *pattern <= 'z');
-  PatriciaNode *edge = root->edges[*pattern - 'a'];
-  size_t pattern_index = 0;
-  if (edge == NULL) {
-  } else {
-    assert(edge->suffix != NULL);
-    size_t i;
-    if ((pattern_len - pattern_index) < edge->len) {
+  PatriciaNode *node = root;
+  const char *p = pattern;
+  while (*p) {
+    assert((*p >= 'a' && *p <= 'z'));
+    int32_t i = *p - 'a';
+    PatriciaNode *edge = node->edges[i];
+    if (edge == NULL) {
+      return NULL;
     }
-    for (i = 0; i < edge->len; ++i) {
-      if (edge->suffix[i] != pattern[i + pattern_index]) {
-        break;
+    size_t common = patricia_lcp(p, edge->suffix, edge->len);
+    if (p[common] == '\0') {
+      return edge->fn;
+    }
+    if (common < edge->len) {
+      return NULL;
+    }
+    p += common;
+    node = edge;
+  }
+  return node->fn;
+}
+
+static inline void patricia_insert(PatriciaNode *root, const char *str, patricia_fn fn) {
+  assert(root);
+  assert(strlen(str) > 0);
+  assert((*str >= 'a' && *str <= 'z'));
+  PatriciaNode *node = root;
+  const char *p = str;
+  while (*p) {
+    assert((*p >= 'a' && *p <= 'z'));
+    int32_t i = *p - 'a';
+    PatriciaNode *edge = node->edges[i];
+    if (edge == NULL) {
+      edge = patricia_node(p, strlen(p));
+      edge->fn = fn;
+      node->edges[i] = edge;
+      return;
+    }
+    size_t common = patricia_lcp(p, edge->suffix, edge->len);
+    if (common == edge->len) {
+      p += common;
+      if (*p == '\0') {
+        edge->fn = fn;
+        return;
       }
-    }
-    pattern_index += i;
-    if (pattern_index < pattern_len) {
-    }
-    if (i == edge->len) {
-      if (pattern_index == pattern_len) {
+      node = edge;
+    } else {
+      PatriciaNode *split = patricia_node(edge->suffix, common);
+      split->fn = edge->fn;
+      edge->suffix += common;
+      edge->len -= common;
+      node->edges[i] = split;
+      split->edges[edge->suffix[0] - 'a'] = edge;
+      p += common;
+      if (*p == '\0') {
+        split->fn = fn;
       } else {
-        edge = edge->edges[pattern[pattern_index]];
-        if (edge == NULL) {
-        }
+        PatriciaNode *new = patricia_node(p, strlen(p));
+        new->fn = fn;
+        split->edges[*p - 'a'] = new;
       }
+      return;
     }
   }
 }
 
-static inline void patricia_insert(const PatriciaNode *root, const char *str) {
-  assert(strlen(str) > 0);
-  assert(*str >= 'a' && *str <= 'z');
-  PatriciaNode *edge = root->edges[*str - 'a'];
-  size_t str_index = 0;
-  if (edge == NULL) {
-    edge = patricia_node();
-    edge->len = strlen(str);
-    edge->suffix = str;
-  } else {
-    size_t i;
-    for (i = 0; i < edge->len; ++i) {
-      if (edge->suffix[i] != str[i + str_index]) {
-        break;
-      }
-    }
-    if (i == edge->len) {
-      if (str[i + str_index] == '\0') {
-      } else {
-        edge = edge->edges[str[i + str_index]];
-        if (edge == NULL) {
-          edge = patricia_node();
-          edge->len = strlen(str) - (i + str_index);
-          edge->suffix = str + (i + str_index);
-        } else {
-        }
-      }
-    } else {
-      edge->len = i;
-      PatriciaNode *repositioned = patricia_node();
-      for (size_t i = 0; i < COMMAND_ALPHABET; ++i) {
-        repositioned->edges[i] = edge->edges[i];
-        edge->edges[i] = NULL;
-      }
-      repositioned->suffix = &edge->suffix[i];
-      repositioned->len = strlen(&edge->suffix[i]) + 1;
-      edge->edges[edge->suffix[i]] = repositioned;
-      PatriciaNode *new = patricia_node();
-      new->suffix = &str[i + str_index];
-      new->len = strlen(&str[i + str_index]) + 1;
-      edge->edges[str[i + str_index]] = new;
-    }
-  }
+static void somefn1(void) {
+  log_message(LOG_INFO, "1");
+}
+
+static void somefn2(void) {
+  log_message(LOG_INFO, "2");
+}
+static void somefn3(void) {
+  log_message(LOG_INFO, "3");
 }
 
 static void patricia_trie(void) {
-  PatriciaNode *root = patricia_node();
+  log_message(LOG_INFO, "Starting");
+  PatriciaNode *root = patricia_node(NULL, 0);
+  patricia_insert(root, "abc", somefn1);
+  patricia_insert(root, "def", somefn2);
+  patricia_insert(root, "deab", somefn3);
+  patricia_fn fn = patricia_query(root, "dea");
+  if (fn == NULL) {
+    log_message(LOG_INFO, "Pattern not found.");
+  } else {
+    fn();
+  }
 }
 
 int main(int argc, char **argv) {
@@ -2368,7 +2393,7 @@ int main(int argc, char **argv) {
   if (!init_repl()) exit(1);
   InitializeCriticalSectionAndSpinCount(&log_lock, 0);
   if (!init_timers()) exit(1);
-  if (!init_config("cinema.conf")) exit(1);
+  // if (!init_config("cinema.conf")) exit(1);
   patricia_trie();
   exit(1);
   char *config_filename = "config.json";
