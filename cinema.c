@@ -2361,7 +2361,7 @@ static inline void patricia_insert(PatriciaNode *root, const char *str, patricia
         int32_t edge_i = edge->suffix[0] - 'a';
         int32_t next_i = *p - 'a';
         split->edges[next_i] = remainder;
-        // update internal node lexicograhpical minimum
+        // update internal node lexicographical minimum
         if (next_i < edge_i) {
           split->min = next_i;
           split->fn = fn;
@@ -2375,24 +2375,14 @@ static inline void patricia_insert(PatriciaNode *root, const char *str, patricia
   }
 }
 
-static void somefn1(void) {
-  log_message(LOG_INFO, "1");
+static void cmd_help(void) {
+  log_message(LOG_INFO, "Help");
 }
 
-static void somefn2(void) {
-  log_message(LOG_INFO, "2");
-}
-static void somefn3(void) {
-  log_message(LOG_INFO, "3");
-}
-
-static void patricia_trie(void) {
-  log_message(LOG_INFO, "Starting");
+static void init_commands(void) {
   PatriciaNode *root = patricia_node(NULL, 0);
-  patricia_insert(root, "abc", somefn1);
-  patricia_insert(root, "def", somefn2);
-  patricia_insert(root, "deab", somefn3);
-  patricia_fn fn = patricia_query(root, "dea");
+  patricia_insert(root, "help", cmd_help);
+  patricia_fn fn = patricia_query(root, "h");
   if (fn == NULL) {
     log_message(LOG_INFO, "Pattern not found.");
   } else {
@@ -2411,7 +2401,7 @@ int main(int argc, char **argv) {
   InitializeCriticalSectionAndSpinCount(&log_lock, 0);
   if (!init_timers()) exit(1);
   // if (!init_config("cinema.conf")) exit(1);
-  patricia_trie();
+  init_commands();
   exit(1);
   char *config_filename = "config.json";
   cJSON *json = parse_json(config_filename);
