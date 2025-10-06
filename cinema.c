@@ -2272,6 +2272,7 @@ typedef struct PatriciaNode {
   const char *suffix;
   size_t len;
   patricia_fn fn;
+  int32_t min;
 } PatriciaNode;
 
 static inline PatriciaNode *patricia_node(const char *suffix, size_t len) {
@@ -2291,7 +2292,7 @@ static inline size_t patricia_lcp(const char *a, const char *b, size_t max) {
 static inline patricia_fn patricia_query(PatriciaNode *root, const char *pattern) {
   assert(root);
   assert(strlen(pattern) > 0);
-  assert(*pattern >= 'a' && *pattern <= 'z');
+  assert((*pattern >= 'a' && *pattern <= 'z'));
   PatriciaNode *node = root;
   const char *p = pattern;
   while (*p) {
@@ -2328,30 +2329,46 @@ static inline void patricia_insert(PatriciaNode *root, const char *str, patricia
       edge = patricia_node(p, strlen(p));
       edge->fn = fn;
       node->edges[i] = edge;
+      if ((node->min == -1) || i < node->min) {
+        // update parent lexicographical minimum
+        node->min = i;
+        node->fn = fn;
+      }
       return;
     }
     size_t common = patricia_lcp(p, edge->suffix, edge->len);
     if (common == edge->len) {
       p += common;
       if (*p == '\0') {
+        edge->min = -1;
         edge->fn = fn;
         return;
       }
       node = edge;
     } else {
       PatriciaNode *split = patricia_node(edge->suffix, common);
-      split->fn = edge->fn;
       edge->suffix += common;
       edge->len -= common;
       node->edges[i] = split;
       split->edges[edge->suffix[0] - 'a'] = edge;
       p += common;
       if (*p == '\0') {
+        split->min = -1;
         split->fn = fn;
       } else {
-        PatriciaNode *new = patricia_node(p, strlen(p));
-        new->fn = fn;
-        split->edges[*p - 'a'] = new;
+        PatriciaNode *remainder = patricia_node(p, strlen(p));
+        remainder->fn = fn;
+        int32_t edge_i = edge->suffix[0] - 'a';
+        int32_t next_i = *p - 'a';
+        split->edges[next_i] = remainder;
+        // update internal node lexicograhpical minimum
+        if (next_i < edge_i) {
+          split->min = next_i;
+          split->fn = fn;
+        } else {
+          split->min = edge_i;
+          split->fn = edge->fn;
+        }
       }
       return;
     }
