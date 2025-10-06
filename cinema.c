@@ -2390,6 +2390,213 @@ static void init_commands(void) {
   }
 }
 
+typedef void *radix_v;
+
+typedef enum {
+  RADIX_LEAF,
+  RADIX_INTERNAL
+} RadixNodeType;
+
+typedef struct RadixNode {
+  RadixNodeType type;
+  radix_v v;
+} RadixNode;
+
+typedef struct RadixLeaf {
+  RadixNode base;
+  const uint8_t *key;
+  size_t len;
+} RadixLeaf;
+
+typedef struct RadixInternal {
+  RadixNode base;
+  size_t critical;
+  uint8_t bitmask;
+  RadixNode *child[2];
+} RadixInternal;
+
+typedef struct RadixTree {
+  RadixNode *root;
+} RadixTree;
+
+static inline int32_t radix_bit(const uint8_t *key, size_t len, size_t critical, uint8_t bitmask) {
+  return critical < len && key[critical] & bitmask;
+}
+
+static inline void radix_critical(const uint8_t *k1, size_t len1,
+                                  const uint8_t *k2, size_t len2,
+                                  size_t *critical, uint8_t *bitmask) {
+  size_t max_len = max(len1, len2);
+  for (size_t i = 0; i < max_len; ++i) {
+    uint8_t b1 = (i < len1) ? k1[i] : 0;
+    uint8_t b2 = (i < len2) ? k2[i] : 0;
+    if (b1 != b2) {
+      uint8_t diff = b1 ^ b2;
+      *critical = i;
+      *bitmask = 0x80;
+      while ((*bitmask & diff) == 0) {
+        *bitmask >>= 1;
+      }
+      return;
+    }
+  }
+  *critical = max_len;
+  *bitmask = 0x80;
+}
+
+static inline RadixLeaf *radix_leaf(const uint8_t *key, size_t len, radix_v v) {
+  RadixLeaf *leaf = malloc(sizeof(RadixLeaf));
+  assert(leaf);
+  leaf->base.type = RADIX_LEAF;
+  leaf->base.v = v;
+  uint8_t *dup = malloc(len + 1);
+  assert(dup);
+  memcpy(dup, key, len);
+  dup[len] = '\0';
+  leaf->key = dup;
+  leaf->len = len;
+  return leaf;
+}
+
+static inline RadixInternal *radix_internal(size_t critical, uint8_t bitmask) {
+  RadixInternal *node = malloc(sizeof(RadixInternal));
+  assert(node);
+  node->base.type = RADIX_INTERNAL;
+  node->base.v = NULL;
+  node->critical = critical;
+  node->bitmask = bitmask;
+  node->child[0] = NULL;
+  node->child[1] = NULL;
+  return node;
+}
+
+static inline int32_t radix_compare(const uint8_t *k1, size_t len1, const uint8_t *k2, size_t len2) {
+  size_t min_len = min(len1, len2);
+  int32_t cmp = memcmp(k1, k2, min_len);
+  if (cmp != 0) return cmp;
+  if (len1 < len2) return -1;
+  if (len1 > len2) return 1;
+  return 0;
+}
+
+static inline void radix_update(RadixInternal *internal) {
+  RadixNode *bit0 = internal->child[0];
+  RadixNode *bit1 = internal->child[1];
+  if (bit0 && bit1) {
+    RadixLeaf *leaf0 = (RadixLeaf *)bit0;
+    RadixLeaf *leaf1 = (RadixLeaf *)bit1;
+    while (leaf0->base.type == RADIX_INTERNAL) {
+      RadixInternal *int0 = (RadixInternal *)leaf0;
+      leaf0 = (RadixLeaf *)(int0->child[0] ? int0->child[0] : int0->child[1]);
+    }
+    while (leaf1->base.type == RADIX_INTERNAL) {
+      RadixInternal *int1 = (RadixInternal *)leaf1;
+      leaf1 = (RadixLeaf *)(int1->child[0] ? int1->child[0] : int1->child[1]);
+    }
+    if (radix_compare(leaf0->key, leaf0->len, leaf1->key, leaf1->len) < 0) {
+      internal->base.v = internal->child[0]->v;
+    } else {
+      internal->base.v = internal->child[1]->v;
+    }
+  } else if (bit0) {
+    internal->base.v = bit0->v;
+  } else if (bit1) {
+    internal->base.v = bit1->v;
+  }
+}
+
+static inline RadixTree *radix_tree(void) {
+  RadixTree *tree = malloc(sizeof(RadixTree));
+  assert(tree);
+  tree->root = NULL;
+  return tree;
+}
+
+static inline void radix_insert(RadixTree *tree, const char *str, radix_v v) {
+  assert(tree);
+  assert(str);
+  const uint8_t *key = (const uint8_t *)str;
+  size_t len = strlen(str);
+  if (!tree->root) {
+    tree->root = (RadixNode *)radix_leaf(key, len, v);
+    return;
+  }
+  RadixNode **parent = &tree->root;
+  RadixNode *node = tree->root;
+  while (node->type == RADIX_INTERNAL) {
+    RadixInternal *internal = (RadixInternal *)node;
+    int32_t bit = radix_bit(key, len, internal->critical, internal->bitmask);
+    parent = &internal->child[bit];
+    node = internal->child[bit];
+    if (!node) {
+      *parent = (RadixNode *)radix_leaf(key, len, v);
+      radix_update(internal);
+      RadixNode *curr = tree->root;
+      if (curr && curr->type == RADIX_INTERNAL) {
+        // set lexicographical minimum
+        radix_update((RadixInternal *)curr);
+      }
+      return;
+    }
+  }
+  // split leaf node
+  RadixLeaf *leaf = (RadixLeaf *)node;
+  if (len == leaf->len && memcmp(key, leaf->key, len) == 0) {
+    leaf->base.v = v;
+    return;
+  }
+  size_t critical;
+  uint8_t bitmask;
+  radix_critical(key, len, leaf->key, leaf->len, &critical, &bitmask);
+  RadixInternal *new_internal = radix_internal(critical, bitmask);
+  int32_t new_bit = radix_bit(key, len, critical, bitmask);
+  int32_t old_bit = radix_bit(leaf->key, leaf->len, critical, bitmask);
+  RadixLeaf *new_leaf = radix_leaf(key, len, v);
+  new_internal->child[new_bit] = (RadixNode *)new_leaf;
+  new_internal->child[old_bit] = (RadixNode *)leaf;
+  radix_update(new_internal);
+  *parent = (RadixNode *)new_internal;
+}
+
+static inline radix_v radix_query(RadixTree *tree, const char *pattern) {
+  assert(tree);
+  assert(tree->root);
+  assert(pattern);
+  assert(strlen(pattern) > 0);
+  const uint8_t *key = (const uint8_t *)pattern;
+  size_t len = strlen(pattern);
+  RadixNode *node = tree->root;
+  while (node) {
+    if (node->type == RADIX_LEAF) {
+      RadixLeaf *leaf = (RadixLeaf *)node;
+      if (leaf->len >= len && memcmp(leaf->key, key, len) == 0) {
+        return leaf->base.v;
+      }
+      return NULL;
+    }
+    RadixInternal *internal = (RadixInternal *)node;
+    int32_t bit = radix_bit(key, len, internal->critical, internal->bitmask);
+    node = internal->child[bit];
+  }
+  return NULL;
+}
+
+static inline void init_tags(void) {
+  RadixTree *tree = radix_tree();
+  radix_v *buf1 = (radix_v)"daa";
+  radix_v *buf2 = (radix_v)"dab";
+  radix_v *buf3 = (radix_v)"da";
+  radix_insert(tree, "daa", buf1);
+  radix_insert(tree, "dab", buf2);
+  radix_insert(tree, "da", buf3);
+  radix_v value = radix_query(tree, "dab");
+  if (!value) {
+    log_message(LOG_INFO, "Pattern not found.");
+  } else {
+    log_message(LOG_INFO, "%s", value);
+  }
+}
+
 int main(int argc, char **argv) {
   (void)argc;
   (void)argv;
@@ -2401,7 +2608,8 @@ int main(int argc, char **argv) {
   InitializeCriticalSectionAndSpinCount(&log_lock, 0);
   if (!init_timers()) exit(1);
   // if (!init_config("cinema.conf")) exit(1);
-  init_commands();
+  // init_commands();
+  init_tags();
   exit(1);
   char *config_filename = "config.json";
   cJSON *json = parse_json(config_filename);
