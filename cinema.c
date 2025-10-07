@@ -46,10 +46,11 @@ typedef enum {
   LOG_TRACE
 } Cin_Log_Level;
 
-static const Cin_Log_Level GLOBAL_LOG_LEVEL = LOG_TRACE;
+static const Cin_Log_Level GLOBAL_LOG_LEVEL = LOG_INFO;
 static const char *LOG_LEVELS[LOG_TRACE + 1] = {"ERROR", "WARNING", "INFO", "DEBUG", "TRACE"};
 
 #define CIN_ARRAY_CAP 256
+#define CIN_TABLE_CAP 128
 #define CIN_ARRAY_GROWTH 2
 
 #define array_ensure_capacity(a, total)                                      \
@@ -173,6 +174,25 @@ static const char *LOG_LEVELS[LOG_TRACE + 1] = {"ERROR", "WARNING", "INFO", "DEB
     }                                                                     \
     (a)->items[(i)] = (new_item);                                         \
     (a)->count++;                                                         \
+  } while (0)
+
+#define table_alloc(t, cap)                          \
+  do {                                               \
+    assert((t)->capacity == 0);                      \
+    assert((cap) > 0);                               \
+    assert((cap) % 2 == 0);                          \
+    (t)->items = calloc((cap), sizeof(*(t)->items)); \
+    (t)->capacity = (cap);                           \
+    (t)->count = 0;                                  \
+  } while (0)
+
+#define table_double(t)                                      \
+  do {                                                       \
+    assert((t)->capacity > 0);                               \
+    assert((t)->capacity % 2 == 0);                          \
+    (t)->capacity <<= 1;                                     \
+    (t)->items = calloc((t)->capacity, sizeof(*(t)->items)); \
+    (t)->count = 0;                                          \
   } while (0)
 
 // https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
@@ -557,12 +577,12 @@ static void log_message(Cin_Log_Level level, const char *message, ...) {
   LeaveCriticalSection(&log_lock);
 }
 
-static int utf16_to_utf8(const wchar_t *wstr, char *buf, int len) {
+static inline int32_t utf16_to_utf8(const wchar_t *wstr, char *buf, int32_t len) {
   if (buf == NULL || wstr == NULL) {
     return -1;
   }
   // https://learn.microsoft.com/en-us/windows/win32/api/stringapiset/nf-stringapiset-widechartomultibyte
-  int n_bytes = WideCharToMultiByte(CP_UTF8, 0, wstr, len, NULL, 0, NULL, NULL);
+  int32_t n_bytes = WideCharToMultiByte(CP_UTF8, 0, wstr, len, NULL, 0, NULL, NULL);
   if (n_bytes <= 0) {
     return -1;
   }
@@ -573,21 +593,21 @@ static int utf16_to_utf8(const wchar_t *wstr, char *buf, int len) {
   return n_bytes;
 }
 
-static int utf8_to_utf16(const char *utf8_str, wchar_t *buf, int len) {
+static inline int32_t utf8_to_utf16(const char *utf8_str, wchar_t *buf, int32_t len) {
   if (buf == NULL || utf8_str == NULL) {
     return -1;
   }
   // https://learn.microsoft.com/en-us/windows/win32/api/stringapiset/nf-stringapiset-multibytetowidechar
-  int n_chars = MultiByteToWideChar(CP_UTF8, 0, utf8_str, -1, NULL, 0);
+  int32_t n_chars = MultiByteToWideChar(CP_UTF8, 0, utf8_str, -1, NULL, 0);
   if (n_chars <= 0 || n_chars > len) {
     return -1;
   }
   return MultiByteToWideChar(CP_UTF8, 0, utf8_str, -1, buf, len);
 }
 
-static int utf8_to_utf16_norm(const char *str, wchar_t *buf) {
+static inline int32_t utf8_to_utf16_norm(const char *str, wchar_t *buf) {
   // uses winapi to lowercase the string, and ensures it is not empty
-  int len = utf8_to_utf16(str, buf, CIN_MAX_PATH);
+  int32_t len = utf8_to_utf16(str, buf, CIN_MAX_PATH);
   if (len <= 1) {
     log_message(LOG_DEBUG, "Converted '%s' to empty string.", str);
     return 0;
@@ -754,6 +774,7 @@ static RMQPosition rmq_positional(RMQPosition **m, const int left, const int rig
   return min_left.value < min_right.value ? min_left : min_right;
 }
 
+// TODO: probably change to byte-by-byte
 static int32_t lcps(const uint8_t *a, const uint8_t *b) {
   static const int32_t CHUNK_SIZE = 1 << 3;
   const uint8_t *start = a;
@@ -1204,6 +1225,13 @@ static wchar_t *setup_wstring(const cJSON *json, const char *key, const wchar_t 
   }
   return result;
 }
+
+typedef struct LocalItems {
+  int32_t *items;
+  size_t count;
+  size_t capacity;
+} LocalItems;
+
 typedef struct Local_Collection {
   // Each byte represents a UTF-8 unit
   uint8_t *text;
@@ -1257,51 +1285,115 @@ static void locals_append(const char *utf8, int len) {
   }
 }
 
-// TODO: parallelize
-static char utf8_buf[CIN_MAX_PATH_BYTES];
-
-static cJSON *setup_entry_collection(cJSON *entry, const char *name) {
-  // Returns array pointer or NULL, converts string to array
-  cJSON *key = cJSON_GetObjectItemCaseSensitive(entry, name);
-  cJSON *result = NULL;
-  if (key == NULL) {
-    log_message(LOG_DEBUG, "Could not find key \"%s\"", name);
-  } else if (cJSON_IsArray(key)) {
-    result = key;
-  } else if (cJSON_IsString(key)) {
-    cJSON *str = cJSON_Duplicate(key, false);
-    cJSON *arr = cJSON_CreateArray();
-    cJSON_AddItemToArray(arr, str);
-    if (cJSON_GetArraySize(arr) == 1) {
-      cJSON_ReplaceItemInObjectCaseSensitive(entry, name, arr);
-      result = arr;
-    } else {
-      log_message(LOG_WARNING,
-                  "Failed to convert string to array for \"%s\": %s",
-                  name, cJSON_Print(key));
-      if (arr != NULL) {
-        cJSON_Delete(arr);
-      }
-      if (str != NULL) {
-        cJSON_Delete(str);
-      }
-    }
-  } else {
-    log_message(LOG_WARNING, "Unexpected type for \"%s\": %s",
-                name, cJSON_Print(key));
+static inline uint64_t fnv1a_hash(const char *str, size_t len) {
+  uint64_t hash = 0xcbf29ce484222325ULL;
+  for (size_t i = 0; i < len; ++i) {
+    hash ^= (uint8_t)str[i];
+    hash *= 0x100000001b3ULL;
   }
-  return result;
+  return hash;
 }
+
+typedef struct RobinHoodBucket {
+  uint64_t hash;
+  char *k;
+  void *v;
+} RobinHoodBucket;
+
+typedef struct RobinHoodMap {
+  RobinHoodBucket *items;
+  size_t count;
+  size_t capacity;
+  size_t mask;
+} RobinHoodMap;
+
+#define RH_LOAD_FACTOR 85
+
+static inline void rh_double(RobinHoodMap *map) {
+  size_t prev_cap = map->capacity;
+  RobinHoodBucket *prev_buckets = map->items;
+  table_double(map);
+  map->mask = map->capacity - 1;
+  for (size_t i = 0; i < prev_cap; ++i) {
+    if (prev_buckets[i].k != NULL) {
+      size_t home = prev_buckets[i].hash & map->mask;
+      size_t dist = 0;
+      RobinHoodBucket bucket = prev_buckets[i];
+      while (map->items[home].k != NULL) {
+        size_t cur_dist = (home - (map->items[home].hash & map->mask)) & map->mask;
+        if (cur_dist < dist) {
+          RobinHoodBucket tmp = map->items[home];
+          map->items[home] = bucket;
+          bucket = tmp;
+          dist = cur_dist;
+        }
+        home = (home + 1) & map->mask;
+        ++dist;
+      }
+      map->items[home] = bucket;
+      ++map->count;
+    }
+  }
+}
+
+static inline bool rh_insert(RobinHoodMap *map, char *k, size_t len, void *v_out) {
+  // robin hood hashing without tombstones with fnv-1a
+  assert(k);
+  assert(strlen(k) > 0);
+  assert(len > 0);
+  if (map->count >= (map->capacity * RH_LOAD_FACTOR) / 100) {
+    rh_double(map);
+  }
+  uint64_t hash = fnv1a_hash(k, len);
+  size_t i = hash & map->mask;
+  size_t dist = 0;
+  RobinHoodBucket candidate = {.hash = hash, .k = k, .v = v_out};
+  while (map->items[i].k != NULL) {
+    if (map->items[i].hash == hash && strcmp(map->items[i].k, k) == 0) {
+      log_message(LOG_WARNING, "Found duplicate key '%s' in hashmap", k);
+      v_out = map->items[i].v;
+      return false;
+    }
+    size_t cur_dist = (i - (map->items[i].hash & map->mask)) & map->mask;
+    if (cur_dist < dist) {
+      // evict rich to house poor
+      RobinHoodBucket tmp = map->items[i];
+      map->items[i] = candidate;
+      candidate = tmp;
+      dist = cur_dist;
+    }
+    i = (i + 1) & map->mask;
+    ++dist;
+  }
+  map->items[i] = candidate;
+  map->items[i].k = k;
+  ++map->count;
+  return true;
+}
+
+static char utf8_buf[CIN_MAX_PATH_BYTES];
+static RobinHoodMap directories = {0};
 
 static bool setup_directory(wchar_t *path, size_t len) {
   // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findfirstfileexw
   // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findnextfilew
   // TODO: explain "directory" & recursive in readme
   // TODO: note that we support up to CIN_MAX_PATH, not NTFS max of 32000+
-  if (path[len - 1] == L'\0') {
-    len--;
+  assert(path);
+  assert(len > 0);
+  assert(path[len - 1] == L'\0');
+  // convert to utf8 for byte-by-byte hash
+  int32_t bytes = utf16_to_utf8(path, utf8_buf, (int32_t)len) - 1;
+  uint64_t hash = fnv1a_hash(utf8_buf, (size_t)bytes);
+  log_message(LOG_INFO, "path: %s = %llu", utf8_buf, hash);
+  void *k_ptr = NULL;
+  if (!rh_insert(&directories, utf8_buf, len, &k_ptr)) {
+    // k_ptr now holds items
+    // duplicate, store in tags if applicable
+    return true;
   }
-  if (len + 2 >= CIN_MAX_PATH) {
+  LocalItems dir_items = {0};
+  if (--len + 2 >= CIN_MAX_PATH) {
     // We have to append 2 chars \ and * for the correct pattern
     return false;
   }
@@ -1343,7 +1435,8 @@ static bool setup_directory(wchar_t *path, size_t len) {
         ok = false;
       }
     } else {
-      int utf8_len = utf16_to_utf8(path, utf8_buf, (int)path_len);
+      int32_t utf8_len = utf16_to_utf8(path, utf8_buf, (int32_t)path_len);
+      array_push(&dir_items, locals.doc_count);
       locals_append(utf8_buf, utf8_len);
     }
   } while (FindNextFileW(search, &data) != 0);
@@ -1352,6 +1445,7 @@ static bool setup_directory(wchar_t *path, size_t len) {
     ok = false;
   }
   FindClose(search);
+  k_ptr = &dir_items;
   return ok;
 }
 
@@ -1375,6 +1469,7 @@ static bool setup_pattern(const wchar_t *pattern) {
   if (abs_dword == 0 || abs_dword > CIN_MAX_PATH) {
     return false;
   }
+  log_wmessage(LOG_INFO, L"pattern: %ls", abs_buf);
   // abs_len is essentially the same as abs_dword,
   // we can safely add backslash here
   size_t abs_len = wcslen(abs_buf);
@@ -1440,6 +1535,8 @@ static bool init_config(const char *filename) {
   if (!parse_config(filename)) return false;
   size_t len;
   Conf_Root *root = &conf_parser.scopes.items[0].root;
+  table_alloc(&directories, CIN_TABLE_CAP);
+  directories.mask = directories.capacity - 1;
   // TODO: parallelize for large n
   for (size_t i = 1; i < conf_parser.scopes.count; ++i) {
     Conf_Scope *scope = &conf_parser.scopes.items[i];
@@ -1456,6 +1553,8 @@ static bool init_config(const char *filename) {
     } break;
     case CONF_SCOPE_MEDIA: {
       static wchar_t wbuf[CIN_MAX_PATH];
+      int32_t bytes_start = locals.bytes;
+      int32_t docs_start = locals.doc_count;
       FOREACH_PART(&scope->media.directories, part, len) {
         part[len] = '\0';
         int32_t len_utf16 = utf8_to_utf16_norm(part, wbuf);
@@ -1472,10 +1571,6 @@ static bool init_config(const char *filename) {
         }
         log_message(LOG_DEBUG, "Pattern: %s", part);
       }
-      FOREACH_PART(&scope->media.tags, part, len) {
-        part[len] = '\0';
-        log_message(LOG_DEBUG, "Tag: %s", part);
-      }
       FOREACH_PART(&scope->media.urls, part, len) {
         part[len] = '\0';
         int32_t len_utf16 = utf8_to_utf16_norm(part, wbuf);
@@ -1484,10 +1579,19 @@ static bool init_config(const char *filename) {
         }
         log_message(LOG_DEBUG, "URL: %s", part);
       }
+      int32_t bytes_end = locals.bytes;
+      int32_t docs_end = locals.doc_count;
+      FOREACH_PART(&scope->media.tags, part, len) {
+        // Everything added between bytes_start and bytes_end
+        // belongs to these tags. But also possible duplicates
+        // that are at different positions in the bytes.
+        part[len] = '\0';
+        log_message(LOG_DEBUG, "Tag: %s", part);
+      }
       array_free(scope->media.directories);
       array_free(scope->media.patterns);
-      array_free(scope->media.tags);
       array_free(scope->media.urls);
+      array_free(scope->media.tags);
     } break;
     default:
       assert(false && "Unexpected scope");
@@ -2583,9 +2687,9 @@ static inline radix_v radix_query(RadixTree *tree, const char *pattern) {
 
 static inline void init_tags(void) {
   RadixTree *tree = radix_tree();
-  radix_v *buf1 = (radix_v)"daa";
-  radix_v *buf2 = (radix_v)"dab";
-  radix_v *buf3 = (radix_v)"da";
+  radix_v *buf1 = (radix_v) "daa";
+  radix_v *buf2 = (radix_v) "dab";
+  radix_v *buf3 = (radix_v) "da";
   radix_insert(tree, "daa", buf1);
   radix_insert(tree, "dab", buf2);
   radix_insert(tree, "da", buf3);
@@ -2607,7 +2711,7 @@ int main(int argc, char **argv) {
   if (!init_repl()) exit(1);
   InitializeCriticalSectionAndSpinCount(&log_lock, 0);
   if (!init_timers()) exit(1);
-  // if (!init_config("cinema.conf")) exit(1);
+  if (!init_config("cinema.conf")) exit(1);
   // init_commands();
   init_tags();
   exit(1);
