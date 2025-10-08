@@ -1388,8 +1388,8 @@ static int32_t rh_insert(RobinHoodMap *map, char *k, size_t len, void *v) {
   return -1;
 }
 
-#define DIRECTORIES_CAP 64
-#define DIRECTORY_ITEMS_CAP 64
+#define CIN_DIRECTORIES_CAP 64
+#define CIN_DIRECTORY_ITEMS_CAP 64
 
 static char utf8_buf[CIN_MAX_PATH_BYTES];
 static RobinHoodMap directory_map = {0};
@@ -1408,7 +1408,7 @@ static bool setup_directory(wchar_t *path, size_t len) {
   assert(path);
   assert(len > 0);
   assert(path[len - 1] == L'\0');
-  array_ngrow(&directories, 1, DIRECTORY_ITEMS_CAP);
+  array_ngrow(&directories, 1, CIN_DIRECTORY_ITEMS_CAP);
   assert(directories.capacity > 0);
   assert(directories.items[0].capacity > 0);
   // convert to utf8 for byte-by-byte hash
@@ -1472,6 +1472,129 @@ static bool setup_directory(wchar_t *path, size_t len) {
     ok = false;
   }
   FindClose(search);
+  return ok;
+}
+
+typedef struct DirectoryNode {
+  LocalItems files;
+  struct DirectoryNode *next;
+} DirectoryNode;
+
+typedef struct DirectoryPath {
+  wchar_t path[CIN_MAX_PATH];
+  size_t len;
+} DirectoryPath;
+
+static struct {
+  DirectoryPath *items;
+  size_t count;
+  size_t capacity;
+} dir_queue = {0};
+
+static struct {
+  DirectoryNode *items;
+  size_t count;
+  size_t capacity;
+} dir_nodes = {0};
+
+static bool setup_directory2(wchar_t *path, size_t len) {
+  DirectoryPath root_dir = {.len = len};
+  wmemcpy(root_dir.path, path, len);
+  array_push(&dir_queue, root_dir);
+  array_grow(&dir_nodes, 1);
+  DirectoryNode *node = &dir_nodes.items[dir_nodes.count - 1];
+  array_alloc(&node->files, CIN_DIRECTORY_ITEMS_CAP);
+  bool ok = true;
+  size_t queue_index = 0;
+  log_message(LOG_INFO, "Starting new directory");
+  while (node != NULL) {
+    DirectoryPath dir = dir_queue.items[queue_index++];
+    // log_wmessage(LOG_INFO, L"Path: %ls", dir.path);
+    assert(dir.path);
+    for (size_t i2 = dir_queue.count - 1; i2 >= queue_index; --i2) {
+      // log_wmessage(LOG_INFO, L"%ls = %llu, i=%llu", dir_queue.items[i2].path, dir_queue.items[i2].len, queue_index);
+    }
+    assert(dir.len > 0);
+    assert(dir.path[dir.len - 1] == L'\0');
+    int32_t bytes = utf16_to_utf8(dir.path, utf8_buf, (int32_t)dir.len) - 1;
+    int32_t dup_index = rh_insert(&directory_map, utf8_buf, dir.len, node);
+    if (dup_index >= 0) {
+      DirectoryNode *dup_node = directory_map.items[dup_index].v;
+      log_message(LOG_INFO, "Dup count: %zu", dup_node->files.count);
+      assert(false);
+      continue; // todo: continue?
+    }
+    if (--dir.len + 2 >= CIN_MAX_PATH) {
+      // We have to append 2 chars \ and * for the correct pattern
+      ok = false;
+      assert(false);
+      continue;
+    }
+    dir.path[dir.len++] = L'\\';
+    dir.path[dir.len++] = L'*';
+    dir.path[dir.len] = L'\0';
+    WIN32_FIND_DATAW data;
+    HANDLE search = FindFirstFileExW(dir.path, FindExInfoBasic, &data,
+                                     FindExSearchNameMatch, NULL,
+                                     FIND_FIRST_EX_LARGE_FETCH);
+    // We can now drop the 2 chars \ and * to restore the root,
+    // but choose to only drop * so that \ remains as a separator
+    // for the next file or directory, instead of adding later.
+    --dir.len;
+    dir.path[dir.len] = L'\0';
+    if (search == INVALID_HANDLE_VALUE) {
+      log_last_error("Failed to match directory '%ls'", dir.path);
+      ok = false;
+      assert(false);
+      continue;
+    }
+    do {
+      if (data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+        continue; // skip junction
+      }
+      wchar_t *file = data.cFileName;
+      CharLowerW(file);
+      bool is_dir = data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY;
+      if (is_dir && (file[0] == L'.') && (!file[1] || (file[1] == L'.' && !file[2]))) {
+        continue; // skip dot entry
+      }
+      size_t file_len = wcslen(file) + 1; // add \0
+      size_t path_len = dir.len + file_len;
+      if (path_len >= CIN_MAX_PATH) {
+        assert(false);
+        continue; // skip absolute path (+ NUL) if silently truncated
+      }
+      if (is_dir) {
+        DirectoryPath nested_path = {.len = path_len};
+        wmemcpy(nested_path.path, dir.path, dir.len);
+        wmemcpy(nested_path.path + dir.len, file, file_len);
+        assert(nested_path.path[nested_path.len - 1] == L'\0');
+        array_push(&dir_queue, nested_path);
+        assert(nested_path.len > 0);
+      } else {
+        wmemcpy(dir.path + dir.len, file, file_len);
+        int32_t utf8_len = utf16_to_utf8(dir.path, utf8_buf, (int32_t)path_len);
+        array_push(&node->files, locals.doc_count);
+        locals_append(utf8_buf, utf8_len);
+      }
+    } while (FindNextFileW(search, &data) != 0);
+    if (GetLastError() != ERROR_NO_MORE_FILES) {
+      log_last_error("Failed to find next file");
+      ok = false;
+    }
+    FindClose(search);
+    assert(dir_queue.count > 0);
+    if (dir_queue.count - queue_index > 0) {
+      array_grow(&dir_nodes, 1);
+      node->next = &dir_nodes.items[dir_nodes.count - 1];
+      array_alloc(&node->next->files, CIN_DIRECTORY_ITEMS_CAP);
+    } else {
+      node->next = NULL;
+    }
+    node = node->next;
+  }
+  assert(queue_index == dir_queue.count);
+  dir_queue.count = 0;
   return ok;
 }
 
@@ -1561,9 +1684,10 @@ static bool init_config(const char *filename) {
   if (!parse_config(filename)) return false;
   size_t len;
   Conf_Root *root = &conf_parser.scopes.items[0].root;
-  table_calloc(&directory_map, DIRECTORIES_CAP);
+  table_calloc(&directory_map, CIN_DIRECTORIES_CAP);
   directory_map.mask = directory_map.capacity - 1;
-  array_nalloc(&directories, DIRECTORIES_CAP, DIRECTORY_ITEMS_CAP);
+  array_nalloc(&directories, CIN_DIRECTORIES_CAP, CIN_DIRECTORY_ITEMS_CAP);
+  array_alloc(&dir_nodes, CIN_DIRECTORIES_CAP);
   // TODO: parallelize for large n
   for (size_t i = 1; i < conf_parser.scopes.count; ++i) {
     Conf_Scope *scope = &conf_parser.scopes.items[i];
@@ -1585,10 +1709,12 @@ static bool init_config(const char *filename) {
       FOREACH_PART(&scope->media.directories, part, len) {
         part[len] = '\0';
         int32_t len_utf16 = utf8_to_utf16_norm(part, wbuf);
+        log_wmessage(LOG_INFO, L"Directory: %ls", wbuf);
         if (len_utf16) {
-          setup_directory(wbuf, (size_t)len_utf16);
+          setup_directory2(wbuf, (size_t)len_utf16);
+        } else {
+          assert(false);
         }
-        log_message(LOG_DEBUG, "Directory: %s", part);
       }
       FOREACH_PART(&scope->media.patterns, part, len) {
         part[len] = '\0';
