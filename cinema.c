@@ -50,7 +50,7 @@ static const Cin_Log_Level GLOBAL_LOG_LEVEL = LOG_INFO;
 static const char *LOG_LEVELS[LOG_TRACE + 1] = {"ERROR", "WARNING", "INFO", "DEBUG", "TRACE"};
 
 #define CIN_ARRAY_CAP 256
-#define CIN_TABLE_CAP 128
+#define CIN_TABLE_CAP 64
 #define CIN_ARRAY_GROWTH 2
 
 #define array_ensure_capacity(a, total)                                      \
@@ -63,16 +63,23 @@ static const char *LOG_LEVELS[LOG_TRACE + 1] = {"ERROR", "WARNING", "INFO", "DEB
     }                                                                        \
   } while (0)
 
+#define array_free(a) free((a).items)
+
 #define array_alloc(a, cap)                           \
   do {                                                \
-    assert((a)->capacity == 0);                       \
-    assert((cap) > 0);                                \
+    (a)->count = 0;                                   \
     (a)->capacity = (cap);                            \
     (a)->items = malloc((cap) * sizeof(*(a)->items)); \
     assert((a)->items && "Memory limit exceeded");    \
   } while (0)
 
-#define array_free(a) free((a).items)
+#define array_nalloc(a, cap, ncap)               \
+  do {                                           \
+    array_alloc((a), (cap));                     \
+    for (size_t i = 0; i < (a)->capacity; ++i) { \
+      array_alloc(&(a)->items[i], (ncap));       \
+    }                                            \
+  } while (0)
 
 #define array_reserve(a, n) array_ensure_capacity((a), (a)->count + (n))
 
@@ -86,6 +93,15 @@ static const char *LOG_LEVELS[LOG_TRACE + 1] = {"ERROR", "WARNING", "INFO", "DEB
   do {                       \
     array_reserve((a), (n)); \
     (a)->count += (n);       \
+  } while (0)
+
+#define array_ngrow(a, n, ncap)                           \
+  do {                                                    \
+    array_reserve((a), (n));                              \
+    for (size_t i = (a)->count; i < (a)->capacity; ++i) { \
+      array_alloc(&(a)->items[i], (ncap));                \
+    }                                                     \
+    (a)->count += (n);                                    \
   } while (0)
 
 #define array_push(a, item)            \
@@ -176,7 +192,7 @@ static const char *LOG_LEVELS[LOG_TRACE + 1] = {"ERROR", "WARNING", "INFO", "DEB
     (a)->count++;                                                         \
   } while (0)
 
-#define table_alloc(t, cap)                          \
+#define table_calloc(t, cap)                         \
   do {                                               \
     assert((t)->capacity == 0);                      \
     assert((cap) > 0);                               \
@@ -1336,7 +1352,8 @@ static inline void rh_double(RobinHoodMap *map) {
   }
 }
 
-static inline bool rh_insert(RobinHoodMap *map, char *k, size_t len, void *v_out) {
+// todo: inline
+static int32_t rh_insert(RobinHoodMap *map, char *k, size_t len, void *v) {
   // robin hood hashing without tombstones with fnv-1a
   assert(k);
   assert(strlen(k) > 0);
@@ -1347,12 +1364,12 @@ static inline bool rh_insert(RobinHoodMap *map, char *k, size_t len, void *v_out
   uint64_t hash = fnv1a_hash(k, len);
   size_t i = hash & map->mask;
   size_t dist = 0;
-  RobinHoodBucket candidate = {.hash = hash, .k = k, .v = v_out};
+  RobinHoodBucket candidate = {.hash = hash, .k = k, .v = v};
   while (map->items[i].k != NULL) {
     if (map->items[i].hash == hash && strcmp(map->items[i].k, k) == 0) {
-      log_message(LOG_WARNING, "Found duplicate key '%s' in hashmap", k);
-      v_out = map->items[i].v;
-      return false;
+      log_message(LOG_WARNING, "Found duplicate key '%s' in hashmap: %zu", k,
+                  ((LocalItems *)map->items[i].v)->count);
+      return (int32_t)i;
     }
     size_t cur_dist = (i - (map->items[i].hash & map->mask)) & map->mask;
     if (cur_dist < dist) {
@@ -1368,12 +1385,21 @@ static inline bool rh_insert(RobinHoodMap *map, char *k, size_t len, void *v_out
   map->items[i] = candidate;
   map->items[i].k = k;
   ++map->count;
-  return true;
+  return -1;
 }
 
-static char utf8_buf[CIN_MAX_PATH_BYTES];
-static RobinHoodMap directories = {0};
+#define DIRECTORIES_CAP 64
+#define DIRECTORY_ITEMS_CAP 64
 
+static char utf8_buf[CIN_MAX_PATH_BYTES];
+static RobinHoodMap directory_map = {0};
+static struct {
+  LocalItems *items;
+  size_t count;
+  size_t capacity;
+} directories = {0};
+
+// TODO: unroll recursion
 static bool setup_directory(wchar_t *path, size_t len) {
   // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findfirstfileexw
   // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findnextfilew
@@ -1382,17 +1408,18 @@ static bool setup_directory(wchar_t *path, size_t len) {
   assert(path);
   assert(len > 0);
   assert(path[len - 1] == L'\0');
+  array_ngrow(&directories, 1, DIRECTORY_ITEMS_CAP);
+  assert(directories.capacity > 0);
+  assert(directories.items[0].capacity > 0);
   // convert to utf8 for byte-by-byte hash
   int32_t bytes = utf16_to_utf8(path, utf8_buf, (int32_t)len) - 1;
-  uint64_t hash = fnv1a_hash(utf8_buf, (size_t)bytes);
-  log_message(LOG_INFO, "path: %s = %llu", utf8_buf, hash);
-  void *k_ptr = NULL;
-  if (!rh_insert(&directories, utf8_buf, len, &k_ptr)) {
-    // k_ptr now holds items
-    // duplicate, store in tags if applicable
+  LocalItems *dir_items = &directories.items[directories.count - 1];
+  int32_t dup_index = rh_insert(&directory_map, utf8_buf, len, dir_items);
+  if (dup_index >= 0) {
+    // log_message(LOG_INFO, "Dup count: %zu", directories.items[dup_index].count);
     return true;
   }
-  LocalItems dir_items = {0};
+  log_message(LOG_INFO, "path: %s", utf8_buf);
   if (--len + 2 >= CIN_MAX_PATH) {
     // We have to append 2 chars \ and * for the correct pattern
     return false;
@@ -1436,7 +1463,7 @@ static bool setup_directory(wchar_t *path, size_t len) {
       }
     } else {
       int32_t utf8_len = utf16_to_utf8(path, utf8_buf, (int32_t)path_len);
-      array_push(&dir_items, locals.doc_count);
+      array_push(dir_items, locals.doc_count);
       locals_append(utf8_buf, utf8_len);
     }
   } while (FindNextFileW(search, &data) != 0);
@@ -1445,7 +1472,6 @@ static bool setup_directory(wchar_t *path, size_t len) {
     ok = false;
   }
   FindClose(search);
-  k_ptr = &dir_items;
   return ok;
 }
 
@@ -1535,8 +1561,9 @@ static bool init_config(const char *filename) {
   if (!parse_config(filename)) return false;
   size_t len;
   Conf_Root *root = &conf_parser.scopes.items[0].root;
-  table_alloc(&directories, CIN_TABLE_CAP);
-  directories.mask = directories.capacity - 1;
+  table_calloc(&directory_map, DIRECTORIES_CAP);
+  directory_map.mask = directory_map.capacity - 1;
+  array_nalloc(&directories, DIRECTORIES_CAP, DIRECTORY_ITEMS_CAP);
   // TODO: parallelize for large n
   for (size_t i = 1; i < conf_parser.scopes.count; ++i) {
     Conf_Scope *scope = &conf_parser.scopes.items[i];
