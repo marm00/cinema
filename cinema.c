@@ -1838,6 +1838,13 @@ static bool init_config(const char *filename) {
         log_wmessage(LOG_INFO, L"Directory: %ls", utf16_buf);
         setup_directory(utf16_buf, (size_t)len_utf16, tag_dirs);
       }
+      // NOTE: At this point, if there are any tags, the TagDirectories
+      // struct contains an array of indices for the directory node arena.
+      // This can contain duplicates, the idea is to lazily evaluate it
+      // (i.e., when the tag is requested). When that happens, TagDirectories
+      // should be deduplicated, and each index should be used as a starting
+      // point to iterate from, collecting all files until the directory
+      // depth is equal to the starting position.
       if (tag_dirs) {
         log_message(LOG_INFO, "START tag_dirs: %d", tag_dirs->count);
         for (size_t i = 0; i < tag_dirs->count; ++i) {
