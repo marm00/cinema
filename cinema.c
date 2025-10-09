@@ -1270,7 +1270,7 @@ static int32_t *lcp = NULL;
 static int32_t *suffix_to_doc = NULL;
 static uint16_t *dedup_counters = NULL;
 
-static void locals_append(const char *utf8, int len) {
+static void locals_append(const uint8_t *utf8, int len) {
   // Geometric growth with clamp, based on 260 max path
   static const int locals_init = 1 << 15;
   static const int locals_clamp = 1 << 26;
@@ -1301,10 +1301,10 @@ static void locals_append(const char *utf8, int len) {
   }
 }
 
-static inline uint64_t fnv1a_hash(const char *str, size_t len) {
+static inline uint64_t fnv1a_hash(const uint8_t *str, size_t len) {
   uint64_t hash = 0xcbf29ce484222325ULL;
   for (size_t i = 0; i < len; ++i) {
-    hash ^= (uint8_t)str[i];
+    hash ^= str[i];
     hash *= 0x100000001b3ULL;
   }
   return hash;
@@ -1312,8 +1312,9 @@ static inline uint64_t fnv1a_hash(const char *str, size_t len) {
 
 typedef struct RobinHoodBucket {
   uint64_t hash;
-  char *k;
-  void *v;
+  size_t k_offset;
+  int32_t v;
+  int32_t filled;
 } RobinHoodBucket;
 
 typedef struct RobinHoodMap {
@@ -1331,11 +1332,11 @@ static inline void rh_double(RobinHoodMap *map) {
   table_double(map);
   map->mask = map->capacity - 1;
   for (size_t i = 0; i < prev_cap; ++i) {
-    if (prev_buckets[i].k != NULL) {
+    if (prev_buckets[i].filled) {
       size_t home = prev_buckets[i].hash & map->mask;
       size_t dist = 0;
       RobinHoodBucket bucket = prev_buckets[i];
-      while (map->items[home].k != NULL) {
+      while (map->items[home].filled) {
         size_t cur_dist = (home - (map->items[home].hash & map->mask)) & map->mask;
         if (cur_dist < dist) {
           RobinHoodBucket tmp = map->items[home];
@@ -1350,24 +1351,23 @@ static inline void rh_double(RobinHoodMap *map) {
       ++map->count;
     }
   }
+  free(prev_buckets);
 }
 
-static inline int32_t rh_insert(RobinHoodMap *map, char *k, size_t len, void *v) {
+static inline int32_t rh_insert(RobinHoodMap *map, uint8_t *k_arena, size_t k_offset, size_t len, int32_t v) {
   // robin hood hashing (without tombstones) with fnv-1a
-  assert(k);
-  assert(strlen(k) > 0);
-  assert(len > 0);
+  uint8_t *k = k_arena + k_offset;
   if (map->count >= (map->capacity * RH_LOAD_FACTOR) / 100) {
     rh_double(map);
   }
   uint64_t hash = fnv1a_hash(k, len);
   size_t i = hash & map->mask;
   size_t dist = 0;
-  RobinHoodBucket candidate = {.hash = hash, .k = k, .v = v};
-  while (map->items[i].k != NULL) {
-    if (map->items[i].hash == hash && strcmp(map->items[i].k, k) == 0) {
-      log_message(LOG_WARNING, "Found duplicate key '%s' in hashmap: %zu", k,
-                  ((DirectoryNode *)map->items[i].v)->count);
+  RobinHoodBucket candidate = {.hash = hash, .v = v, .k_offset = k_offset, .filled = 1};
+  while (map->items[i].filled) {
+    uint8_t *i_k = k_arena + map->items[i].k_offset;
+    if (map->items[i].hash == hash && strcmp((char *)i_k, (char *)k) == 0) {
+      log_message(LOG_WARNING, "Found duplicate key '%s' in hashmap", k);
       return (int32_t)i;
     }
     size_t cur_dist = (i - (map->items[i].hash & map->mask)) & map->mask;
@@ -1382,7 +1382,6 @@ static inline int32_t rh_insert(RobinHoodMap *map, char *k, size_t len, void *v)
     ++dist;
   }
   map->items[i] = candidate;
-  map->items[i].k = k;
   ++map->count;
   return -1;
 }
@@ -1400,23 +1399,31 @@ static struct {
 } dir_stack = {0};
 
 static struct {
+  uint8_t *items;
+  size_t count;
+  size_t capacity;
+} dir_string_arena = {0};
+
+static struct {
   DirectoryNode *items;
   size_t count;
   size_t capacity;
-} dir_nodes = {0};
+} dir_node_arena = {0};
 
 #define CIN_DIRECTORIES_CAP 64
 #define CIN_DIRECTORY_ITEMS_CAP 64
+#define CIN_DIRECTORY_STRINGS_CAP (CIN_DIRECTORIES_CAP * CIN_MAX_PATH_BYTES)
 
-static char utf8_buf[CIN_MAX_PATH_BYTES];
-static RobinHoodMap directory_map = {0};
+static uint8_t utf8_buf[CIN_MAX_PATH_BYTES];
+static RobinHoodMap dir_map = {0};
 
 static void setup_directory(wchar_t *path, size_t len) {
   DirectoryPath root_dir = {.len = len};
   wmemcpy(root_dir.path, path, len);
   array_push(&dir_stack, root_dir);
-  array_grow(&dir_nodes, 1);
-  DirectoryNode *node = &dir_nodes.items[dir_nodes.count - 1];
+  array_grow(&dir_node_arena, 1);
+  size_t node_tail = dir_node_arena.count - 1;
+  DirectoryNode *node = &dir_node_arena.items[node_tail];
   array_alloc(node, CIN_DIRECTORY_ITEMS_CAP);
   while (dir_stack.count > 0) {
     assert(node);
@@ -1425,19 +1432,36 @@ static void setup_directory(wchar_t *path, size_t len) {
     assert(dir.path);
     assert(dir.len > 0);
     assert(dir.path[dir.len - 1] == L'\0');
-    int32_t bytes = utf16_to_utf8(dir.path, utf8_buf, (int32_t)dir.len);
-    assert(bytes > 0);
-    // TODO: replace utf8_buf with fresh buffer
-    int32_t dup_index = rh_insert(&directory_map, utf8_buf, (size_t)bytes, node);
+    int32_t bytes_i32 = utf16_to_utf8(dir.path, (char *)utf8_buf, (int32_t)dir.len);
+    assert(bytes_i32 > 0);
+    size_t bytes = (size_t)bytes_i32;
+    array_reserve(&dir_string_arena, bytes + 1);
+    uint8_t *k_arena = dir_string_arena.items;
+    size_t k_offset = dir_string_arena.count;
+    memcpy(k_arena + k_offset, utf8_buf, bytes);
+    dir_string_arena.count += bytes;
+    int32_t dup_index = rh_insert(&dir_map, k_arena, k_offset, bytes, (int32_t)node_tail);
     if (dup_index >= 0) {
+      dir_string_arena.count -= bytes;
       // NOTE: When the key is already in the hash, we have access to an address
       // into the dynamic nodes array. Lazy evaluation: the terminator but must
       // be calculated (e.g., using the document ids to retrieve file names and
       // recognize depth reduction)
-      DirectoryNode *dup_node = directory_map.items[dup_index].v;
-      for (DirectoryNode *p = dup_node; p < dir_nodes.items + dir_nodes.count; ++p) {
+      int32_t dup_node_index = dir_map.items[dup_index].v;
+      DirectoryNode *dup_node = &dir_node_arena.items[dup_node_index];
+      assert(dup_node >= dir_node_arena.items);
+      assert(dup_node < dir_node_arena.items + dir_node_arena.count);
+      for (DirectoryNode *p = dup_node; p < dir_node_arena.items + dir_node_arena.count; ++p) {
         log_message(LOG_INFO, "count=%llu", p->count);
       }
+      log_message(LOG_INFO, "START dir_map.capacity=%llu", dir_map.capacity);
+      for (size_t i = 0; i < dir_map.capacity; ++i) {
+        RobinHoodBucket *bucket = &dir_map.items[i];
+        if (bucket->k_offset > 0 && bucket->filled) {
+          log_message(LOG_INFO, "%4d %s", bucket->k_offset, k_arena + dir_map.items[i].k_offset);
+        }
+      }
+      log_message(LOG_INFO, "END dir_map.capacity=%llu", dir_map.capacity);
       goto skip;
     }
     if (--dir.len + 2 >= CIN_MAX_PATH) {
@@ -1487,7 +1511,7 @@ static void setup_directory(wchar_t *path, size_t len) {
         array_push(&dir_stack, nested_path);
       } else {
         wmemcpy(dir.path + dir.len, file, file_len);
-        int32_t utf8_len = utf16_to_utf8(dir.path, utf8_buf, (int32_t)path_len);
+        int32_t utf8_len = utf16_to_utf8(dir.path, (char *)utf8_buf, (int32_t)path_len);
         array_push(node, locals.doc_count);
         locals_append(utf8_buf, utf8_len);
       }
@@ -1497,8 +1521,9 @@ static void setup_directory(wchar_t *path, size_t len) {
     }
     FindClose(search);
   skip:
-    array_grow(&dir_nodes, 1);
-    DirectoryNode *next = &dir_nodes.items[dir_nodes.count - 1];
+    array_grow(&dir_node_arena, 1);
+    assert(node_tail + 1 == dir_node_arena.count - 1);
+    DirectoryNode *next = &dir_node_arena.items[++node_tail];
     array_alloc(next, CIN_DIRECTORY_ITEMS_CAP);
     node = next;
   }
@@ -1591,9 +1616,10 @@ static bool init_config(const char *filename) {
   if (!parse_config(filename)) return false;
   size_t len;
   Conf_Root *root = &conf_parser.scopes.items[0].root;
-  table_calloc(&directory_map, CIN_DIRECTORIES_CAP);
-  directory_map.mask = directory_map.capacity - 1;
-  array_alloc(&dir_nodes, CIN_DIRECTORIES_CAP);
+  table_calloc(&dir_map, CIN_DIRECTORIES_CAP);
+  dir_map.mask = dir_map.capacity - 1;
+  array_alloc(&dir_node_arena, CIN_DIRECTORIES_CAP);
+  array_alloc(&dir_string_arena, CIN_DIRECTORY_STRINGS_CAP);
   // TODO: parallelize for large n
   for (size_t i = 1; i < conf_parser.scopes.count; ++i) {
     Conf_Scope *scope = &conf_parser.scopes.items[i];
@@ -1619,23 +1645,24 @@ static bool init_config(const char *filename) {
         log_wmessage(LOG_INFO, L"Directory: %ls", wbuf);
         setup_directory(wbuf, (size_t)len_utf16);
       }
-      log_message(LOG_INFO, "directory_map.capacity=%llu", directory_map.capacity);
-      for (size_t i = 0; i < directory_map.capacity; ++i) {
-        log_message(LOG_INFO, "%s", directory_map.items[i].k);
-      }
+      // log_message(LOG_INFO, "dir_map.capacity=%llu", dir_map.capacity);
+      // for (size_t i = 0; i < dir_map.capacity; ++i) {
+      //   log_message(LOG_INFO, "%s", dir_map.items[i].k);
+      // }
+      exit(1);
       FOREACH_PART(&scope->media.patterns, part, len) {
         part[len] = '\0';
         int32_t len_utf16 = utf8_to_utf16_norm(part, wbuf);
         assert(len_utf16);
         log_message(LOG_DEBUG, "Pattern: %s", part);
-        setup_pattern(wbuf);
+        // setup_pattern(wbuf);
       }
       FOREACH_PART(&scope->media.urls, part, len) {
         part[len] = '\0';
         int32_t len_utf16 = utf8_to_utf16_norm(part, wbuf);
         assert(len_utf16);
         log_message(LOG_DEBUG, "URL: %s", part);
-        setup_url(wbuf);
+        // setup_url(wbuf);
       }
       int32_t bytes_end = locals.bytes;
       int32_t docs_end = locals.doc_count;
@@ -1656,7 +1683,7 @@ static bool init_config(const char *filename) {
       break;
     }
   }
-  // TODO: free directory_map / directories
+  // TODO: free dir_map / directories
   array_free(conf_parser.scopes);
   array_free(conf_parser.buf);
   if (locals.bytes < locals.max_bytes) {
