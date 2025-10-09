@@ -790,6 +790,197 @@ static RMQPosition rmq_positional(RMQPosition **m, const int left, const int rig
   return min_left.value < min_right.value ? min_left : min_right;
 }
 
+typedef void *radix_v;
+
+typedef enum {
+  RADIX_LEAF,
+  RADIX_INTERNAL
+} RadixNodeType;
+
+typedef struct RadixNode {
+  RadixNodeType type;
+  radix_v v;
+} RadixNode;
+
+typedef struct RadixLeaf {
+  RadixNode base;
+  const uint8_t *key;
+  size_t len;
+} RadixLeaf;
+
+typedef struct RadixInternal {
+  RadixNode base;
+  size_t critical;
+  uint8_t bitmask;
+  RadixNode *child[2];
+} RadixInternal;
+
+typedef struct RadixTree {
+  RadixNode *root;
+} RadixTree;
+
+static inline int32_t radix_bit(const uint8_t *key, size_t len, size_t critical, uint8_t bitmask) {
+  return critical < len && key[critical] & bitmask;
+}
+
+static inline void radix_critical(const uint8_t *k1, size_t len1,
+                                  const uint8_t *k2, size_t len2,
+                                  size_t *critical, uint8_t *bitmask) {
+  size_t max_len = max(len1, len2);
+  for (size_t i = 0; i < max_len; ++i) {
+    uint8_t b1 = (i < len1) ? k1[i] : 0;
+    uint8_t b2 = (i < len2) ? k2[i] : 0;
+    if (b1 != b2) {
+      uint8_t diff = b1 ^ b2;
+      *critical = i;
+      *bitmask = 0x80;
+      while ((*bitmask & diff) == 0) {
+        *bitmask >>= 1;
+      }
+      return;
+    }
+  }
+  *critical = max_len;
+  *bitmask = 0x80;
+}
+
+static inline RadixLeaf *radix_leaf(const uint8_t *key, size_t len, radix_v v) {
+  RadixLeaf *leaf = malloc(sizeof(RadixLeaf));
+  assert(leaf);
+  leaf->base.type = RADIX_LEAF;
+  leaf->base.v = v;
+  uint8_t *dup = malloc(len + 1);
+  assert(dup);
+  memcpy(dup, key, len);
+  dup[len] = '\0';
+  leaf->key = dup;
+  leaf->len = len;
+  return leaf;
+}
+
+static inline RadixInternal *radix_internal(size_t critical, uint8_t bitmask) {
+  RadixInternal *node = malloc(sizeof(RadixInternal));
+  assert(node);
+  node->base.type = RADIX_INTERNAL;
+  node->base.v = NULL;
+  node->critical = critical;
+  node->bitmask = bitmask;
+  node->child[0] = NULL;
+  node->child[1] = NULL;
+  return node;
+}
+
+static inline int32_t radix_compare(const uint8_t *k1, size_t len1, const uint8_t *k2, size_t len2) {
+  size_t min_len = min(len1, len2);
+  int32_t cmp = memcmp(k1, k2, min_len);
+  if (cmp != 0) return cmp;
+  if (len1 < len2) return -1;
+  if (len1 > len2) return 1;
+  return 0;
+}
+
+static inline void radix_update(RadixInternal *internal) {
+  RadixNode *bit0 = internal->child[0];
+  RadixNode *bit1 = internal->child[1];
+  if (bit0 && bit1) {
+    RadixLeaf *leaf0 = (RadixLeaf *)bit0;
+    RadixLeaf *leaf1 = (RadixLeaf *)bit1;
+    while (leaf0->base.type == RADIX_INTERNAL) {
+      RadixInternal *int0 = (RadixInternal *)leaf0;
+      leaf0 = (RadixLeaf *)(int0->child[0] ? int0->child[0] : int0->child[1]);
+    }
+    while (leaf1->base.type == RADIX_INTERNAL) {
+      RadixInternal *int1 = (RadixInternal *)leaf1;
+      leaf1 = (RadixLeaf *)(int1->child[0] ? int1->child[0] : int1->child[1]);
+    }
+    if (radix_compare(leaf0->key, leaf0->len, leaf1->key, leaf1->len) < 0) {
+      internal->base.v = internal->child[0]->v;
+    } else {
+      internal->base.v = internal->child[1]->v;
+    }
+  } else if (bit0) {
+    internal->base.v = bit0->v;
+  } else if (bit1) {
+    internal->base.v = bit1->v;
+  }
+}
+
+static inline RadixTree *radix_tree(void) {
+  RadixTree *tree = malloc(sizeof(RadixTree));
+  assert(tree);
+  tree->root = NULL;
+  return tree;
+}
+
+static inline void radix_insert(RadixTree *tree, const char *str, radix_v v) {
+  assert(tree);
+  assert(str);
+  const uint8_t *key = (const uint8_t *)str;
+  size_t len = strlen(str);
+  if (!tree->root) {
+    tree->root = (RadixNode *)radix_leaf(key, len, v);
+    return;
+  }
+  RadixNode **parent = &tree->root;
+  RadixNode *node = tree->root;
+  while (node->type == RADIX_INTERNAL) {
+    RadixInternal *internal = (RadixInternal *)node;
+    int32_t bit = radix_bit(key, len, internal->critical, internal->bitmask);
+    parent = &internal->child[bit];
+    node = internal->child[bit];
+    if (!node) {
+      *parent = (RadixNode *)radix_leaf(key, len, v);
+      radix_update(internal);
+      RadixNode *curr = tree->root;
+      if (curr && curr->type == RADIX_INTERNAL) {
+        // set lexicographical minimum
+        radix_update((RadixInternal *)curr);
+      }
+      return;
+    }
+  }
+  // split leaf node
+  RadixLeaf *leaf = (RadixLeaf *)node;
+  if (len == leaf->len && memcmp(key, leaf->key, len) == 0) {
+    leaf->base.v = v;
+    return;
+  }
+  size_t critical;
+  uint8_t bitmask;
+  radix_critical(key, len, leaf->key, leaf->len, &critical, &bitmask);
+  RadixInternal *new_internal = radix_internal(critical, bitmask);
+  int32_t new_bit = radix_bit(key, len, critical, bitmask);
+  int32_t old_bit = radix_bit(leaf->key, leaf->len, critical, bitmask);
+  RadixLeaf *new_leaf = radix_leaf(key, len, v);
+  new_internal->child[new_bit] = (RadixNode *)new_leaf;
+  new_internal->child[old_bit] = (RadixNode *)leaf;
+  radix_update(new_internal);
+  *parent = (RadixNode *)new_internal;
+}
+
+static inline radix_v radix_query(RadixTree *tree, const char *pattern) {
+  assert(tree);
+  assert(tree->root);
+  assert(pattern);
+  assert(strlen(pattern) > 0);
+  const uint8_t *key = (const uint8_t *)pattern;
+  size_t len = strlen(pattern);
+  RadixNode *node = tree->root;
+  while (node) {
+    if (node->type == RADIX_LEAF) {
+      RadixLeaf *leaf = (RadixLeaf *)node;
+      if (leaf->len >= len && memcmp(leaf->key, key, len) == 0) {
+        return leaf->base.v;
+      }
+      return NULL;
+    }
+    RadixInternal *internal = (RadixInternal *)node;
+    int32_t bit = radix_bit(key, len, internal->critical, internal->bitmask);
+    node = internal->child[bit];
+  }
+  return NULL;
+}
+
 // TODO: probably change to byte-by-byte
 static int32_t lcps(const uint8_t *a, const uint8_t *b) {
   static const int32_t CHUNK_SIZE = 1 << 3;
@@ -1242,12 +1433,6 @@ static wchar_t *setup_wstring(const cJSON *json, const char *key, const wchar_t 
   return result;
 }
 
-typedef struct DirectoryNode {
-  int32_t *items;
-  size_t count;
-  size_t capacity;
-} DirectoryNode;
-
 typedef struct Local_Collection {
   // Each byte represents a UTF-8 unit
   uint8_t *text;
@@ -1368,7 +1553,7 @@ static inline int32_t rh_insert(RobinHoodMap *map, uint8_t *k_arena, size_t k_of
     uint8_t *i_k = k_arena + map->items[i].k_offset;
     if (map->items[i].hash == hash && strcmp((char *)i_k, (char *)k) == 0) {
       log_message(LOG_WARNING, "Found duplicate key '%s' in hashmap", k);
-      return (int32_t)i;
+      return map->items[i].v;
     }
     size_t cur_dist = (i - (map->items[i].hash & map->mask)) & map->mask;
     if (cur_dist < dist) {
@@ -1385,6 +1570,12 @@ static inline int32_t rh_insert(RobinHoodMap *map, uint8_t *k_arena, size_t k_of
   ++map->count;
   return -1;
 }
+
+typedef struct DirectoryNode {
+  int32_t *items;
+  size_t count;
+  size_t capacity;
+} DirectoryNode;
 
 typedef struct DirectoryPath {
   wchar_t path[CIN_MAX_PATH];
@@ -1410,23 +1601,25 @@ static struct {
   size_t capacity;
 } dir_node_arena = {0};
 
+typedef struct TagDirectories {
+  int32_t *items;
+  size_t count;
+  size_t capacity;
+} TagDirectories;
+
 #define CIN_DIRECTORIES_CAP 64
 #define CIN_DIRECTORY_ITEMS_CAP 64
 #define CIN_DIRECTORY_STRINGS_CAP (CIN_DIRECTORIES_CAP * CIN_MAX_PATH_BYTES)
 
+static wchar_t utf16_buf[CIN_MAX_PATH];
 static uint8_t utf8_buf[CIN_MAX_PATH_BYTES];
 static RobinHoodMap dir_map = {0};
 
-static void setup_directory(wchar_t *path, size_t len) {
+static void setup_directory(wchar_t *path, size_t len, TagDirectories *tag_dirs) {
   DirectoryPath root_dir = {.len = len};
   wmemcpy(root_dir.path, path, len);
   array_push(&dir_stack, root_dir);
-  array_grow(&dir_node_arena, 1);
-  size_t node_tail = dir_node_arena.count - 1;
-  DirectoryNode *node = &dir_node_arena.items[node_tail];
-  array_alloc(node, CIN_DIRECTORY_ITEMS_CAP);
   while (dir_stack.count > 0) {
-    assert(node);
     DirectoryPath dir = dir_stack.items[--dir_stack.count];
     log_wmessage(LOG_INFO, L"Path: %ls", dir.path);
     assert(dir.path);
@@ -1439,34 +1632,28 @@ static void setup_directory(wchar_t *path, size_t len) {
     uint8_t *k_arena = dir_string_arena.items;
     size_t k_offset = dir_string_arena.count;
     memcpy(k_arena + k_offset, utf8_buf, bytes);
-    dir_string_arena.count += bytes;
+    size_t node_tail = dir_node_arena.count;
     int32_t dup_index = rh_insert(&dir_map, k_arena, k_offset, bytes, (int32_t)node_tail);
     if (dup_index >= 0) {
-      dir_string_arena.count -= bytes;
-      // NOTE: When the key is already in the hash, we have access to an address
-      // into the dynamic nodes array. Lazy evaluation: the terminator but must
+      // NOTE: When the key is already in the hash, we have access to an index
+      // into the dynamic nodes arena. Lazy evaluation: the terminator but must
       // be calculated (e.g., using the document ids to retrieve file names and
       // recognize depth reduction)
-      int32_t dup_node_index = dir_map.items[dup_index].v;
-      DirectoryNode *dup_node = &dir_node_arena.items[dup_node_index];
+      DirectoryNode *dup_node = &dir_node_arena.items[dup_index];
       assert(dup_node >= dir_node_arena.items);
       assert(dup_node < dir_node_arena.items + dir_node_arena.count);
       for (DirectoryNode *p = dup_node; p < dir_node_arena.items + dir_node_arena.count; ++p) {
         log_message(LOG_INFO, "count=%llu", p->count);
       }
-      log_message(LOG_INFO, "START dir_map.capacity=%llu", dir_map.capacity);
-      for (size_t i = 0; i < dir_map.capacity; ++i) {
-        RobinHoodBucket *bucket = &dir_map.items[i];
-        if (bucket->k_offset > 0 && bucket->filled) {
-          log_message(LOG_INFO, "%4d %s", bucket->k_offset, k_arena + dir_map.items[i].k_offset);
-        }
+      if (tag_dirs) {
+        array_push(tag_dirs, dup_index);
       }
-      log_message(LOG_INFO, "END dir_map.capacity=%llu", dir_map.capacity);
-      goto skip;
+      continue;
     }
     if (--dir.len + 2 >= CIN_MAX_PATH) {
       // We have to append 2 chars \ and * for the correct pattern
-      goto skip;
+      log_wmessage(LOG_ERROR, L"Directory name too long: %ls", dir.path);
+      continue;
     }
     dir.path[dir.len++] = L'\\';
     dir.path[dir.len++] = L'*';
@@ -1482,7 +1669,16 @@ static void setup_directory(wchar_t *path, size_t len) {
     dir.path[dir.len] = L'\0';
     if (search == INVALID_HANDLE_VALUE) {
       log_last_error("Failed to match directory '%ls'", dir.path);
-      goto skip;
+      continue;
+    }
+    // Commit the new directory
+    dir_string_arena.count += bytes;
+    array_grow(&dir_node_arena, 1);
+    DirectoryNode *node = &dir_node_arena.items[node_tail];
+    assert(node);
+    array_alloc(node, CIN_DIRECTORY_ITEMS_CAP);
+    if (tag_dirs) {
+      array_push(tag_dirs, (int32_t)node_tail);
     }
     do {
       if (data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
@@ -1520,12 +1716,6 @@ static void setup_directory(wchar_t *path, size_t len) {
       log_last_error("Failed to find next file");
     }
     FindClose(search);
-  skip:
-    array_grow(&dir_node_arena, 1);
-    assert(node_tail + 1 == dir_node_arena.count - 1);
-    DirectoryNode *next = &dir_node_arena.items[++node_tail];
-    array_alloc(next, CIN_DIRECTORY_ITEMS_CAP);
-    node = next;
   }
   assert(dir_stack.count == 0);
 }
@@ -1582,7 +1772,7 @@ static bool setup_pattern(const wchar_t *pattern) {
       continue; // skip absolute path (+ NUL) if silently truncated
     }
     wmemcpy(abs_buf + abs_len, file, file_len);
-    int len = utf16_to_utf8(abs_buf, utf8_buf, (int)path_len);
+    int len = utf16_to_utf8(abs_buf, (char *)utf8_buf, (int)path_len);
     locals_append(utf8_buf, len);
   } while (FindNextFileW(search, &data) != 0);
   if (GetLastError() != ERROR_NO_MORE_FILES) {
@@ -1594,13 +1784,13 @@ static bool setup_pattern(const wchar_t *pattern) {
 }
 
 static bool setup_url(const wchar_t *url) {
-  int len = utf16_to_utf8(url, utf8_buf, -1);
+  int len = utf16_to_utf8(url, (char *)utf8_buf, -1);
   locals_append(utf8_buf, len);
   return true;
 }
 
 static bool setup_tag(const wchar_t *tag) {
-  utf16_to_utf8(tag, utf8_buf, -1);
+  utf16_to_utf8(tag, (char *)utf8_buf, -1);
   // locals_append(utf8_buf, len);
   return true;
 }
@@ -1635,41 +1825,45 @@ static bool init_config(const char *filename) {
       array_free(scope->layout.screen);
     } break;
     case CONF_SCOPE_MEDIA: {
-      static wchar_t wbuf[CIN_MAX_PATH];
-      int32_t bytes_start = locals.bytes;
-      int32_t docs_start = locals.doc_count;
+      RadixTree *tree = radix_tree();
+      TagDirectories *tag_dirs = NULL;
+      if (scope->media.tags.count) {
+        tag_dirs = malloc(sizeof(TagDirectories));
+        array_alloc(tag_dirs, CIN_DIRECTORIES_CAP);
+      }
       FOREACH_PART(&scope->media.directories, part, len) {
         part[len] = '\0';
-        int32_t len_utf16 = utf8_to_utf16_norm(part, wbuf);
+        int32_t len_utf16 = utf8_to_utf16_norm(part, utf16_buf);
         assert(len_utf16);
-        log_wmessage(LOG_INFO, L"Directory: %ls", wbuf);
-        setup_directory(wbuf, (size_t)len_utf16);
+        log_wmessage(LOG_INFO, L"Directory: %ls", utf16_buf);
+        setup_directory(utf16_buf, (size_t)len_utf16, tag_dirs);
       }
-      // log_message(LOG_INFO, "dir_map.capacity=%llu", dir_map.capacity);
-      // for (size_t i = 0; i < dir_map.capacity; ++i) {
-      //   log_message(LOG_INFO, "%s", dir_map.items[i].k);
-      // }
+      if (tag_dirs) {
+        log_message(LOG_INFO, "START tag_dirs: %d", tag_dirs->count);
+        for (size_t i = 0; i < tag_dirs->count; ++i) {
+          log_message(LOG_INFO, "%d", dir_node_arena.items[tag_dirs->items[i]].count);
+        }
+        log_message(LOG_INFO, "START dir_node_arena: %d", dir_node_arena.count);
+        for (size_t i = 0; i < dir_node_arena.count; ++i) {
+          log_message(LOG_INFO, "%d", dir_node_arena.items[i].count);
+        }
+      }
       exit(1);
       FOREACH_PART(&scope->media.patterns, part, len) {
         part[len] = '\0';
-        int32_t len_utf16 = utf8_to_utf16_norm(part, wbuf);
+        int32_t len_utf16 = utf8_to_utf16_norm(part, utf16_buf);
         assert(len_utf16);
         log_message(LOG_DEBUG, "Pattern: %s", part);
-        // setup_pattern(wbuf);
+        // setup_pattern(utf16_buf);
       }
       FOREACH_PART(&scope->media.urls, part, len) {
         part[len] = '\0';
-        int32_t len_utf16 = utf8_to_utf16_norm(part, wbuf);
+        int32_t len_utf16 = utf8_to_utf16_norm(part, utf16_buf);
         assert(len_utf16);
         log_message(LOG_DEBUG, "URL: %s", part);
-        // setup_url(wbuf);
+        // setup_url(utf16_buf);
       }
-      int32_t bytes_end = locals.bytes;
-      int32_t docs_end = locals.doc_count;
       FOREACH_PART(&scope->media.tags, part, len) {
-        // Everything added between bytes_start and bytes_end
-        // belongs to these tags. But also possible duplicates
-        // that are at different positions in the bytes.
         part[len] = '\0';
         log_message(LOG_DEBUG, "Tag: %s", part);
       }
@@ -2578,197 +2772,6 @@ static void init_commands(void) {
   } else {
     fn();
   }
-}
-
-typedef void *radix_v;
-
-typedef enum {
-  RADIX_LEAF,
-  RADIX_INTERNAL
-} RadixNodeType;
-
-typedef struct RadixNode {
-  RadixNodeType type;
-  radix_v v;
-} RadixNode;
-
-typedef struct RadixLeaf {
-  RadixNode base;
-  const uint8_t *key;
-  size_t len;
-} RadixLeaf;
-
-typedef struct RadixInternal {
-  RadixNode base;
-  size_t critical;
-  uint8_t bitmask;
-  RadixNode *child[2];
-} RadixInternal;
-
-typedef struct RadixTree {
-  RadixNode *root;
-} RadixTree;
-
-static inline int32_t radix_bit(const uint8_t *key, size_t len, size_t critical, uint8_t bitmask) {
-  return critical < len && key[critical] & bitmask;
-}
-
-static inline void radix_critical(const uint8_t *k1, size_t len1,
-                                  const uint8_t *k2, size_t len2,
-                                  size_t *critical, uint8_t *bitmask) {
-  size_t max_len = max(len1, len2);
-  for (size_t i = 0; i < max_len; ++i) {
-    uint8_t b1 = (i < len1) ? k1[i] : 0;
-    uint8_t b2 = (i < len2) ? k2[i] : 0;
-    if (b1 != b2) {
-      uint8_t diff = b1 ^ b2;
-      *critical = i;
-      *bitmask = 0x80;
-      while ((*bitmask & diff) == 0) {
-        *bitmask >>= 1;
-      }
-      return;
-    }
-  }
-  *critical = max_len;
-  *bitmask = 0x80;
-}
-
-static inline RadixLeaf *radix_leaf(const uint8_t *key, size_t len, radix_v v) {
-  RadixLeaf *leaf = malloc(sizeof(RadixLeaf));
-  assert(leaf);
-  leaf->base.type = RADIX_LEAF;
-  leaf->base.v = v;
-  uint8_t *dup = malloc(len + 1);
-  assert(dup);
-  memcpy(dup, key, len);
-  dup[len] = '\0';
-  leaf->key = dup;
-  leaf->len = len;
-  return leaf;
-}
-
-static inline RadixInternal *radix_internal(size_t critical, uint8_t bitmask) {
-  RadixInternal *node = malloc(sizeof(RadixInternal));
-  assert(node);
-  node->base.type = RADIX_INTERNAL;
-  node->base.v = NULL;
-  node->critical = critical;
-  node->bitmask = bitmask;
-  node->child[0] = NULL;
-  node->child[1] = NULL;
-  return node;
-}
-
-static inline int32_t radix_compare(const uint8_t *k1, size_t len1, const uint8_t *k2, size_t len2) {
-  size_t min_len = min(len1, len2);
-  int32_t cmp = memcmp(k1, k2, min_len);
-  if (cmp != 0) return cmp;
-  if (len1 < len2) return -1;
-  if (len1 > len2) return 1;
-  return 0;
-}
-
-static inline void radix_update(RadixInternal *internal) {
-  RadixNode *bit0 = internal->child[0];
-  RadixNode *bit1 = internal->child[1];
-  if (bit0 && bit1) {
-    RadixLeaf *leaf0 = (RadixLeaf *)bit0;
-    RadixLeaf *leaf1 = (RadixLeaf *)bit1;
-    while (leaf0->base.type == RADIX_INTERNAL) {
-      RadixInternal *int0 = (RadixInternal *)leaf0;
-      leaf0 = (RadixLeaf *)(int0->child[0] ? int0->child[0] : int0->child[1]);
-    }
-    while (leaf1->base.type == RADIX_INTERNAL) {
-      RadixInternal *int1 = (RadixInternal *)leaf1;
-      leaf1 = (RadixLeaf *)(int1->child[0] ? int1->child[0] : int1->child[1]);
-    }
-    if (radix_compare(leaf0->key, leaf0->len, leaf1->key, leaf1->len) < 0) {
-      internal->base.v = internal->child[0]->v;
-    } else {
-      internal->base.v = internal->child[1]->v;
-    }
-  } else if (bit0) {
-    internal->base.v = bit0->v;
-  } else if (bit1) {
-    internal->base.v = bit1->v;
-  }
-}
-
-static inline RadixTree *radix_tree(void) {
-  RadixTree *tree = malloc(sizeof(RadixTree));
-  assert(tree);
-  tree->root = NULL;
-  return tree;
-}
-
-static inline void radix_insert(RadixTree *tree, const char *str, radix_v v) {
-  assert(tree);
-  assert(str);
-  const uint8_t *key = (const uint8_t *)str;
-  size_t len = strlen(str);
-  if (!tree->root) {
-    tree->root = (RadixNode *)radix_leaf(key, len, v);
-    return;
-  }
-  RadixNode **parent = &tree->root;
-  RadixNode *node = tree->root;
-  while (node->type == RADIX_INTERNAL) {
-    RadixInternal *internal = (RadixInternal *)node;
-    int32_t bit = radix_bit(key, len, internal->critical, internal->bitmask);
-    parent = &internal->child[bit];
-    node = internal->child[bit];
-    if (!node) {
-      *parent = (RadixNode *)radix_leaf(key, len, v);
-      radix_update(internal);
-      RadixNode *curr = tree->root;
-      if (curr && curr->type == RADIX_INTERNAL) {
-        // set lexicographical minimum
-        radix_update((RadixInternal *)curr);
-      }
-      return;
-    }
-  }
-  // split leaf node
-  RadixLeaf *leaf = (RadixLeaf *)node;
-  if (len == leaf->len && memcmp(key, leaf->key, len) == 0) {
-    leaf->base.v = v;
-    return;
-  }
-  size_t critical;
-  uint8_t bitmask;
-  radix_critical(key, len, leaf->key, leaf->len, &critical, &bitmask);
-  RadixInternal *new_internal = radix_internal(critical, bitmask);
-  int32_t new_bit = radix_bit(key, len, critical, bitmask);
-  int32_t old_bit = radix_bit(leaf->key, leaf->len, critical, bitmask);
-  RadixLeaf *new_leaf = radix_leaf(key, len, v);
-  new_internal->child[new_bit] = (RadixNode *)new_leaf;
-  new_internal->child[old_bit] = (RadixNode *)leaf;
-  radix_update(new_internal);
-  *parent = (RadixNode *)new_internal;
-}
-
-static inline radix_v radix_query(RadixTree *tree, const char *pattern) {
-  assert(tree);
-  assert(tree->root);
-  assert(pattern);
-  assert(strlen(pattern) > 0);
-  const uint8_t *key = (const uint8_t *)pattern;
-  size_t len = strlen(pattern);
-  RadixNode *node = tree->root;
-  while (node) {
-    if (node->type == RADIX_LEAF) {
-      RadixLeaf *leaf = (RadixLeaf *)node;
-      if (leaf->len >= len && memcmp(leaf->key, key, len) == 0) {
-        return leaf->base.v;
-      }
-      return NULL;
-    }
-    RadixInternal *internal = (RadixInternal *)node;
-    int32_t bit = radix_bit(key, len, internal->critical, internal->bitmask);
-    node = internal->child[bit];
-  }
-  return NULL;
 }
 
 static inline void init_tags(void) {
