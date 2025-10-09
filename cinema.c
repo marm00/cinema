@@ -1242,11 +1242,11 @@ static wchar_t *setup_wstring(const cJSON *json, const char *key, const wchar_t 
   return result;
 }
 
-typedef struct LocalItems {
+typedef struct DirectoryNode {
   int32_t *items;
   size_t count;
   size_t capacity;
-} LocalItems;
+} DirectoryNode;
 
 typedef struct Local_Collection {
   // Each byte represents a UTF-8 unit
@@ -1352,9 +1352,8 @@ static inline void rh_double(RobinHoodMap *map) {
   }
 }
 
-// todo: inline
-static int32_t rh_insert(RobinHoodMap *map, char *k, size_t len, void *v) {
-  // robin hood hashing without tombstones with fnv-1a
+static inline int32_t rh_insert(RobinHoodMap *map, char *k, size_t len, void *v) {
+  // robin hood hashing (without tombstones) with fnv-1a
   assert(k);
   assert(strlen(k) > 0);
   assert(len > 0);
@@ -1368,7 +1367,7 @@ static int32_t rh_insert(RobinHoodMap *map, char *k, size_t len, void *v) {
   while (map->items[i].k != NULL) {
     if (map->items[i].hash == hash && strcmp(map->items[i].k, k) == 0) {
       log_message(LOG_WARNING, "Found duplicate key '%s' in hashmap: %zu", k,
-                  ((LocalItems *)map->items[i].v)->count);
+                  ((DirectoryNode *)map->items[i].v)->count);
       return (int32_t)i;
     }
     size_t cur_dist = (i - (map->items[i].hash & map->mask)) & map->mask;
@@ -1388,98 +1387,6 @@ static int32_t rh_insert(RobinHoodMap *map, char *k, size_t len, void *v) {
   return -1;
 }
 
-#define CIN_DIRECTORIES_CAP 64
-#define CIN_DIRECTORY_ITEMS_CAP 64
-
-static char utf8_buf[CIN_MAX_PATH_BYTES];
-static RobinHoodMap directory_map = {0};
-static struct {
-  LocalItems *items;
-  size_t count;
-  size_t capacity;
-} directories = {0};
-
-// TODO: unroll recursion
-static bool setup_directory(wchar_t *path, size_t len) {
-  // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findfirstfileexw
-  // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findnextfilew
-  // TODO: explain "directory" & recursive in readme
-  // TODO: note that we support up to CIN_MAX_PATH, not NTFS max of 32000+
-  assert(path);
-  assert(len > 0);
-  assert(path[len - 1] == L'\0');
-  array_ngrow(&directories, 1, CIN_DIRECTORY_ITEMS_CAP);
-  assert(directories.capacity > 0);
-  assert(directories.items[0].capacity > 0);
-  // convert to utf8 for byte-by-byte hash
-  int32_t bytes = utf16_to_utf8(path, utf8_buf, (int32_t)len) - 1;
-  LocalItems *dir_items = &directories.items[directories.count - 1];
-  int32_t dup_index = rh_insert(&directory_map, utf8_buf, len, dir_items);
-  if (dup_index >= 0) {
-    // log_message(LOG_INFO, "Dup count: %zu", directories.items[dup_index].count);
-    return true;
-  }
-  log_message(LOG_INFO, "path: %s", utf8_buf);
-  if (--len + 2 >= CIN_MAX_PATH) {
-    // We have to append 2 chars \ and * for the correct pattern
-    return false;
-  }
-  path[len++] = L'\\';
-  path[len++] = L'*';
-  path[len] = L'\0';
-  WIN32_FIND_DATAW data;
-  HANDLE search = FindFirstFileExW(path, FindExInfoBasic, &data,
-                                   FindExSearchNameMatch, NULL,
-                                   FIND_FIRST_EX_LARGE_FETCH);
-  // We can now drop the 2 chars \ and * to restore the root,
-  // but choose to only drop * so that \ remains as a separator
-  // for the next file or directory, instead of adding later.
-  len--;
-  path[len] = L'\0';
-  if (search == INVALID_HANDLE_VALUE) {
-    log_last_error("Failed to match directory '%ls'", path);
-    return false;
-  }
-  bool ok = true;
-  do {
-    if (data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
-      continue; // skip junction
-    }
-    wchar_t *file = data.cFileName;
-    CharLowerW(file);
-    bool is_dir = data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY;
-    if (is_dir && (file[0] == L'.') && (!file[1] || (file[1] == L'.' && !file[2]))) {
-      continue; // skip dot entry
-    }
-    size_t file_len = wcslen(file) + 1; // add \0
-    size_t path_len = len + file_len;
-    if (path_len >= CIN_MAX_PATH) {
-      continue; // skip absolute path (+ NUL) if silently truncated
-    }
-    wmemcpy(path + len, file, file_len);
-    if (is_dir) {
-      if (!setup_directory(path, path_len)) {
-        ok = false;
-      }
-    } else {
-      int32_t utf8_len = utf16_to_utf8(path, utf8_buf, (int32_t)path_len);
-      array_push(dir_items, locals.doc_count);
-      locals_append(utf8_buf, utf8_len);
-    }
-  } while (FindNextFileW(search, &data) != 0);
-  if (GetLastError() != ERROR_NO_MORE_FILES) {
-    log_last_error("Failed to find next file");
-    ok = false;
-  }
-  FindClose(search);
-  return ok;
-}
-
-typedef struct DirectoryNode {
-  LocalItems files;
-  struct DirectoryNode *next;
-} DirectoryNode;
-
 typedef struct DirectoryPath {
   wchar_t path[CIN_MAX_PATH];
   size_t len;
@@ -1498,14 +1405,19 @@ static struct {
   size_t capacity;
 } dir_nodes = {0};
 
-static void setup_directory2(wchar_t *path, size_t len) {
+#define CIN_DIRECTORIES_CAP 64
+#define CIN_DIRECTORY_ITEMS_CAP 64
+
+static char utf8_buf[CIN_MAX_PATH_BYTES];
+static RobinHoodMap directory_map = {0};
+
+static void setup_directory(wchar_t *path, size_t len) {
   DirectoryPath root_dir = {.len = len};
   wmemcpy(root_dir.path, path, len);
   array_push(&dir_stack, root_dir);
   array_grow(&dir_nodes, 1);
   DirectoryNode *node = &dir_nodes.items[dir_nodes.count - 1];
-  array_alloc(&node->files, CIN_DIRECTORY_ITEMS_CAP);
-  size_t queue_index = 0;
+  array_alloc(node, CIN_DIRECTORY_ITEMS_CAP);
   while (dir_stack.count > 0) {
     assert(node);
     DirectoryPath dir = dir_stack.items[--dir_stack.count];
@@ -1513,14 +1425,19 @@ static void setup_directory2(wchar_t *path, size_t len) {
     assert(dir.path);
     assert(dir.len > 0);
     assert(dir.path[dir.len - 1] == L'\0');
-    int32_t bytes = utf16_to_utf8(dir.path, utf8_buf, (int32_t)dir.len) - 1;
-    int32_t dup_index = rh_insert(&directory_map, utf8_buf, dir.len, node);
+    int32_t bytes = utf16_to_utf8(dir.path, utf8_buf, (int32_t)dir.len);
+    assert(bytes > 0);
+    // TODO: replace utf8_buf with fresh buffer
+    int32_t dup_index = rh_insert(&directory_map, utf8_buf, (size_t)bytes, node);
     if (dup_index >= 0) {
       // NOTE: When the key is already in the hash, we have access to an address
-      // into the depth-first linked list. Lazy evaluation: the tail of this
-      // pointer is not determined by NULL, but must be calculated (e.g., using
-      // the document ids to retrieve file names and recognize depth reduction)
+      // into the dynamic nodes array. Lazy evaluation: the terminator but must
+      // be calculated (e.g., using the document ids to retrieve file names and
+      // recognize depth reduction)
       DirectoryNode *dup_node = directory_map.items[dup_index].v;
+      for (DirectoryNode *p = dup_node; p < dir_nodes.items + dir_nodes.count; ++p) {
+        log_message(LOG_INFO, "count=%llu", p->count);
+      }
       goto skip;
     }
     if (--dir.len + 2 >= CIN_MAX_PATH) {
@@ -1571,7 +1488,7 @@ static void setup_directory2(wchar_t *path, size_t len) {
       } else {
         wmemcpy(dir.path + dir.len, file, file_len);
         int32_t utf8_len = utf16_to_utf8(dir.path, utf8_buf, (int32_t)path_len);
-        array_push(&node->files, locals.doc_count);
+        array_push(node, locals.doc_count);
         locals_append(utf8_buf, utf8_len);
       }
     } while (FindNextFileW(search, &data) != 0);
@@ -1581,11 +1498,10 @@ static void setup_directory2(wchar_t *path, size_t len) {
     FindClose(search);
   skip:
     array_grow(&dir_nodes, 1);
-    node->next = &dir_nodes.items[dir_nodes.count - 1];
-    array_alloc(&node->next->files, CIN_DIRECTORY_ITEMS_CAP);
-    node = node->next;
+    DirectoryNode *next = &dir_nodes.items[dir_nodes.count - 1];
+    array_alloc(next, CIN_DIRECTORY_ITEMS_CAP);
+    node = next;
   }
-  node->next = NULL;
   assert(dir_stack.count == 0);
 }
 
@@ -1677,7 +1593,6 @@ static bool init_config(const char *filename) {
   Conf_Root *root = &conf_parser.scopes.items[0].root;
   table_calloc(&directory_map, CIN_DIRECTORIES_CAP);
   directory_map.mask = directory_map.capacity - 1;
-  array_nalloc(&directories, CIN_DIRECTORIES_CAP, CIN_DIRECTORY_ITEMS_CAP);
   array_alloc(&dir_nodes, CIN_DIRECTORIES_CAP);
   // TODO: parallelize for large n
   for (size_t i = 1; i < conf_parser.scopes.count; ++i) {
@@ -1700,28 +1615,27 @@ static bool init_config(const char *filename) {
       FOREACH_PART(&scope->media.directories, part, len) {
         part[len] = '\0';
         int32_t len_utf16 = utf8_to_utf16_norm(part, wbuf);
+        assert(len_utf16);
         log_wmessage(LOG_INFO, L"Directory: %ls", wbuf);
-        if (len_utf16) {
-          setup_directory2(wbuf, (size_t)len_utf16);
-        } else {
-          assert(false);
-        }
+        setup_directory(wbuf, (size_t)len_utf16);
+      }
+      log_message(LOG_INFO, "directory_map.capacity=%llu", directory_map.capacity);
+      for (size_t i = 0; i < directory_map.capacity; ++i) {
+        log_message(LOG_INFO, "%s", directory_map.items[i].k);
       }
       FOREACH_PART(&scope->media.patterns, part, len) {
         part[len] = '\0';
         int32_t len_utf16 = utf8_to_utf16_norm(part, wbuf);
-        if (len_utf16) {
-          setup_pattern(wbuf);
-        }
+        assert(len_utf16);
         log_message(LOG_DEBUG, "Pattern: %s", part);
+        setup_pattern(wbuf);
       }
       FOREACH_PART(&scope->media.urls, part, len) {
         part[len] = '\0';
         int32_t len_utf16 = utf8_to_utf16_norm(part, wbuf);
-        if (len_utf16) {
-          setup_url(wbuf);
-        }
+        assert(len_utf16);
         log_message(LOG_DEBUG, "URL: %s", part);
+        setup_url(wbuf);
       }
       int32_t bytes_end = locals.bytes;
       int32_t docs_end = locals.doc_count;
@@ -1742,6 +1656,7 @@ static bool init_config(const char *filename) {
       break;
     }
   }
+  // TODO: free directory_map / directories
   array_free(conf_parser.scopes);
   array_free(conf_parser.buf);
   if (locals.bytes < locals.max_bytes) {
