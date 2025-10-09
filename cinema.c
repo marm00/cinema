@@ -1487,9 +1487,10 @@ typedef struct DirectoryPath {
 
 static struct {
   DirectoryPath *items;
+  size_t abs_count;
   size_t count;
   size_t capacity;
-} dir_queue = {0};
+} dir_stack = {0};
 
 static struct {
   DirectoryNode *items;
@@ -1497,38 +1498,34 @@ static struct {
   size_t capacity;
 } dir_nodes = {0};
 
-static bool setup_directory2(wchar_t *path, size_t len) {
+static void setup_directory2(wchar_t *path, size_t len) {
   DirectoryPath root_dir = {.len = len};
   wmemcpy(root_dir.path, path, len);
-  array_push(&dir_queue, root_dir);
+  array_push(&dir_stack, root_dir);
   array_grow(&dir_nodes, 1);
   DirectoryNode *node = &dir_nodes.items[dir_nodes.count - 1];
   array_alloc(&node->files, CIN_DIRECTORY_ITEMS_CAP);
-  bool ok = true;
   size_t queue_index = 0;
-  log_message(LOG_INFO, "Starting new directory");
-  while (node != NULL) {
-    DirectoryPath dir = dir_queue.items[queue_index++];
-    // log_wmessage(LOG_INFO, L"Path: %ls", dir.path);
+  while (dir_stack.count > 0) {
+    assert(node);
+    DirectoryPath dir = dir_stack.items[--dir_stack.count];
+    log_wmessage(LOG_INFO, L"Path: %ls", dir.path);
     assert(dir.path);
-    for (size_t i2 = dir_queue.count - 1; i2 >= queue_index; --i2) {
-      // log_wmessage(LOG_INFO, L"%ls = %llu, i=%llu", dir_queue.items[i2].path, dir_queue.items[i2].len, queue_index);
-    }
     assert(dir.len > 0);
     assert(dir.path[dir.len - 1] == L'\0');
     int32_t bytes = utf16_to_utf8(dir.path, utf8_buf, (int32_t)dir.len) - 1;
     int32_t dup_index = rh_insert(&directory_map, utf8_buf, dir.len, node);
     if (dup_index >= 0) {
+      // NOTE: When the key is already in the hash, we have access to an address
+      // into the depth-first linked list. Lazy evaluation: the tail of this
+      // pointer is not determined by NULL, but must be calculated (e.g., using
+      // the document ids to retrieve file names and recognize depth reduction)
       DirectoryNode *dup_node = directory_map.items[dup_index].v;
-      log_message(LOG_INFO, "Dup count: %zu", dup_node->files.count);
-      assert(false);
-      continue; // todo: continue?
+      goto skip;
     }
     if (--dir.len + 2 >= CIN_MAX_PATH) {
       // We have to append 2 chars \ and * for the correct pattern
-      ok = false;
-      assert(false);
-      continue;
+      goto skip;
     }
     dir.path[dir.len++] = L'\\';
     dir.path[dir.len++] = L'*';
@@ -1544,9 +1541,7 @@ static bool setup_directory2(wchar_t *path, size_t len) {
     dir.path[dir.len] = L'\0';
     if (search == INVALID_HANDLE_VALUE) {
       log_last_error("Failed to match directory '%ls'", dir.path);
-      ok = false;
-      assert(false);
-      continue;
+      goto skip;
     }
     do {
       if (data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
@@ -1569,8 +1564,10 @@ static bool setup_directory2(wchar_t *path, size_t len) {
         wmemcpy(nested_path.path, dir.path, dir.len);
         wmemcpy(nested_path.path + dir.len, file, file_len);
         assert(nested_path.path[nested_path.len - 1] == L'\0');
-        array_push(&dir_queue, nested_path);
         assert(nested_path.len > 0);
+        ++dir_stack.abs_count;
+        array_ensure_capacity(&dir_stack, dir_stack.abs_count);
+        array_push(&dir_stack, nested_path);
       } else {
         wmemcpy(dir.path + dir.len, file, file_len);
         int32_t utf8_len = utf16_to_utf8(dir.path, utf8_buf, (int32_t)path_len);
@@ -1580,22 +1577,16 @@ static bool setup_directory2(wchar_t *path, size_t len) {
     } while (FindNextFileW(search, &data) != 0);
     if (GetLastError() != ERROR_NO_MORE_FILES) {
       log_last_error("Failed to find next file");
-      ok = false;
     }
     FindClose(search);
-    assert(dir_queue.count > 0);
-    if (dir_queue.count - queue_index > 0) {
-      array_grow(&dir_nodes, 1);
-      node->next = &dir_nodes.items[dir_nodes.count - 1];
-      array_alloc(&node->next->files, CIN_DIRECTORY_ITEMS_CAP);
-    } else {
-      node->next = NULL;
-    }
+  skip:
+    array_grow(&dir_nodes, 1);
+    node->next = &dir_nodes.items[dir_nodes.count - 1];
+    array_alloc(&node->next->files, CIN_DIRECTORY_ITEMS_CAP);
     node = node->next;
   }
-  assert(queue_index == dir_queue.count);
-  dir_queue.count = 0;
-  return ok;
+  node->next = NULL;
+  assert(dir_stack.count == 0);
 }
 
 static bool setup_pattern(const wchar_t *pattern) {
