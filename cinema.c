@@ -211,6 +211,8 @@ static const char *LOG_LEVELS[LOG_TRACE + 1] = {"ERROR", "WARNING", "INFO", "DEB
     (t)->count = 0;                                          \
   } while (0)
 
+#define table_free(t) free((t).items)
+
 // https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
 // A path can have 248 "characters" (260 - 12 = 248)
 // with 12 reserved for 8.3 file name.
@@ -1578,25 +1580,6 @@ typedef struct DirectoryPath {
   size_t len;
 } DirectoryPath;
 
-static struct {
-  DirectoryPath *items;
-  size_t abs_count;
-  size_t count;
-  size_t capacity;
-} dir_stack = {0};
-
-static struct {
-  uint8_t *items;
-  size_t count;
-  size_t capacity;
-} dir_string_arena = {0};
-
-static struct {
-  DirectoryNode *items;
-  size_t count;
-  size_t capacity;
-} dir_node_arena = {0};
-
 typedef struct TagDirectories {
   int32_t *items;
   size_t count;
@@ -1631,6 +1614,25 @@ typedef struct Cin_Layout {
   size_t count;
   size_t capacity;
 } Cin_Layout;
+
+static struct {
+  DirectoryPath *items;
+  size_t abs_count;
+  size_t count;
+  size_t capacity;
+} dir_stack = {0};
+
+static struct {
+  uint8_t *items;
+  size_t count;
+  size_t capacity;
+} dir_string_arena = {0};
+
+static struct {
+  DirectoryNode *items;
+  size_t count;
+  size_t capacity;
+} dir_node_arena = {0};
 
 static struct {
   uint8_t *items;
@@ -1938,10 +1940,6 @@ static bool init_config(const char *filename) {
       setup_layout(scope->layout.name.items, layout);
       array_free(scope->layout.name);
       array_free(scope->layout.screen);
-      Cin_Layout *found = radix_query(layout_tree, (const uint8_t *)"ab", 2);
-      if (found) {
-        log_message(LOG_INFO, "%s", screen_arena.items + found->items[0].offset);
-      }
     } break;
     case CONF_SCOPE_MEDIA: {
       TagItems *tag_items = NULL;
@@ -2000,7 +1998,11 @@ static bool init_config(const char *filename) {
       break;
     }
   }
-  // TODO: free dir_map / directories
+  table_free(dir_map);
+  table_free(pat_map);
+  table_free(url_map);
+  array_free(dir_string_arena);
+  array_free(dir_stack);
   array_free(conf_parser.scopes);
   array_free(conf_parser.buf);
   if (locals.bytes < locals.max_bytes) {
