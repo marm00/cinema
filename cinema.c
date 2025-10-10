@@ -593,7 +593,7 @@ static void log_message(Cin_Log_Level level, const char *message, ...) {
   LeaveCriticalSection(&log_lock);
 }
 
-static inline int32_t utf16_to_utf8(const wchar_t *wstr, char *buf, int32_t len) {
+static inline int32_t utf16_to_utf8(const wchar_t *wstr, uint8_t *buf, int32_t len) {
   if (buf == NULL || wstr == NULL) {
     return -1;
   }
@@ -602,7 +602,7 @@ static inline int32_t utf16_to_utf8(const wchar_t *wstr, char *buf, int32_t len)
   if (n_bytes <= 0) {
     return -1;
   }
-  n_bytes = WideCharToMultiByte(CP_UTF8, 0, wstr, len, buf, n_bytes, NULL, NULL);
+  n_bytes = WideCharToMultiByte(CP_UTF8, 0, wstr, len, (char *)buf, n_bytes, NULL, NULL);
   if (n_bytes <= 0) {
     return -1;
   }
@@ -912,11 +912,9 @@ static inline RadixTree *radix_tree(void) {
   return tree;
 }
 
-static inline void radix_insert(RadixTree *tree, const char *str, radix_v v) {
+static inline void radix_insert(RadixTree *tree, const uint8_t *key, size_t len, radix_v v) {
   assert(tree);
-  assert(str);
-  const uint8_t *key = (const uint8_t *)str;
-  size_t len = strlen(str);
+  assert(key);
   if (!tree->root) {
     tree->root = (RadixNode *)radix_leaf(key, len, v);
     return;
@@ -1628,7 +1626,7 @@ static void setup_directory(const char *path, TagDirectories *tag_dirs) {
     assert(dir.path);
     assert(dir.len > 0);
     assert(dir.path[dir.len - 1] == L'\0');
-    int32_t bytes_i32 = utf16_to_utf8(dir.path, (char *)utf8_buf, (int32_t)dir.len);
+    int32_t bytes_i32 = utf16_to_utf8(dir.path, utf8_buf, (int32_t)dir.len);
     assert(bytes_i32 > 0);
     size_t bytes = (size_t)bytes_i32;
     array_reserve(&dir_string_arena, bytes + 1);
@@ -1710,7 +1708,7 @@ static void setup_directory(const char *path, TagDirectories *tag_dirs) {
         array_push(&dir_stack, nested_path);
       } else {
         wmemcpy(dir.path + dir.len, file, file_len);
-        int32_t utf8_len = utf16_to_utf8(dir.path, (char *)utf8_buf, (int32_t)path_len);
+        int32_t utf8_len = utf16_to_utf8(dir.path, utf8_buf, (int32_t)path_len);
         array_push(node, locals.doc_count);
         locals_append(utf8_buf, utf8_len);
       }
@@ -1775,7 +1773,7 @@ static bool setup_pattern(const wchar_t *pattern) {
       continue; // skip absolute path (+ NUL) if silently truncated
     }
     wmemcpy(abs_buf + abs_len, file, file_len);
-    int len = utf16_to_utf8(abs_buf, (char *)utf8_buf, (int)path_len);
+    int len = utf16_to_utf8(abs_buf, utf8_buf, (int)path_len);
     locals_append(utf8_buf, len);
   } while (FindNextFileW(search, &data) != 0);
   if (GetLastError() != ERROR_NO_MORE_FILES) {
@@ -1787,17 +1785,20 @@ static bool setup_pattern(const wchar_t *pattern) {
 }
 
 static bool setup_url(const wchar_t *url) {
-  int len = utf16_to_utf8(url, (char *)utf8_buf, -1);
+  int len = utf16_to_utf8(url, utf8_buf, -1);
   locals_append(utf8_buf, len);
   return true;
 }
 
 static RadixTree *tag_tree = NULL;
 
-static bool setup_tag(const wchar_t *tag) {
-  utf16_to_utf8(tag, (char *)utf8_buf, -1);
-  // locals_append(utf8_buf, len);
-  return true;
+static inline void setup_tag(const char *tag, TagDirectories *tag_dirs) {
+  int32_t len_utf16 = utf8_to_utf16_norm(tag, utf16_buf);
+  assert(len_utf16);
+  int32_t len_utf8 = utf16_to_utf8(utf16_buf, utf8_buf, len_utf16);
+  assert(len_utf8);
+  size_t len = (size_t)len_utf8;
+  radix_insert(tag_tree, utf8_buf, len, tag_dirs);
 }
 
 #define FOREACH_PART(k, part, len)                                                                     \
@@ -1816,7 +1817,6 @@ static bool init_config(const char *filename) {
   array_alloc(&dir_node_arena, CIN_DIRECTORIES_CAP);
   array_alloc(&dir_string_arena, CIN_DIRECTORY_STRINGS_CAP);
   tag_tree = radix_tree();
-  assert(tag_tree);
   // TODO: parallelize for large n
   for (size_t i = 1; i < conf_parser.scopes.count; ++i) {
     Conf_Scope *scope = &conf_parser.scopes.items[i];
@@ -1859,7 +1859,6 @@ static bool init_config(const char *filename) {
         //   log_message(LOG_INFO, "%d", dir_node_arena.items[i].count);
         // }
       }
-      exit(1);
       FOREACH_PART(&scope->media.patterns, part, len) {
         part[len] = '\0';
         int32_t len_utf16 = utf8_to_utf16_norm(part, utf16_buf);
@@ -1876,9 +1875,13 @@ static bool init_config(const char *filename) {
       }
       FOREACH_PART(&scope->media.tags, part, len) {
         part[len] = '\0';
-        int32_t len_utf16 = utf8_to_utf16_norm(part, utf16_buf);
         log_message(LOG_DEBUG, "Tag: %s", part);
-        // radix_insert(tag_tree, part, tag_dirs);
+        setup_tag(part, tag_dirs);
+      }
+      radix_v v = radix_query(tag_tree, "sample");
+      if (v) {
+        TagDirectories *tagz = v;
+        log_message(LOG_INFO, "Found: %d", tagz->count);
       }
       array_free(scope->media.directories);
       array_free(scope->media.patterns);
@@ -2792,9 +2795,9 @@ static inline void init_tags(void) {
   radix_v *buf1 = (radix_v) "daa";
   radix_v *buf2 = (radix_v) "dab";
   radix_v *buf3 = (radix_v) "da";
-  radix_insert(tree, "daa", buf1);
-  radix_insert(tree, "dab", buf2);
-  radix_insert(tree, "da", buf3);
+  radix_insert(tree, (const uint8_t *)"daa", 3, buf1);
+  radix_insert(tree, (const uint8_t *)"dab", 3, buf2);
+  radix_insert(tree, (const uint8_t *)"da", 2, buf3);
   radix_v value = radix_query(tree, "dab");
   if (!value) {
     log_message(LOG_INFO, "Pattern not found.");
