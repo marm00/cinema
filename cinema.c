@@ -1623,6 +1623,22 @@ typedef struct TagItems {
   TagUrlItems *url_items;
 } TagItems;
 
+typedef struct Cin_Screen {
+  int32_t offset;
+  int32_t len;
+} Cin_Screen;
+
+typedef struct Cin_Layout {
+  Cin_Screen *screens;
+  int32_t count;
+} Cin_Layout;
+
+static struct {
+  uint8_t *items;
+  size_t count;
+  size_t capacity;
+} screen_arena = {0};
+
 #define CIN_DIRECTORIES_CAP 64
 #define CIN_DIRECTORY_ITEMS_CAP 64
 #define CIN_DIRECTORY_STRINGS_CAP (CIN_DIRECTORIES_CAP * CIN_MAX_PATH_BYTES)
@@ -1635,6 +1651,7 @@ static RobinHoodMap dir_map = {0};
 static RobinHoodMap pat_map = {0};
 static RobinHoodMap url_map = {0};
 static RadixTree *tag_tree = NULL;
+static RadixTree *layout_tree = NULL;
 
 static void setup_directory(const char *path, TagDirectories *tag_dirs) {
   int32_t len_utf16 = utf8_to_utf16_norm(path, utf16_buf);
@@ -1657,6 +1674,8 @@ static void setup_directory(const char *path, TagDirectories *tag_dirs) {
     size_t k_offset = dir_string_arena.count;
     memcpy(k_arena + k_offset, utf8_buf, bytes);
     size_t node_tail = dir_node_arena.count;
+    // TODO: if an unmatched directory is inserted, its next occurence
+    // will think that the current node_tail is correct, when it is not
     int32_t dup_index = rh_insert(&dir_map, k_arena, k_offset, bytes, (int32_t)node_tail);
     if (dup_index >= 0) {
       // NOTE: When the key is already in the hash, we have access to an index
@@ -1853,8 +1872,18 @@ static inline void setup_tag(const char *tag, TagItems *tag_items) {
   assert(len_utf16);
   int32_t len_utf8 = utf16_to_utf8(utf16_buf, utf8_buf, len_utf16);
   assert(len_utf8);
-  size_t len = (size_t)len_utf8;
-  radix_insert(tag_tree, utf8_buf, len, tag_items);
+  radix_insert(tag_tree, utf8_buf, (size_t)len_utf8, tag_items);
+}
+
+static inline void setup_screen(const char *geometry) {
+}
+
+static inline void setup_layout(const char *layout) {
+  int32_t len_utf16 = utf8_to_utf16_norm(layout, utf16_buf);
+  assert(len_utf16);
+  int32_t len_utf8 = utf16_to_utf8(utf16_buf, utf8_buf, len_utf16);
+  assert(len_utf8);
+  radix_insert(layout_tree, utf8_buf, (size_t)len_utf8, NULL);
 }
 
 #define FOREACH_PART(k, part, len)                                                                     \
@@ -1862,12 +1891,11 @@ static inline void setup_tag(const char *tag, TagItems *tag_items) {
        _left < _right;                                                                                 \
        _left = _comma ? _comma + 1 : _right, _left += _comma ? strspn(_left, " \t") : 0, part = _left) \
     if ((_comma = memchr(_left, ',', (size_t)(_right - _left))),                                       \
-        (len = _comma ? (size_t)(_comma - _left) : (size_t)(_right - _left)), 1)
+        (len = _comma ? (size_t)(_comma - _left) : (size_t)(_right - _left - 1)),                      \
+        _comma ? (_comma[0] = '\0', 1) : (_left[len] = '\0', 1), 1)
 
 static bool init_config(const char *filename) {
   if (!parse_config(filename)) return false;
-  size_t len;
-  Conf_Root *root = &conf_parser.scopes.items[0].root;
   table_calloc(&dir_map, CIN_DIRECTORIES_CAP);
   dir_map.mask = dir_map.capacity - 1;
   table_calloc(&pat_map, CIN_PATTERN_ITEMS_CAP);
@@ -1877,6 +1905,9 @@ static bool init_config(const char *filename) {
   array_alloc(&dir_node_arena, CIN_DIRECTORIES_CAP);
   array_alloc(&dir_string_arena, CIN_DIRECTORY_STRINGS_CAP);
   tag_tree = radix_tree();
+  layout_tree = radix_tree();
+  Conf_Root *root = &conf_parser.scopes.items[0].root;
+  size_t len;
   for (size_t i = 1; i < conf_parser.scopes.count; ++i) {
     Conf_Scope *scope = &conf_parser.scopes.items[i];
     log_message(LOG_DEBUG, "[Scope %zu: %zu]", i, scope->type);
@@ -1884,8 +1915,7 @@ static bool init_config(const char *filename) {
     case CONF_SCOPE_LAYOUT: {
       log_message(LOG_DEBUG, "Name: %s", scope->layout.name.items);
       FOREACH_PART(&scope->layout.screen, part, len) {
-        part[len] = '\0';
-        log_message(LOG_DEBUG, "Screen: %s", part);
+        log_message(LOG_DEBUG, "Screen: %s, len=%d", part, len);
       }
       array_free(scope->layout.name);
       array_free(scope->layout.screen);
@@ -1914,22 +1944,18 @@ static bool init_config(const char *filename) {
         }
       }
       FOREACH_PART(&scope->media.directories, part, len) {
-        part[len] = '\0';
         log_message(LOG_DEBUG, "Directory: %s", part);
         setup_directory(part, tag_directories);
       }
       FOREACH_PART(&scope->media.patterns, part, len) {
-        part[len] = '\0';
         log_message(LOG_DEBUG, "Pattern: %s", part);
         setup_pattern(part, tag_pattern_items);
       }
       FOREACH_PART(&scope->media.urls, part, len) {
-        part[len] = '\0';
         log_message(LOG_DEBUG, "URL: %s", part);
         setup_url(part, tag_url_items);
       }
       FOREACH_PART(&scope->media.tags, part, len) {
-        part[len] = '\0';
         log_message(LOG_DEBUG, "Tag: %s", part);
         setup_tag(part, tag_items);
       }
