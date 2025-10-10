@@ -1632,8 +1632,11 @@ typedef struct TagItems {
 static wchar_t utf16_buf[CIN_MAX_PATH];
 static uint8_t utf8_buf[CIN_MAX_PATH_BYTES];
 static RobinHoodMap dir_map = {0};
+static RobinHoodMap pat_map = {0};
+static RobinHoodMap url_map = {0};
+static RadixTree *tag_tree = NULL;
 
-static void setup_directory(const char *path, TagDirectories *tag_dirs) {
+static inline void setup_directory(const char *path, TagDirectories *tag_dirs) {
   int32_t len_utf16 = utf8_to_utf16_norm(path, utf16_buf);
   assert(len_utf16);
   size_t len = (size_t)len_utf16;
@@ -1741,8 +1744,6 @@ static void setup_directory(const char *path, TagDirectories *tag_dirs) {
   assert(dir_stack.count == 0);
 }
 
-static RobinHoodMap pat_map = {0};
-
 static inline void setup_pattern(const char *pattern, TagPatternItems *tag_pattern_items) {
   // Processes all files (not directories) that match the pattern
   // https://support.microsoft.com/en-us/office/examples-of-wildcard-characters-939e153f-bd30-47e4-a763-61897c87b3f4
@@ -1799,10 +1800,10 @@ static inline void setup_pattern(const char *pattern, TagPatternItems *tag_patte
     }
     wmemcpy(abs_buf + abs_len, file, file_len);
     int32_t len = utf16_to_utf8(abs_buf, utf8_buf, path_len);
-    int32_t tail_offset = locals.bytes;
+    size_t tail_offset = (size_t)locals.bytes;
     int32_t tail_doc = locals.doc_count;
     locals_append(utf8_buf, len);
-    int32_t dup_doc = rh_insert(&pat_map, locals.text, tail_offset, len, tail_doc);
+    int32_t dup_doc = rh_insert(&pat_map, locals.text, tail_offset, (size_t)len, tail_doc);
     if (dup_doc >= 0) {
       locals.bytes -= len;
       --locals.doc_count;
@@ -1817,14 +1818,22 @@ static inline void setup_pattern(const char *pattern, TagPatternItems *tag_patte
   FindClose(search);
 }
 
-static inline void setup_url(const char *url) {
+static inline void setup_url(const char *url, TagUrlItems *tag_url_items) {
   int32_t len_utf16 = utf8_to_utf16_norm(url, utf16_buf);
   assert(len_utf16);
   int32_t len_utf8 = utf16_to_utf8(utf16_buf, utf8_buf, len_utf16);
+  size_t tail_offset = (size_t)locals.bytes;
+  int32_t tail_doc = locals.doc_count;
   locals_append(utf8_buf, len_utf8);
+  int32_t dup_doc = rh_insert(&url_map, locals.text, tail_offset, (size_t)len_utf8, tail_doc);
+  if (dup_doc >= 0) {
+    locals.bytes -= len_utf8;
+    --locals.doc_count;
+    array_push(tag_url_items, dup_doc);
+  } else {
+    array_push(tag_url_items, tail_doc);
+  }
 }
-
-static RadixTree *tag_tree = NULL;
 
 static inline void setup_tag(const char *tag, TagItems *tag_items) {
   int32_t len_utf16 = utf8_to_utf16_norm(tag, utf16_buf);
@@ -1850,6 +1859,8 @@ static bool init_config(const char *filename) {
   dir_map.mask = dir_map.capacity - 1;
   table_calloc(&pat_map, CIN_PATTERN_ITEMS_CAP);
   pat_map.mask = pat_map.capacity - 1;
+  table_calloc(&url_map, CIN_URLS_CAP);
+  url_map.mask = url_map.capacity - 1;
   array_alloc(&dir_node_arena, CIN_DIRECTORIES_CAP);
   array_alloc(&dir_string_arena, CIN_DIRECTORY_STRINGS_CAP);
   tag_tree = radix_tree();
@@ -1903,10 +1914,8 @@ static bool init_config(const char *filename) {
       }
       FOREACH_PART(&scope->media.urls, part, len) {
         part[len] = '\0';
-        int32_t len_utf16 = utf8_to_utf16_norm(part, utf16_buf);
-        assert(len_utf16);
         log_message(LOG_DEBUG, "URL: %s", part);
-        // setup_url(utf16_buf);
+        setup_url(part, tag_items->url_items);
       }
       FOREACH_PART(&scope->media.tags, part, len) {
         part[len] = '\0';
@@ -1915,10 +1924,10 @@ static bool init_config(const char *filename) {
       }
       radix_v v = radix_query(tag_tree, "s");
       if (v) {
-        TagItems *tag_items = v;
-        log_message(LOG_INFO, "Found: %d", tag_items->pattern_items->count);
-        for (size_t i = 0; i < tag_items->pattern_items->count; ++i) {
-          log_message(LOG_INFO, "id: %d", tag_items->pattern_items->items[i]);
+        TagItems *tag_items2 = v;
+        log_message(LOG_INFO, "Found: %d", tag_items2->url_items->count);
+        for (size_t i2 = 0; i2 < tag_items2->url_items->count; ++i2) {
+          log_message(LOG_INFO, "id: %d", tag_items2->url_items->items[i2]);
         }
         exit(1);
       }
