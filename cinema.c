@@ -288,19 +288,13 @@ static REPL repl = {0};
 #define CR "\r"
 #define CR_LEN 1
 
-// TODO: prune struct
-typedef struct Console_Preview {
+static struct Console_Preview {
   wchar_t *items;
-  DWORD head_index;
-  DWORD tail_index;
-  DWORD line;
   DWORD count;
   DWORD capacity;
   DWORD len;
   COORD pos;
-} Console_Preview;
-
-static Console_Preview preview = {0};
+} preview = {0};
 
 static struct Console_WWrite_Buffer {
   wchar_t *items;
@@ -515,6 +509,14 @@ static inline BOOL GetConsoleScreenBufferInfo_safe(HANDLE hConsoleOutput, PCONSO
   return TRUE;
 }
 
+#define CIN_PREVIEW_CAP 256
+
+static wchar_t preview_buf[CIN_PREVIEW_CAP];
+
+static void update_preview(void) {
+
+}
+
 static void log_preview(void) {
   // TODO: dynamic msg
   wchar_t *msg2 = L"123456789012345678922012345678904567890123456789012348888555";
@@ -595,47 +597,56 @@ static void log_message(Cin_Log_Level level, const char *message, ...) {
   LeaveCriticalSection(&log_lock);
 }
 
-static inline int32_t utf16_to_utf8(const wchar_t *wstr, uint8_t *buf, int32_t len) {
-  if (buf == NULL || wstr == NULL) {
-    return -1;
-  }
+typedef struct UTF16_Buffer {
+  wchar_t *items;
+  size_t count;
+  size_t capacity;
+} UTF16_Buffer;
+
+typedef struct UTF8_Buffer {
+  uint8_t *items;
+  size_t count;
+  size_t capacity;
+} UTF8_Buffer;
+
+static UTF16_Buffer utf16_buf_raw = {0};
+static UTF16_Buffer utf16_buf_norm = {0};
+static UTF8_Buffer utf8_buf = {0};
+
+static inline int32_t utf16_to_utf8(const wchar_t *wstr) {
   // https://learn.microsoft.com/en-us/windows/win32/api/stringapiset/nf-stringapiset-widechartomultibyte
-  int32_t n_bytes = WideCharToMultiByte(CP_UTF8, 0, wstr, len, NULL, 0, NULL, NULL);
-  if (n_bytes <= 0) {
-    return -1;
-  }
-  n_bytes = WideCharToMultiByte(CP_UTF8, 0, wstr, len, (char *)buf, n_bytes, NULL, NULL);
-  if (n_bytes <= 0) {
-    return -1;
-  }
-  return n_bytes;
+  assert(utf8_buf.items);
+  assert(wstr);
+  // because cchWideChar is set to -1, the output is null-terminated (and len includes it)
+  // n_bytes represents the char count needed
+  int32_t n_bytes = WideCharToMultiByte(CP_UTF8, 0, wstr, -1, NULL, 0, NULL, NULL);
+  assert(n_bytes);
+  array_resize(&utf8_buf, (size_t)n_bytes);
+  return WideCharToMultiByte(CP_UTF8, 0, wstr, -1, (char *)utf8_buf.items, n_bytes, NULL, NULL);
 }
 
-static inline int32_t utf8_to_utf16(const char *utf8_str, wchar_t *buf, int32_t len) {
-  if (buf == NULL || utf8_str == NULL) {
-    return -1;
-  }
+static inline int32_t utf8_to_utf16_raw(const char *str) {
   // https://learn.microsoft.com/en-us/windows/win32/api/stringapiset/nf-stringapiset-multibytetowidechar
-  int32_t n_chars = MultiByteToWideChar(CP_UTF8, 0, utf8_str, -1, NULL, 0);
-  if (n_chars <= 0 || n_chars > len) {
-    return -1;
-  }
-  return MultiByteToWideChar(CP_UTF8, 0, utf8_str, -1, buf, len);
+  assert(utf16_buf_raw.items);
+  assert(str);
+  // because cbMultiByte is set to -1, the output is null-terminated (and len includes it)
+  // n_chars represents the wchar_t count needed
+  int32_t n_chars = MultiByteToWideChar(CP_UTF8, 0, str, -1, NULL, 0);
+  assert(n_chars);
+  array_resize(&utf16_buf_raw, (size_t)n_chars);
+  return MultiByteToWideChar(CP_UTF8, 0, str, -1, utf16_buf_raw.items, n_chars);
 }
 
-static inline int32_t utf8_to_utf16_norm(const char *str, wchar_t *buf) {
-  // uses winapi to lowercase the string, and ensures it is not empty
-  int32_t len = utf8_to_utf16(str, buf, CIN_MAX_PATH);
-  if (len <= 1) {
-    log_message(LOG_DEBUG, "Converted '%s' to empty string.", str);
-    return 0;
-  }
-  DWORD lower = CharLowerBuffW(buf, (DWORD)(len - 1)); // ignore \0
-  if ((DWORD)(len - 1) != lower) {
-    log_message(LOG_ERROR, "Processed unexpected n (%d != %d)", lower, len);
-    return 0;
-  }
-  return len;
+static inline int32_t utf8_to_utf16_norm(const char *str) {
+  int32_t len = utf8_to_utf16_raw(str);
+  assert(len);
+  // n_chars represents the possibly updated wchar_t count needed
+  int32_t n_chars = LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE,
+                                  utf16_buf_raw.items, -1, NULL, 0, NULL, NULL, 0);
+  assert(n_chars);
+  array_resize(&utf16_buf_norm, (size_t)n_chars);
+  return LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE, utf16_buf_raw.items,
+                       -1, utf16_buf_norm.items, n_chars, NULL, NULL, 0);
 }
 
 static void log_wmessage(Cin_Log_Level level, const wchar_t *wmessage, ...) {
@@ -1413,7 +1424,7 @@ static wchar_t *setup_wstring(const cJSON *json, const char *key, const wchar_t 
   wchar_t *result = NULL;
   if (cJSON_IsString(option) && option->valuestring) {
     result = malloc(sizeof(wchar_t) * CIN_MAX_PATH);
-    utf8_to_utf16(option->valuestring, result, CIN_MAX_PATH);
+    utf8_to_utf16_raw(option->valuestring);
     if (result == NULL) {
       log_wmessage(LOG_WARNING, L"Failed to convert JSON string '%s' for key '%s' to UTF-16",
                    option->valuestring, key);
@@ -1647,8 +1658,6 @@ static struct {
 #define CIN_URLS_CAP 64
 #define CIN_LAYOUT_SCREENS_CAP 8
 
-static wchar_t utf16_buf[CIN_MAX_PATH];
-static uint8_t utf8_buf[CIN_MAX_PATH_BYTES];
 static RobinHoodMap dir_map = {0};
 static RobinHoodMap pat_map = {0};
 static RobinHoodMap url_map = {0};
@@ -1656,11 +1665,11 @@ static RadixTree *tag_tree = NULL;
 static RadixTree *layout_tree = NULL;
 
 static void setup_directory(const char *path, TagDirectories *tag_dirs) {
-  int32_t len_utf16 = utf8_to_utf16_norm(path, utf16_buf);
+  int32_t len_utf16 = utf8_to_utf16_norm(path);
   assert(len_utf16);
   size_t len = (size_t)len_utf16;
   DirectoryPath root_dir = {.len = len};
-  wmemcpy(root_dir.path, utf16_buf, len);
+  wmemcpy(root_dir.path, utf16_buf_norm.items, len);
   array_push(&dir_stack, root_dir);
   while (dir_stack.count > 0) {
     DirectoryPath dir = dir_stack.items[--dir_stack.count];
@@ -1668,13 +1677,13 @@ static void setup_directory(const char *path, TagDirectories *tag_dirs) {
     assert(dir.path);
     assert(dir.len > 0);
     assert(dir.path[dir.len - 1] == L'\0');
-    int32_t bytes_i32 = utf16_to_utf8(dir.path, utf8_buf, (int32_t)dir.len);
+    int32_t bytes_i32 = utf16_to_utf8(dir.path);
     assert(bytes_i32 > 0);
     size_t bytes = (size_t)bytes_i32;
     array_reserve(&dir_string_arena, bytes + 1);
     uint8_t *k_arena = dir_string_arena.items;
     size_t k_offset = dir_string_arena.count;
-    memcpy(k_arena + k_offset, utf8_buf, bytes);
+    memcpy(k_arena + k_offset, utf8_buf.items, bytes);
     size_t node_tail = dir_node_arena.count;
     // TODO: if an unmatched directory is inserted, its next occurence
     // will think that the current node_tail is correct, when it is not
@@ -1752,9 +1761,9 @@ static void setup_directory(const char *path, TagDirectories *tag_dirs) {
         array_push(&dir_stack, nested_path);
       } else {
         wmemcpy(dir.path + dir.len, file, file_len);
-        int32_t utf8_len = utf16_to_utf8(dir.path, utf8_buf, (int32_t)path_len);
+        int32_t utf8_len = utf16_to_utf8(dir.path);
         array_push(node, locals.doc_count);
-        locals_append(utf8_buf, utf8_len);
+        locals_append(utf8_buf.items, utf8_len);
       }
     } while (FindNextFileW(search, &data) != 0);
     if (GetLastError() != ERROR_NO_MORE_FILES) {
@@ -1769,23 +1778,23 @@ static inline void setup_pattern(const char *pattern, TagPatternItems *tag_patte
   // Processes all files (not directories) that match the pattern
   // https://support.microsoft.com/en-us/office/examples-of-wildcard-characters-939e153f-bd30-47e4-a763-61897c87b3f4
   // TODO: explain allowed patterns (e.g., wildcards) in readme/json examples
-  int32_t len_utf16 = utf8_to_utf16_norm(pattern, utf16_buf);
+  int32_t len_utf16 = utf8_to_utf16_norm(pattern);
   assert(len_utf16);
-  assert(utf16_buf[len_utf16 - 1] == L'\0');
-  wchar_t *separator = wcsrchr(utf16_buf, L'\\');
+  assert(utf16_buf_norm.items[len_utf16 - 1] == L'\0');
+  wchar_t *separator = wcsrchr(utf16_buf_norm.items, L'\\');
   if (separator == NULL || *(separator + 1) == L'\0') {
     log_message(LOG_ERROR, "Not a valid pattern: '%s', end properly with '\\...'", pattern);
     return;
   }
-  size_t dir_len = (size_t)(separator - utf16_buf) + 1;
+  size_t dir_len = (size_t)(separator - utf16_buf_norm.items) + 1;
   if (dir_len > CIN_MAX_PATH) {
     log_message(LOG_ERROR, "Pattern '%s' is too long (max=%d)", pattern, CIN_MAX_PATH);
     return;
   }
-  wchar_t prev_tail = utf16_buf[dir_len];
-  utf16_buf[dir_len] = L'\0';
+  wchar_t prev_tail = utf16_buf_norm.items[dir_len];
+  utf16_buf_norm.items[dir_len] = L'\0';
   static wchar_t abs_buf[CIN_MAX_PATH];
-  DWORD abs_len = GetFullPathNameW(utf16_buf, CIN_MAX_PATH, abs_buf, NULL);
+  DWORD abs_len = GetFullPathNameW(utf16_buf_norm.items, CIN_MAX_PATH, abs_buf, NULL);
   if (abs_len == 0 || abs_len > CIN_MAX_PATH) {
     log_wmessage(LOG_ERROR, L"Pattern '%ls' full path '%ls' is empty or too long (max=%d)",
                  pattern, abs_buf, CIN_MAX_PATH);
@@ -1796,13 +1805,13 @@ static inline void setup_pattern(const char *pattern, TagPatternItems *tag_patte
     abs_buf[abs_len++] = L'\\';
     abs_buf[abs_len] = L'\0';
   }
-  utf16_buf[dir_len] = prev_tail;
+  utf16_buf_norm.items[dir_len] = prev_tail;
   WIN32_FIND_DATAW data;
-  HANDLE search = FindFirstFileExW(utf16_buf, FindExInfoBasic, &data,
+  HANDLE search = FindFirstFileExW(utf16_buf_norm.items, FindExInfoBasic, &data,
                                    FindExSearchNameMatch, NULL,
                                    FIND_FIRST_EX_LARGE_FETCH);
   if (search == INVALID_HANDLE_VALUE) {
-    log_last_error("Failed to match pattern '%ls'", utf16_buf);
+    log_last_error("Failed to match pattern '%ls'", utf16_buf_norm.items);
     return;
   }
   static const DWORD file_mask = FILE_ATTRIBUTE_DIRECTORY |
@@ -1820,7 +1829,7 @@ static inline void setup_pattern(const char *pattern, TagPatternItems *tag_patte
       continue; // skip absolute path (+ NUL) if silently truncated
     }
     wmemcpy(abs_buf + abs_len, file, file_len);
-    int32_t len = utf16_to_utf8(abs_buf, utf8_buf, path_len);
+    int32_t len = utf16_to_utf8(abs_buf);
     // TODO: Because we sequentially parse the config, it is technically possible
     // that a directory was setup which contains files that match the current pattern.
     // This means that the locals array can contain duplicates in that case. While not
@@ -1828,7 +1837,7 @@ static inline void setup_pattern(const char *pattern, TagPatternItems *tag_patte
     // the directory setup, by using some pattern heuristics (e.g., directory hash)
     size_t tail_offset = (size_t)locals.bytes;
     int32_t tail_doc = locals.doc_count;
-    locals_append(utf8_buf, len);
+    locals_append(utf8_buf.items, len);
     int32_t dup_doc = rh_insert(&pat_map, locals.text, tail_offset, (size_t)len, tail_doc);
     if (dup_doc >= 0) {
       locals.bytes -= len;
@@ -1849,12 +1858,12 @@ static inline void setup_pattern(const char *pattern, TagPatternItems *tag_patte
 }
 
 static inline void setup_url(const char *url, TagUrlItems *tag_url_items) {
-  int32_t len_utf16 = utf8_to_utf16_norm(url, utf16_buf);
+  int32_t len_utf16 = utf8_to_utf16_norm(url);
   assert(len_utf16);
-  int32_t len_utf8 = utf16_to_utf8(utf16_buf, utf8_buf, len_utf16);
+  int32_t len_utf8 = utf16_to_utf8(utf16_buf_norm.items);
   size_t tail_offset = (size_t)locals.bytes;
   int32_t tail_doc = locals.doc_count;
-  locals_append(utf8_buf, len_utf8);
+  locals_append(utf8_buf.items, len_utf8);
   int32_t dup_doc = rh_insert(&url_map, locals.text, tail_offset, (size_t)len_utf8, tail_doc);
   if (dup_doc >= 0) {
     locals.bytes -= len_utf8;
@@ -1870,11 +1879,11 @@ static inline void setup_url(const char *url, TagUrlItems *tag_url_items) {
 }
 
 static inline void setup_tag(const char *tag, TagItems *tag_items) {
-  int32_t len_utf16 = utf8_to_utf16_norm(tag, utf16_buf);
+  int32_t len_utf16 = utf8_to_utf16_norm(tag);
   assert(len_utf16);
-  int32_t len_utf8 = utf16_to_utf8(utf16_buf, utf8_buf, len_utf16);
+  int32_t len_utf8 = utf16_to_utf8(utf16_buf_norm.items);
   assert(len_utf8);
-  radix_insert(tag_tree, utf8_buf, (size_t)len_utf8, tag_items);
+  radix_insert(tag_tree, utf8_buf.items, (size_t)len_utf8, tag_items);
 }
 
 static inline void setup_screen(const char *geometry, size_t bytes, Cin_Layout *layout) {
@@ -1884,11 +1893,11 @@ static inline void setup_screen(const char *geometry, size_t bytes, Cin_Layout *
 }
 
 static inline void setup_layout(const char *name, Cin_Layout *layout) {
-  int32_t len_utf16 = utf8_to_utf16_norm(name, utf16_buf);
+  int32_t len_utf16 = utf8_to_utf16_norm(name);
   assert(len_utf16);
-  int32_t len_utf8 = utf16_to_utf8(utf16_buf, utf8_buf, len_utf16);
+  int32_t len_utf8 = utf16_to_utf8(utf16_buf_norm.items);
   assert(len_utf8);
-  radix_insert(layout_tree, utf8_buf, (size_t)len_utf8, layout);
+  radix_insert(layout_tree, utf8_buf.items, (size_t)len_utf8, layout);
 }
 
 #define FOREACH_PART(k, part, bytes)                                                                   \
@@ -1901,11 +1910,14 @@ static inline void setup_layout(const char *name, Cin_Layout *layout) {
 
 static bool init_config(const char *filename) {
   if (!parse_config(filename)) return false;
+  array_alloc(&utf16_buf_raw, CIN_MAX_PATH);
+  array_alloc(&utf16_buf_norm, CIN_MAX_PATH);
+  array_alloc(&utf8_buf, CIN_MAX_PATH_BYTES);
   table_calloc(&dir_map, CIN_DIRECTORIES_CAP);
-  dir_map.mask = dir_map.capacity - 1;
   table_calloc(&pat_map, CIN_PATTERN_ITEMS_CAP);
-  pat_map.mask = pat_map.capacity - 1;
   table_calloc(&url_map, CIN_URLS_CAP);
+  dir_map.mask = dir_map.capacity - 1;
+  pat_map.mask = pat_map.capacity - 1;
   url_map.mask = url_map.capacity - 1;
   array_alloc(&dir_node_arena, CIN_DIRECTORIES_CAP);
   array_alloc(&dir_string_arena, CIN_DIRECTORY_STRINGS_CAP);
@@ -2912,9 +2924,9 @@ int main(int argc, char **argv) {
   if (!init_config("cinema.conf")) exit(1);
   // init_commands();
   if (!init_document_listing()) exit(1);
-  uint8_t pattern[] = "twitch.tv";
-  document_listing(pattern, (int32_t)strlen((const char *)pattern));
-  exit(1);
+  // uint8_t pattern[] = "twitch.tv";
+  // document_listing(pattern, (int32_t)strlen((const char *)pattern));
+  // exit(1);
   // NOTE: It seems impossible to reach outside the bounds of the viewport
   // within Windows Terminal using a custom ReadConsoleInput approach. Virtual
   // terminal sequences and related APIs are bound to the viewport. So,
@@ -3146,6 +3158,7 @@ int main(int argc, char **argv) {
       }
     }
     set_preview_pos(preview_line);
+    update_preview();
     log_preview();
   }
   if (!SetConsoleMode(repl.in, repl.in_mode)) {
