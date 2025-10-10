@@ -1800,6 +1800,11 @@ static inline void setup_pattern(const char *pattern, TagPatternItems *tag_patte
     }
     wmemcpy(abs_buf + abs_len, file, file_len);
     int32_t len = utf16_to_utf8(abs_buf, utf8_buf, path_len);
+    // TODO: Because we sequentially parse the config, it is technically possible
+    // that a directory was setup which contains files that match the current pattern.
+    // This means that the locals array can contain duplicates in that case. While not
+    // a big deal, it can probably be addressed without having to hash every file in
+    // the directory setup, by using some pattern heuristics (e.g., directory hash)
     size_t tail_offset = (size_t)locals.bytes;
     int32_t tail_doc = locals.doc_count;
     locals_append(utf8_buf, len);
@@ -1864,7 +1869,6 @@ static bool init_config(const char *filename) {
   array_alloc(&dir_node_arena, CIN_DIRECTORIES_CAP);
   array_alloc(&dir_string_arena, CIN_DIRECTORY_STRINGS_CAP);
   tag_tree = radix_tree();
-  // TODO: parallelize for large n
   for (size_t i = 1; i < conf_parser.scopes.count; ++i) {
     Conf_Scope *scope = &conf_parser.scopes.items[i];
     log_message(LOG_DEBUG, "[Scope %zu: %zu]", i, scope->type);
@@ -1900,13 +1904,6 @@ static bool init_config(const char *filename) {
         log_wmessage(LOG_DEBUG, L"Directory: %ls", utf16_buf);
         setup_directory(part, tag_items->directories);
       }
-      // NOTE: At this point, if there are any tags, the TagDirectories
-      // struct contains an array of indices for the directory node arena.
-      // This can contain duplicates, the idea is to lazily evaluate it
-      // (i.e., when the tag is requested). When that happens, TagDirectories
-      // should be deduplicated, and each index should be used as a starting
-      // point to iterate from, collecting all files until the directory
-      // depth is equal to the starting position.
       FOREACH_PART(&scope->media.patterns, part, len) {
         part[len] = '\0';
         log_message(LOG_DEBUG, "Pattern: %s", part);
@@ -1922,15 +1919,14 @@ static bool init_config(const char *filename) {
         log_message(LOG_DEBUG, "Tag: %s", part);
         setup_tag(part, tag_items);
       }
-      radix_v v = radix_query(tag_tree, "s");
-      if (v) {
-        TagItems *tag_items2 = v;
-        log_message(LOG_INFO, "Found: %d", tag_items2->url_items->count);
-        for (size_t i2 = 0; i2 < tag_items2->url_items->count; ++i2) {
-          log_message(LOG_INFO, "id: %d", tag_items2->url_items->items[i2]);
-        }
-        exit(1);
-      }
+      // NOTE: Each tag corresponding to this media scope now points to the same
+      // TagItems address. In it, 'patterns' and 'urls' contain document ids (possibly
+      // with duplicates). Its 'directories' is a TagDirectories struct, where each
+      // item is an index into a global DirectoryNode arena (possibly with duplicates)
+      // - these nodes contain a list of unique document ids. Given example directory
+      // A:\b\c\, the node arena must be traversed starting there up to an index where
+      // the first document in the list does not start with A:\b\c\ (so we simulate
+      // a correct recursive directory traversal, lazily, i.e., when tag is requested)
       array_free(scope->media.directories);
       array_free(scope->media.patterns);
       array_free(scope->media.urls);
@@ -1948,10 +1944,10 @@ static bool init_config(const char *filename) {
     uint8_t *tight = realloc(locals.text, (size_t)locals.bytes);
     if (tight != NULL) {
       locals.text = tight;
+      locals.max_bytes = locals.bytes;
+      locals.bytes_mul32 = (size_t)locals.bytes * sizeof(int32_t);
+      locals.doc_mul32 = (size_t)locals.doc_count * sizeof(int32_t);
     }
-    locals.max_bytes = locals.bytes;
-    locals.bytes_mul32 = (size_t)locals.bytes * sizeof(int32_t);
-    locals.doc_mul32 = (size_t)locals.doc_count * sizeof(int32_t);
   }
   log_message(LOG_INFO, "Setup media library with %d items (%d bytes)",
               locals.doc_count, locals.bytes);
