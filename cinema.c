@@ -1605,9 +1605,29 @@ typedef struct TagDirectories {
   size_t capacity;
 } TagDirectories;
 
+typedef struct TagPatternItems {
+  int32_t *items;
+  size_t count;
+  size_t capacity;
+} TagPatternItems;
+
+typedef struct TagUrlItems {
+  int32_t *items;
+  size_t count;
+  size_t capacity;
+} TagUrlItems;
+
+typedef struct TagItems {
+  TagDirectories *directories;
+  TagPatternItems *pattern_items;
+  TagUrlItems *url_items;
+} TagItems;
+
 #define CIN_DIRECTORIES_CAP 64
 #define CIN_DIRECTORY_ITEMS_CAP 64
 #define CIN_DIRECTORY_STRINGS_CAP (CIN_DIRECTORIES_CAP * CIN_MAX_PATH_BYTES)
+#define CIN_PATTERN_ITEMS_CAP 64
+#define CIN_URLS_CAP 64
 
 static wchar_t utf16_buf[CIN_MAX_PATH];
 static uint8_t utf8_buf[CIN_MAX_PATH_BYTES];
@@ -1721,7 +1741,9 @@ static void setup_directory(const char *path, TagDirectories *tag_dirs) {
   assert(dir_stack.count == 0);
 }
 
-static inline void setup_pattern(const char *pattern) {
+static RobinHoodMap pat_map = {0};
+
+static inline void setup_pattern(const char *pattern, TagPatternItems *tag_pattern_items) {
   // Processes all files (not directories) that match the pattern
   // https://support.microsoft.com/en-us/office/examples-of-wildcard-characters-939e153f-bd30-47e4-a763-61897c87b3f4
   // TODO: explain allowed patterns (e.g., wildcards) in readme/json examples
@@ -1777,7 +1799,17 @@ static inline void setup_pattern(const char *pattern) {
     }
     wmemcpy(abs_buf + abs_len, file, file_len);
     int32_t len = utf16_to_utf8(abs_buf, utf8_buf, path_len);
+    int32_t tail_offset = locals.bytes;
+    int32_t tail_doc = locals.doc_count;
     locals_append(utf8_buf, len);
+    int32_t dup_doc = rh_insert(&pat_map, locals.text, tail_offset, len, tail_doc);
+    if (dup_doc >= 0) {
+      locals.bytes -= len;
+      --locals.doc_count;
+      array_push(tag_pattern_items, dup_doc);
+    } else {
+      array_push(tag_pattern_items, tail_doc);
+    }
   } while (FindNextFileW(search, &data) != 0);
   if (GetLastError() != ERROR_NO_MORE_FILES) {
     log_last_error("Failed to find next file");
@@ -1785,21 +1817,22 @@ static inline void setup_pattern(const char *pattern) {
   FindClose(search);
 }
 
-static bool setup_url(const wchar_t *url) {
-  int len = utf16_to_utf8(url, utf8_buf, -1);
-  locals_append(utf8_buf, len);
-  return true;
+static inline void setup_url(const char *url) {
+  int32_t len_utf16 = utf8_to_utf16_norm(url, utf16_buf);
+  assert(len_utf16);
+  int32_t len_utf8 = utf16_to_utf8(utf16_buf, utf8_buf, len_utf16);
+  locals_append(utf8_buf, len_utf8);
 }
 
 static RadixTree *tag_tree = NULL;
 
-static inline void setup_tag(const char *tag, TagDirectories *tag_dirs) {
+static inline void setup_tag(const char *tag, TagItems *tag_items) {
   int32_t len_utf16 = utf8_to_utf16_norm(tag, utf16_buf);
   assert(len_utf16);
   int32_t len_utf8 = utf16_to_utf8(utf16_buf, utf8_buf, len_utf16);
   assert(len_utf8);
   size_t len = (size_t)len_utf8;
-  radix_insert(tag_tree, utf8_buf, len, tag_dirs);
+  radix_insert(tag_tree, utf8_buf, len, tag_items);
 }
 
 #define FOREACH_PART(k, part, len)                                                                     \
@@ -1815,6 +1848,8 @@ static bool init_config(const char *filename) {
   Conf_Root *root = &conf_parser.scopes.items[0].root;
   table_calloc(&dir_map, CIN_DIRECTORIES_CAP);
   dir_map.mask = dir_map.capacity - 1;
+  table_calloc(&pat_map, CIN_PATTERN_ITEMS_CAP);
+  pat_map.mask = pat_map.capacity - 1;
   array_alloc(&dir_node_arena, CIN_DIRECTORIES_CAP);
   array_alloc(&dir_string_arena, CIN_DIRECTORY_STRINGS_CAP);
   tag_tree = radix_tree();
@@ -1833,15 +1868,26 @@ static bool init_config(const char *filename) {
       array_free(scope->layout.screen);
     } break;
     case CONF_SCOPE_MEDIA: {
-      TagDirectories *tag_dirs = NULL;
+      TagItems *tag_items = NULL;
       if (scope->media.tags.count) {
-        tag_dirs = malloc(sizeof(TagDirectories));
-        array_alloc(tag_dirs, CIN_DIRECTORIES_CAP);
+        tag_items = calloc(1, sizeof(TagItems));
+        if (scope->media.directories.count) {
+          tag_items->directories = malloc(sizeof(*tag_items->directories));
+          array_alloc(tag_items->directories, CIN_DIRECTORIES_CAP);
+        }
+        if (scope->media.patterns.count) {
+          tag_items->pattern_items = malloc(sizeof(*tag_items->pattern_items));
+          array_alloc(tag_items->pattern_items, scope->media.patterns.count);
+        }
+        if (scope->media.urls.count) {
+          tag_items->url_items = malloc(sizeof(*tag_items->url_items));
+          array_alloc(tag_items->url_items, scope->media.urls.count);
+        }
       }
       FOREACH_PART(&scope->media.directories, part, len) {
         part[len] = '\0';
-        // log_wmessage(LOG_DEBUG, L"Directory: %ls", utf16_buf);
-        // setup_directory(part, tag_dirs);
+        log_wmessage(LOG_DEBUG, L"Directory: %ls", utf16_buf);
+        setup_directory(part, tag_items->directories);
       }
       // NOTE: At this point, if there are any tags, the TagDirectories
       // struct contains an array of indices for the directory node arena.
@@ -1850,22 +1896,11 @@ static bool init_config(const char *filename) {
       // should be deduplicated, and each index should be used as a starting
       // point to iterate from, collecting all files until the directory
       // depth is equal to the starting position.
-      if (tag_dirs) {
-        // log_message(LOG_INFO, "START tag_dirs: %d", tag_dirs->count);
-        // for (size_t i = 0; i < tag_dirs->count; ++i) {
-        //   log_message(LOG_INFO, "%d", dir_node_arena.items[tag_dirs->items[i]].count);
-        // }
-        // log_message(LOG_INFO, "START dir_node_arena: %d", dir_node_arena.count);
-        // for (size_t i = 0; i < dir_node_arena.count; ++i) {
-        //   log_message(LOG_INFO, "%d", dir_node_arena.items[i].count);
-        // }
-      }
       FOREACH_PART(&scope->media.patterns, part, len) {
         part[len] = '\0';
         log_message(LOG_DEBUG, "Pattern: %s", part);
-        setup_pattern(part);
+        setup_pattern(part, tag_items->pattern_items);
       }
-      exit(1);
       FOREACH_PART(&scope->media.urls, part, len) {
         part[len] = '\0';
         int32_t len_utf16 = utf8_to_utf16_norm(part, utf16_buf);
@@ -1876,12 +1911,16 @@ static bool init_config(const char *filename) {
       FOREACH_PART(&scope->media.tags, part, len) {
         part[len] = '\0';
         log_message(LOG_DEBUG, "Tag: %s", part);
-        setup_tag(part, tag_dirs);
+        setup_tag(part, tag_items);
       }
       radix_v v = radix_query(tag_tree, "s");
       if (v) {
-        TagDirectories *tagz = v;
-        log_message(LOG_INFO, "Found: %d", tagz->count);
+        TagItems *tag_items = v;
+        log_message(LOG_INFO, "Found: %d", tag_items->pattern_items->count);
+        for (size_t i = 0; i < tag_items->pattern_items->count; ++i) {
+          log_message(LOG_INFO, "id: %d", tag_items->pattern_items->items[i]);
+        }
+        exit(1);
       }
       array_free(scope->media.directories);
       array_free(scope->media.patterns);
