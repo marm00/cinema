@@ -46,7 +46,7 @@ typedef enum {
   LOG_TRACE
 } Cin_Log_Level;
 
-static const Cin_Log_Level GLOBAL_LOG_LEVEL = LOG_INFO;
+static const Cin_Log_Level GLOBAL_LOG_LEVEL = LOG_TRACE;
 static const char *LOG_LEVELS[LOG_TRACE + 1] = {"ERROR", "WARNING", "INFO", "DEBUG", "TRACE"};
 
 #define CIN_ARRAY_CAP 256
@@ -1552,7 +1552,7 @@ static inline int32_t rh_insert(RobinHoodMap *map, uint8_t *k_arena, size_t k_of
   while (map->items[i].filled) {
     uint8_t *i_k = k_arena + map->items[i].k_offset;
     if (map->items[i].hash == hash && strcmp((char *)i_k, (char *)k) == 0) {
-      log_message(LOG_WARNING, "Found duplicate key '%s' in hashmap", k);
+      log_message(LOG_DEBUG, "Found duplicate key '%s' in hashmap", k);
       return map->items[i].v;
     }
     size_t cur_dist = (i - (map->items[i].hash & map->mask)) & map->mask;
@@ -1615,13 +1615,16 @@ static wchar_t utf16_buf[CIN_MAX_PATH];
 static uint8_t utf8_buf[CIN_MAX_PATH_BYTES];
 static RobinHoodMap dir_map = {0};
 
-static void setup_directory(wchar_t *path, size_t len, TagDirectories *tag_dirs) {
+static void setup_directory(const char *path, TagDirectories *tag_dirs) {
+  int32_t len_utf16 = utf8_to_utf16_norm(path, utf16_buf);
+  assert(len_utf16);
+  size_t len = (size_t)len_utf16;
   DirectoryPath root_dir = {.len = len};
-  wmemcpy(root_dir.path, path, len);
+  wmemcpy(root_dir.path, utf16_buf, len);
   array_push(&dir_stack, root_dir);
   while (dir_stack.count > 0) {
     DirectoryPath dir = dir_stack.items[--dir_stack.count];
-    log_wmessage(LOG_INFO, L"Path: %ls", dir.path);
+    log_wmessage(LOG_DEBUG, L"Path: %ls", dir.path);
     assert(dir.path);
     assert(dir.len > 0);
     assert(dir.path[dir.len - 1] == L'\0');
@@ -1643,7 +1646,7 @@ static void setup_directory(wchar_t *path, size_t len, TagDirectories *tag_dirs)
       assert(dup_node >= dir_node_arena.items);
       assert(dup_node < dir_node_arena.items + dir_node_arena.count);
       for (DirectoryNode *p = dup_node; p < dir_node_arena.items + dir_node_arena.count; ++p) {
-        log_message(LOG_INFO, "count=%llu", p->count);
+        // log_message(LOG_INFO, "count=%llu", p->count);
       }
       if (tag_dirs) {
         array_push(tag_dirs, dup_index);
@@ -1789,6 +1792,8 @@ static bool setup_url(const wchar_t *url) {
   return true;
 }
 
+static RadixTree *tag_tree = NULL;
+
 static bool setup_tag(const wchar_t *tag) {
   utf16_to_utf8(tag, (char *)utf8_buf, -1);
   // locals_append(utf8_buf, len);
@@ -1810,6 +1815,8 @@ static bool init_config(const char *filename) {
   dir_map.mask = dir_map.capacity - 1;
   array_alloc(&dir_node_arena, CIN_DIRECTORIES_CAP);
   array_alloc(&dir_string_arena, CIN_DIRECTORY_STRINGS_CAP);
+  tag_tree = radix_tree();
+  assert(tag_tree);
   // TODO: parallelize for large n
   for (size_t i = 1; i < conf_parser.scopes.count; ++i) {
     Conf_Scope *scope = &conf_parser.scopes.items[i];
@@ -1825,7 +1832,6 @@ static bool init_config(const char *filename) {
       array_free(scope->layout.screen);
     } break;
     case CONF_SCOPE_MEDIA: {
-      RadixTree *tree = radix_tree();
       TagDirectories *tag_dirs = NULL;
       if (scope->media.tags.count) {
         tag_dirs = malloc(sizeof(TagDirectories));
@@ -1833,10 +1839,8 @@ static bool init_config(const char *filename) {
       }
       FOREACH_PART(&scope->media.directories, part, len) {
         part[len] = '\0';
-        int32_t len_utf16 = utf8_to_utf16_norm(part, utf16_buf);
-        assert(len_utf16);
-        log_wmessage(LOG_INFO, L"Directory: %ls", utf16_buf);
-        setup_directory(utf16_buf, (size_t)len_utf16, tag_dirs);
+        log_wmessage(LOG_DEBUG, L"Directory: %ls", utf16_buf);
+        setup_directory(part, tag_dirs);
       }
       // NOTE: At this point, if there are any tags, the TagDirectories
       // struct contains an array of indices for the directory node arena.
@@ -1846,14 +1850,14 @@ static bool init_config(const char *filename) {
       // point to iterate from, collecting all files until the directory
       // depth is equal to the starting position.
       if (tag_dirs) {
-        log_message(LOG_INFO, "START tag_dirs: %d", tag_dirs->count);
-        for (size_t i = 0; i < tag_dirs->count; ++i) {
-          log_message(LOG_INFO, "%d", dir_node_arena.items[tag_dirs->items[i]].count);
-        }
-        log_message(LOG_INFO, "START dir_node_arena: %d", dir_node_arena.count);
-        for (size_t i = 0; i < dir_node_arena.count; ++i) {
-          log_message(LOG_INFO, "%d", dir_node_arena.items[i].count);
-        }
+        // log_message(LOG_INFO, "START tag_dirs: %d", tag_dirs->count);
+        // for (size_t i = 0; i < tag_dirs->count; ++i) {
+        //   log_message(LOG_INFO, "%d", dir_node_arena.items[tag_dirs->items[i]].count);
+        // }
+        // log_message(LOG_INFO, "START dir_node_arena: %d", dir_node_arena.count);
+        // for (size_t i = 0; i < dir_node_arena.count; ++i) {
+        //   log_message(LOG_INFO, "%d", dir_node_arena.items[i].count);
+        // }
       }
       exit(1);
       FOREACH_PART(&scope->media.patterns, part, len) {
@@ -1872,7 +1876,9 @@ static bool init_config(const char *filename) {
       }
       FOREACH_PART(&scope->media.tags, part, len) {
         part[len] = '\0';
+        int32_t len_utf16 = utf8_to_utf16_norm(part, utf16_buf);
         log_message(LOG_DEBUG, "Tag: %s", part);
+        // radix_insert(tag_tree, part, tag_dirs);
       }
       array_free(scope->media.directories);
       array_free(scope->media.patterns);
