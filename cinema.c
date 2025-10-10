@@ -46,7 +46,7 @@ typedef enum {
   LOG_TRACE
 } Cin_Log_Level;
 
-static const Cin_Log_Level GLOBAL_LOG_LEVEL = LOG_TRACE;
+static const Cin_Log_Level GLOBAL_LOG_LEVEL = LOG_DEBUG;
 static const char *LOG_LEVELS[LOG_TRACE + 1] = {"ERROR", "WARNING", "INFO", "DEBUG", "TRACE"};
 
 #define CIN_ARRAY_CAP 256
@@ -1636,7 +1636,7 @@ static RobinHoodMap pat_map = {0};
 static RobinHoodMap url_map = {0};
 static RadixTree *tag_tree = NULL;
 
-static inline void setup_directory(const char *path, TagDirectories *tag_dirs) {
+static void setup_directory(const char *path, TagDirectories *tag_dirs) {
   int32_t len_utf16 = utf8_to_utf16_norm(path, utf16_buf);
   assert(len_utf16);
   size_t len = (size_t)len_utf16;
@@ -1812,9 +1812,13 @@ static inline void setup_pattern(const char *pattern, TagPatternItems *tag_patte
     if (dup_doc >= 0) {
       locals.bytes -= len;
       --locals.doc_count;
-      array_push(tag_pattern_items, dup_doc);
+      if (tag_pattern_items) {
+        array_push(tag_pattern_items, dup_doc);
+      }
     } else {
-      array_push(tag_pattern_items, tail_doc);
+      if (tag_pattern_items) {
+        array_push(tag_pattern_items, tail_doc);
+      }
     }
   } while (FindNextFileW(search, &data) != 0);
   if (GetLastError() != ERROR_NO_MORE_FILES) {
@@ -1834,9 +1838,13 @@ static inline void setup_url(const char *url, TagUrlItems *tag_url_items) {
   if (dup_doc >= 0) {
     locals.bytes -= len_utf8;
     --locals.doc_count;
-    array_push(tag_url_items, dup_doc);
+    if (tag_url_items) {
+      array_push(tag_url_items, dup_doc);
+    }
   } else {
-    array_push(tag_url_items, tail_doc);
+    if (tag_url_items) {
+      array_push(tag_url_items, tail_doc);
+    }
   }
 }
 
@@ -1884,35 +1892,41 @@ static bool init_config(const char *filename) {
     } break;
     case CONF_SCOPE_MEDIA: {
       TagItems *tag_items = NULL;
+      TagDirectories *tag_directories = NULL;
+      TagPatternItems *tag_pattern_items = NULL;
+      TagUrlItems *tag_url_items = NULL;
       if (scope->media.tags.count) {
         tag_items = calloc(1, sizeof(TagItems));
         if (scope->media.directories.count) {
           tag_items->directories = malloc(sizeof(*tag_items->directories));
           array_alloc(tag_items->directories, CIN_DIRECTORIES_CAP);
+          tag_directories = tag_items->directories;
         }
         if (scope->media.patterns.count) {
           tag_items->pattern_items = malloc(sizeof(*tag_items->pattern_items));
           array_alloc(tag_items->pattern_items, scope->media.patterns.count);
+          tag_pattern_items = tag_items->pattern_items;
         }
         if (scope->media.urls.count) {
           tag_items->url_items = malloc(sizeof(*tag_items->url_items));
           array_alloc(tag_items->url_items, scope->media.urls.count);
+          tag_url_items = tag_items->url_items;
         }
       }
       FOREACH_PART(&scope->media.directories, part, len) {
         part[len] = '\0';
-        log_wmessage(LOG_DEBUG, L"Directory: %ls", utf16_buf);
-        setup_directory(part, tag_items->directories);
+        log_message(LOG_DEBUG, "Directory: %s", part);
+        setup_directory(part, tag_directories);
       }
       FOREACH_PART(&scope->media.patterns, part, len) {
         part[len] = '\0';
         log_message(LOG_DEBUG, "Pattern: %s", part);
-        setup_pattern(part, tag_items->pattern_items);
+        setup_pattern(part, tag_pattern_items);
       }
       FOREACH_PART(&scope->media.urls, part, len) {
         part[len] = '\0';
         log_message(LOG_DEBUG, "URL: %s", part);
-        setup_url(part, tag_items->url_items);
+        setup_url(part, tag_url_items);
       }
       FOREACH_PART(&scope->media.tags, part, len) {
         part[len] = '\0';
@@ -2038,7 +2052,7 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len) {
   }
 }
 
-static bool setup_substring_search(void) {
+static bool init_document_listing(void) {
   gsa = malloc(locals.bytes_mul32);
 #if defined(LIBSAIS_OPENMP)
   int32_t result = libsais_gsa_omp(locals.text, gsa, locals.bytes, 0, NULL, 0);
@@ -2862,22 +2876,11 @@ int main(int argc, char **argv) {
   if (!init_timers()) exit(1);
   if (!init_config("cinema.conf")) exit(1);
   // init_commands();
-  init_tags();
+  // init_tags();
+  if (!init_document_listing()) exit(1);
+  uint8_t pattern[] = "twitch.tv";
+  document_listing(pattern, (int32_t)strlen((const char *)pattern));
   exit(1);
-  char *config_filename = "config.json";
-  cJSON *json = parse_json(config_filename);
-  if (json == NULL) {
-    return 1;
-  }
-  char *string = cJSON_Print(json);
-  if (string == NULL) {
-    log_message(LOG_ERROR, "Failed to print cJSON items from config tree with cJSON_Print.");
-  } else {
-    // log_message(LOG_INFO,  string);
-  }
-  setup_substring_search();
-  // uint8_t pattern[] = "test";
-  // document_listing(pattern, (int32_t)strlen((const char *)pattern));
   // NOTE: It seems impossible to reach outside the bounds of the viewport
   // within Windows Terminal using a custom ReadConsoleInput approach. Virtual
   // terminal sequences and related APIs are bound to the viewport. So,
@@ -3124,7 +3127,7 @@ int main(int argc, char **argv) {
   }
   return 0;
 
-  wchar_t *name = setup_wstring(json, "path", NULL);
+  wchar_t *name = L"D:\\Test\\0_561mb.mp4";
   if (name == NULL) {
     log_message(LOG_ERROR, "No valid 'path' found in config");
     return 1;
