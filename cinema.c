@@ -1721,46 +1721,49 @@ static void setup_directory(const char *path, TagDirectories *tag_dirs) {
   assert(dir_stack.count == 0);
 }
 
-static bool setup_pattern(const wchar_t *pattern) {
+static inline void setup_pattern(const char *pattern) {
   // Processes all files (not directories) that match the pattern
   // https://support.microsoft.com/en-us/office/examples-of-wildcard-characters-939e153f-bd30-47e4-a763-61897c87b3f4
   // TODO: explain allowed patterns (e.g., wildcards) in readme/json examples
-  wchar_t *separator = wcsrchr(pattern, L'\\');
+  int32_t len_utf16 = utf8_to_utf16_norm(pattern, utf16_buf);
+  assert(len_utf16);
+  assert(utf16_buf[len_utf16 - 1] == L'\0');
+  wchar_t *separator = wcsrchr(utf16_buf, L'\\');
   if (separator == NULL || *(separator + 1) == L'\0') {
-    return false;
+    log_message(LOG_ERROR, "Not a valid pattern: '%s', end properly with '\\...'", pattern);
+    return;
   }
-  size_t dir_len = (size_t)(separator - pattern) + 1;
+  size_t dir_len = (size_t)(separator - utf16_buf) + 1;
   if (dir_len > CIN_MAX_PATH) {
-    return false;
+    log_message(LOG_ERROR, "Pattern '%s' is too long (max=%d)", pattern, CIN_MAX_PATH);
+    return;
   }
-  wchar_t dir_buf[CIN_MAX_PATH];
-  wmemcpy(dir_buf, pattern, dir_len);
-  dir_buf[dir_len] = L'\0';
-  wchar_t abs_buf[CIN_MAX_PATH];
-  DWORD abs_dword = GetFullPathNameW(dir_buf, CIN_MAX_PATH, abs_buf, NULL);
-  if (abs_dword == 0 || abs_dword > CIN_MAX_PATH) {
-    return false;
+  wchar_t prev_tail = utf16_buf[dir_len];
+  utf16_buf[dir_len] = L'\0';
+  static wchar_t abs_buf[CIN_MAX_PATH];
+  DWORD abs_len = GetFullPathNameW(utf16_buf, CIN_MAX_PATH, abs_buf, NULL);
+  if (abs_len == 0 || abs_len > CIN_MAX_PATH) {
+    log_wmessage(LOG_ERROR, L"Pattern '%ls' full path '%ls' is empty or too long (max=%d)",
+                 pattern, abs_buf, CIN_MAX_PATH);
+    return;
   }
   log_wmessage(LOG_INFO, L"pattern: %ls", abs_buf);
-  // abs_len is essentially the same as abs_dword,
-  // we can safely add backslash here
-  size_t abs_len = wcslen(abs_buf);
   if (abs_buf[abs_len - 1] != L'\\') {
     abs_buf[abs_len++] = L'\\';
     abs_buf[abs_len] = L'\0';
   }
+  utf16_buf[dir_len] = prev_tail;
   WIN32_FIND_DATAW data;
-  HANDLE search = FindFirstFileExW(pattern, FindExInfoBasic, &data,
+  HANDLE search = FindFirstFileExW(utf16_buf, FindExInfoBasic, &data,
                                    FindExSearchNameMatch, NULL,
                                    FIND_FIRST_EX_LARGE_FETCH);
   if (search == INVALID_HANDLE_VALUE) {
-    log_last_error("Failed to match pattern '%ls'", pattern);
-    return false;
+    log_last_error("Failed to match pattern '%ls'", utf16_buf);
+    return;
   }
   static const DWORD file_mask = FILE_ATTRIBUTE_DIRECTORY |
                                  FILE_ATTRIBUTE_REPARSE_POINT |
                                  FILE_ATTRIBUTE_DEVICE;
-  bool ok = true;
   do {
     if (data.dwFileAttributes & file_mask) {
       continue; // skip directories
@@ -1768,20 +1771,18 @@ static bool setup_pattern(const wchar_t *pattern) {
     wchar_t *file = data.cFileName;
     CharLowerW(file);
     size_t file_len = wcslen(file) + 1; // add \0
-    size_t path_len = abs_len + file_len;
+    int32_t path_len = (int32_t)(abs_len + file_len);
     if (path_len >= CIN_MAX_PATH) {
       continue; // skip absolute path (+ NUL) if silently truncated
     }
     wmemcpy(abs_buf + abs_len, file, file_len);
-    int len = utf16_to_utf8(abs_buf, utf8_buf, (int)path_len);
+    int32_t len = utf16_to_utf8(abs_buf, utf8_buf, path_len);
     locals_append(utf8_buf, len);
   } while (FindNextFileW(search, &data) != 0);
   if (GetLastError() != ERROR_NO_MORE_FILES) {
     log_last_error("Failed to find next file");
-    ok = false;
   }
   FindClose(search);
-  return ok;
 }
 
 static bool setup_url(const wchar_t *url) {
@@ -1839,8 +1840,8 @@ static bool init_config(const char *filename) {
       }
       FOREACH_PART(&scope->media.directories, part, len) {
         part[len] = '\0';
-        log_wmessage(LOG_DEBUG, L"Directory: %ls", utf16_buf);
-        setup_directory(part, tag_dirs);
+        // log_wmessage(LOG_DEBUG, L"Directory: %ls", utf16_buf);
+        // setup_directory(part, tag_dirs);
       }
       // NOTE: At this point, if there are any tags, the TagDirectories
       // struct contains an array of indices for the directory node arena.
@@ -1861,11 +1862,10 @@ static bool init_config(const char *filename) {
       }
       FOREACH_PART(&scope->media.patterns, part, len) {
         part[len] = '\0';
-        int32_t len_utf16 = utf8_to_utf16_norm(part, utf16_buf);
-        assert(len_utf16);
         log_message(LOG_DEBUG, "Pattern: %s", part);
-        // setup_pattern(utf16_buf);
+        setup_pattern(part);
       }
+      exit(1);
       FOREACH_PART(&scope->media.urls, part, len) {
         part[len] = '\0';
         int32_t len_utf16 = utf8_to_utf16_norm(part, utf16_buf);
@@ -1878,7 +1878,7 @@ static bool init_config(const char *filename) {
         log_message(LOG_DEBUG, "Tag: %s", part);
         setup_tag(part, tag_dirs);
       }
-      radix_v v = radix_query(tag_tree, "sample");
+      radix_v v = radix_query(tag_tree, "s");
       if (v) {
         TagDirectories *tagz = v;
         log_message(LOG_INFO, "Found: %d", tagz->count);
