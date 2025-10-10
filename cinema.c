@@ -956,24 +956,22 @@ static inline void radix_insert(RadixTree *tree, const uint8_t *key, size_t len,
   *parent = (RadixNode *)new_internal;
 }
 
-static inline radix_v radix_query(RadixTree *tree, const char *pattern) {
+static inline radix_v radix_query(RadixTree *tree, const uint8_t *pattern, size_t len) {
   assert(tree);
   assert(tree->root);
   assert(pattern);
-  assert(strlen(pattern) > 0);
-  const uint8_t *key = (const uint8_t *)pattern;
-  size_t len = strlen(pattern);
+  assert(len > 0);
   RadixNode *node = tree->root;
   while (node) {
     if (node->type == RADIX_LEAF) {
       RadixLeaf *leaf = (RadixLeaf *)node;
-      if (leaf->len >= len && memcmp(leaf->key, key, len) == 0) {
+      if (leaf->len >= len && memcmp(leaf->key, pattern, len) == 0) {
         return leaf->base.v;
       }
       return NULL;
     }
     RadixInternal *internal = (RadixInternal *)node;
-    int32_t bit = radix_bit(key, len, internal->critical, internal->bitmask);
+    int32_t bit = radix_bit(pattern, len, internal->critical, internal->bitmask);
     node = internal->child[bit];
   }
   return NULL;
@@ -1629,8 +1627,9 @@ typedef struct Cin_Screen {
 } Cin_Screen;
 
 typedef struct Cin_Layout {
-  Cin_Screen *screens;
-  int32_t count;
+  Cin_Screen *items;
+  size_t count;
+  size_t capacity;
 } Cin_Layout;
 
 static struct {
@@ -1644,6 +1643,7 @@ static struct {
 #define CIN_DIRECTORY_STRINGS_CAP (CIN_DIRECTORIES_CAP * CIN_MAX_PATH_BYTES)
 #define CIN_PATTERN_ITEMS_CAP 64
 #define CIN_URLS_CAP 64
+#define CIN_LAYOUT_SCREENS_CAP 8
 
 static wchar_t utf16_buf[CIN_MAX_PATH];
 static uint8_t utf8_buf[CIN_MAX_PATH_BYTES];
@@ -1875,24 +1875,26 @@ static inline void setup_tag(const char *tag, TagItems *tag_items) {
   radix_insert(tag_tree, utf8_buf, (size_t)len_utf8, tag_items);
 }
 
-static inline void setup_screen(const char *geometry) {
-
+static inline void setup_screen(const char *geometry, size_t bytes, Cin_Layout *layout) {
+  Cin_Screen screen = {.offset = (int32_t)screen_arena.count, .len = (int32_t)bytes - 1};
+  array_extend(&screen_arena, geometry, bytes);
+  array_push(layout, screen);
 }
 
-static inline void setup_layout(const char *layout) {
-  int32_t len_utf16 = utf8_to_utf16_norm(layout, utf16_buf);
+static inline void setup_layout(const char *name, Cin_Layout *layout) {
+  int32_t len_utf16 = utf8_to_utf16_norm(name, utf16_buf);
   assert(len_utf16);
   int32_t len_utf8 = utf16_to_utf8(utf16_buf, utf8_buf, len_utf16);
   assert(len_utf8);
-  radix_insert(layout_tree, utf8_buf, (size_t)len_utf8, NULL);
+  radix_insert(layout_tree, utf8_buf, (size_t)len_utf8, layout);
 }
 
-#define FOREACH_PART(k, part, bytes)                                                                     \
+#define FOREACH_PART(k, part, bytes)                                                                   \
   for (char *_left = (k)->items, *_right = (k)->items + (k)->count, *part = _left, *_comma = NULL;     \
        _left < _right;                                                                                 \
        _left = _comma ? _comma + 1 : _right, _left += _comma ? strspn(_left, " \t") : 0, part = _left) \
     if ((_comma = memchr(_left, ',', (size_t)(_right - _left))),                                       \
-        (bytes = _comma ? (size_t)(_comma - _left + 1) : (size_t)(_right - _left)),                      \
+        (bytes = _comma ? (size_t)(_comma - _left + 1) : (size_t)(_right - _left)),                    \
         _comma ? (_comma[0] = '\0', 1) : (_left[bytes - 1] = '\0', 1), 1)
 
 static bool init_config(const char *filename) {
@@ -1914,13 +1916,32 @@ static bool init_config(const char *filename) {
     log_message(LOG_DEBUG, "[Scope %zu: %zu]", i, scope->type);
     switch (scope->type) {
     case CONF_SCOPE_LAYOUT: {
+      if (!scope->layout.name.count) {
+        log_message(LOG_ERROR, "Layout at [scope] number %zu does not have a name key,"
+                               " please supply it: 'name = value'",
+                    i);
+        return false;
+      }
+      if (!scope->layout.screen.count) {
+        log_message(LOG_ERROR, "Layout at [scope] number %zu does not have any screen"
+                               " keys, please supply with: 'screen = 0:0'",
+                    i);
+        return false;
+      }
+      Cin_Layout *layout = malloc(sizeof(Cin_Layout));
+      array_alloc(layout, CIN_LAYOUT_SCREENS_CAP);
       log_message(LOG_DEBUG, "Name: %s", scope->layout.name.items);
       FOREACH_PART(&scope->layout.screen, part, bytes) {
         log_message(LOG_DEBUG, "Screen: %s, len=%d", part, bytes);
+        setup_screen(part, bytes, layout);
       }
+      setup_layout(scope->layout.name.items, layout);
       array_free(scope->layout.name);
       array_free(scope->layout.screen);
-      // exit(1);
+      Cin_Layout *found = radix_query(layout_tree, (const uint8_t *)"ab", 2);
+      if (found) {
+        log_message(LOG_INFO, "%s", screen_arena.items + found->items[0].offset);
+      }
     } break;
     case CONF_SCOPE_MEDIA: {
       TagItems *tag_items = NULL;
@@ -2876,22 +2897,6 @@ static void init_commands(void) {
   }
 }
 
-static inline void init_tags(void) {
-  RadixTree *tree = radix_tree();
-  radix_v *buf1 = (radix_v) "daa";
-  radix_v *buf2 = (radix_v) "dab";
-  radix_v *buf3 = (radix_v) "da";
-  radix_insert(tree, (const uint8_t *)"daa", 3, buf1);
-  radix_insert(tree, (const uint8_t *)"dab", 3, buf2);
-  radix_insert(tree, (const uint8_t *)"da", 2, buf3);
-  radix_v value = radix_query(tree, "dab");
-  if (!value) {
-    log_message(LOG_INFO, "Pattern not found.");
-  } else {
-    log_message(LOG_INFO, "%s", value);
-  }
-}
-
 int main(int argc, char **argv) {
   (void)argc;
   (void)argv;
@@ -2904,7 +2909,6 @@ int main(int argc, char **argv) {
   if (!init_timers()) exit(1);
   if (!init_config("cinema.conf")) exit(1);
   // init_commands();
-  // init_tags();
   if (!init_document_listing()) exit(1);
   uint8_t pattern[] = "twitch.tv";
   document_listing(pattern, (int32_t)strlen((const char *)pattern));
