@@ -1876,6 +1876,7 @@ static inline void setup_tag(const char *tag, TagItems *tag_items) {
 }
 
 static inline void setup_screen(const char *geometry) {
+
 }
 
 static inline void setup_layout(const char *layout) {
@@ -1886,13 +1887,13 @@ static inline void setup_layout(const char *layout) {
   radix_insert(layout_tree, utf8_buf, (size_t)len_utf8, NULL);
 }
 
-#define FOREACH_PART(k, part, len)                                                                     \
+#define FOREACH_PART(k, part, bytes)                                                                     \
   for (char *_left = (k)->items, *_right = (k)->items + (k)->count, *part = _left, *_comma = NULL;     \
        _left < _right;                                                                                 \
        _left = _comma ? _comma + 1 : _right, _left += _comma ? strspn(_left, " \t") : 0, part = _left) \
     if ((_comma = memchr(_left, ',', (size_t)(_right - _left))),                                       \
-        (len = _comma ? (size_t)(_comma - _left) : (size_t)(_right - _left - 1)),                      \
-        _comma ? (_comma[0] = '\0', 1) : (_left[len] = '\0', 1), 1)
+        (bytes = _comma ? (size_t)(_comma - _left + 1) : (size_t)(_right - _left)),                      \
+        _comma ? (_comma[0] = '\0', 1) : (_left[bytes - 1] = '\0', 1), 1)
 
 static bool init_config(const char *filename) {
   if (!parse_config(filename)) return false;
@@ -1907,18 +1908,19 @@ static bool init_config(const char *filename) {
   tag_tree = radix_tree();
   layout_tree = radix_tree();
   Conf_Root *root = &conf_parser.scopes.items[0].root;
-  size_t len;
+  size_t bytes;
   for (size_t i = 1; i < conf_parser.scopes.count; ++i) {
     Conf_Scope *scope = &conf_parser.scopes.items[i];
     log_message(LOG_DEBUG, "[Scope %zu: %zu]", i, scope->type);
     switch (scope->type) {
     case CONF_SCOPE_LAYOUT: {
       log_message(LOG_DEBUG, "Name: %s", scope->layout.name.items);
-      FOREACH_PART(&scope->layout.screen, part, len) {
-        log_message(LOG_DEBUG, "Screen: %s, len=%d", part, len);
+      FOREACH_PART(&scope->layout.screen, part, bytes) {
+        log_message(LOG_DEBUG, "Screen: %s, len=%d", part, bytes);
       }
       array_free(scope->layout.name);
       array_free(scope->layout.screen);
+      // exit(1);
     } break;
     case CONF_SCOPE_MEDIA: {
       TagItems *tag_items = NULL;
@@ -1943,19 +1945,19 @@ static bool init_config(const char *filename) {
           tag_url_items = tag_items->url_items;
         }
       }
-      FOREACH_PART(&scope->media.directories, part, len) {
+      FOREACH_PART(&scope->media.directories, part, bytes) {
         log_message(LOG_DEBUG, "Directory: %s", part);
         setup_directory(part, tag_directories);
       }
-      FOREACH_PART(&scope->media.patterns, part, len) {
+      FOREACH_PART(&scope->media.patterns, part, bytes) {
         log_message(LOG_DEBUG, "Pattern: %s", part);
         setup_pattern(part, tag_pattern_items);
       }
-      FOREACH_PART(&scope->media.urls, part, len) {
+      FOREACH_PART(&scope->media.urls, part, bytes) {
         log_message(LOG_DEBUG, "URL: %s", part);
         setup_url(part, tag_url_items);
       }
-      FOREACH_PART(&scope->media.tags, part, len) {
+      FOREACH_PART(&scope->media.tags, part, bytes) {
         log_message(LOG_DEBUG, "Tag: %s", part);
         setup_tag(part, tag_items);
       }
