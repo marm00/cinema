@@ -1750,7 +1750,7 @@ static void setup_directory(const char *path, TagDirectories *tag_dirs) {
       if (data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
         continue; // skip junction
       }
-      size_t file_len = utf16_norm(data.cFileName);
+      size_t file_len = (size_t)utf16_norm(data.cFileName);
       wchar_t *file = utf16_buf_norm.items;
       bool is_dir = data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY;
       if (is_dir && (file[0] == L'.') && (!file[1] || (file[1] == L'.' && !file[2]))) {
@@ -1831,7 +1831,7 @@ static inline void setup_pattern(const char *pattern, TagPatternItems *tag_patte
     if (data.dwFileAttributes & file_mask) {
       continue; // skip directories
     }
-    size_t file_len = utf16_norm(data.cFileName);
+    size_t file_len = (size_t)utf16_norm(data.cFileName);
     wchar_t *file = utf16_buf_norm.items;
     int32_t path_len = (int32_t)(abs_len + file_len);
     if (path_len >= CIN_MAX_PATH) {
@@ -1915,7 +1915,7 @@ static inline void setup_layout(const char *name, Cin_Layout *layout) {
        _left = _comma ? _comma + 1 : _right, _left += _comma ? strspn(_left, " \t") : 0, part = _left) \
     if ((_comma = memchr(_left, ',', (size_t)(_right - _left))),                                       \
         (bytes = _comma ? (size_t)(_comma - _left + 1) : (size_t)(_right - _left)),                    \
-        _comma ? (_comma[0] = '\0', 1) : (_left[bytes - 1] = '\0', 1), 1)
+        (bytes > 1) && (_comma ? (_comma[0] = '\0', 1) : (_left[bytes - 1] = '\0', 1), 1))
 
 static bool init_config(const char *filename) {
   if (!parse_config(filename)) return false;
@@ -3152,7 +3152,7 @@ int main(int argc, char **argv) {
         ++repl.msg_index;
         cursor_curr();
       }
-      log_wmessage(LOG_ERROR, L"char=%hu (%lc), v=%hu (%lc), pressed=%d, ctrl=%d",
+      log_wmessage(LOG_TRACE, L"char=%hu (%lc), v=%hu (%lc), pressed=%d, ctrl=%d",
                    c, c, vk, vk ? vk : L' ', input.Event.KeyEvent.bKeyDown, ctrl_on(&input));
       break;
     }
