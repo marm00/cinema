@@ -566,88 +566,6 @@ static inline bool cin_wisnum_1based(wchar_t c) {
 
 static wchar_t preview_buf[CIN_PREVIEW_CAP];
 
-static void parse_repl(void) {
-  // Grammar rules:
-  // 1. First character must be either empty or in L'a'..L'z' (letter) or in L'1'..L'9' (digit)
-  // 2. Empty (whitespace*\0) is a command
-  // 3. Letter must precede one of: 'letter', 'space', '\0';
-  // 3a. 'letter' concatenates a string character
-  // 3b. 'space' finishes the string to setup (possible) command 'letter+'
-  // 3c. '\0' is (possibly) a command comprised of 'letter+'
-  // 4. Digit must precede one of: 'digit', '\0', 'space', 'letter'.
-  // 4a. 'digit' concatenates a decimal number
-  // 4b. '\0' is a command: consumes the number (array)
-  // 4c. 'space' pushes decimal number onto the numbers array
-  // 4d. 'letter' finishes the number array for command 'letter+' consumption
-  // 5. Command 'letter+' with 'space' (3b) may precede 'unicode*'
-  // 5a. 'unicode*' string is finished with '\0'
-  array_reserve(repl.msg, 1);
-  repl.msg->items[repl.msg->count] = L'\0';
-  wchar_t *p = repl.msg->items;
-  while (p && iswspace(*p)) ++p;
-  if (!p) {
-    // 2. command
-    return;
-  }
-  wchar_t *start = p;
-  while (cin_wisloweralpha(*p)) ++p;
-  if (p - start > 0) {
-    // 3/3a. letter+, command begins at start, ends at p
-    if (!p) {
-      // 3c. possible command
-      return;
-    }
-    // 3b. consume space
-    if (iswspace(*p)) ++p;
-    // 5a. unicode starts at at p, ends at \0
-    return;
-  }
-  size_t number = 0;
-  if (cin_wisnum_1based(*p)) {
-    number = *p;
-    for (++p;; ++p) {
-      if (!p) {
-        // 4b. command
-        return;
-      }
-      if (cin_wisnum_1based(*p)) {
-        // 4a. build decimal number
-        number *= 10;
-        number += *p;
-      } else if (iswspace(*p)) {
-        if (number > 0) {
-          // 4c. push number onto array
-        }
-        number = 0;
-      } else if (cin_wisloweralpha(*p)) {
-        // 4d. process 'letter*
-        start = p;
-        ++p;
-        while (cin_wisloweralpha(*p)) ++p;
-        if (p - start > 0) {
-          // 3/3a. letter+, command begins at start, ends at p
-          if (!p) {
-            // 3c. possible command
-            return;
-          }
-          // 3b. consume space
-          if (iswspace(*p)) ++p;
-          // 5a. unicode starts at at p, ends at \0
-          return;
-        }
-        break;
-      } else {
-        // error invalid input
-        return;
-      }
-    }
-  }
-}
-
-static void update_preview(void) {
-  parse_repl();
-}
-
 static void log_preview(void) {
   // TODO: dynamic msg
   wchar_t *msg2 = L"123456789012345678922012345678904567890123456789012348888555";
@@ -2889,13 +2807,13 @@ typedef void (*patricia_fn)(void);
 
 typedef struct PatriciaNode {
   struct PatriciaNode *edges[COMMAND_ALPHABET];
-  const char *suffix;
+  const wchar_t *suffix;
   size_t len;
   patricia_fn fn;
   int32_t min;
 } PatriciaNode;
 
-static inline PatriciaNode *patricia_node(const char *suffix, size_t len) {
+static inline PatriciaNode *patricia_node(const wchar_t *suffix, size_t len) {
   PatriciaNode *node = calloc(1, sizeof(PatriciaNode));
   assert(node);
   node->suffix = suffix;
@@ -2903,27 +2821,27 @@ static inline PatriciaNode *patricia_node(const char *suffix, size_t len) {
   return node;
 }
 
-static inline size_t patricia_lcp(const char *a, const char *b, size_t max) {
+static inline size_t patricia_lcp(const wchar_t *a, const wchar_t *b, size_t max) {
   size_t i = 0;
-  while (i < max && a[i] && a[i] == b[i]) i++;
+  while (i < max && a[i] && a[i] == b[i]) ++i;
   return i;
 }
 
-static inline patricia_fn patricia_query(PatriciaNode *root, const char *pattern) {
+static inline patricia_fn patricia_query(PatriciaNode *root, const wchar_t *pattern) {
   assert(root);
-  assert(strlen(pattern) > 0);
-  assert((*pattern >= 'a' && *pattern <= 'z'));
+  assert(wcslen(pattern) > 0);
+  assert((*pattern >= L'a' && *pattern <= L'z'));
   PatriciaNode *node = root;
-  const char *p = pattern;
+  const wchar_t *p = pattern;
   while (*p) {
-    assert((*p >= 'a' && *p <= 'z'));
-    int32_t i = *p - 'a';
+    assert((*p >= L'a' && *p <= L'z'));
+    int32_t i = *p - L'a';
     PatriciaNode *edge = node->edges[i];
     if (edge == NULL) {
       return NULL;
     }
     size_t common = patricia_lcp(p, edge->suffix, edge->len);
-    if (p[common] == '\0') {
+    if (p[common] == L'\0') {
       return edge->fn;
     }
     if (common < edge->len) {
@@ -2935,18 +2853,18 @@ static inline patricia_fn patricia_query(PatriciaNode *root, const char *pattern
   return node->fn;
 }
 
-static inline void patricia_insert(PatriciaNode *root, const char *str, patricia_fn fn) {
+static inline void patricia_insert(PatriciaNode *root, const wchar_t *str, patricia_fn fn) {
   assert(root);
-  assert(strlen(str) > 0);
-  assert((*str >= 'a' && *str <= 'z'));
+  assert(wcslen(str) > 0);
+  assert((*str >= L'a' && *str <= L'z'));
   PatriciaNode *node = root;
-  const char *p = str;
+  const wchar_t *p = str;
   while (*p) {
-    assert((*p >= 'a' && *p <= 'z'));
-    int32_t i = *p - 'a';
+    assert((*p >= L'a' && *p <= L'z'));
+    int32_t i = *p - L'a';
     PatriciaNode *edge = node->edges[i];
     if (edge == NULL) {
-      edge = patricia_node(p, strlen(p));
+      edge = patricia_node(p, wcslen(p));
       edge->fn = fn;
       node->edges[i] = edge;
       if ((node->min == -1) || i < node->min) {
@@ -2959,7 +2877,7 @@ static inline void patricia_insert(PatriciaNode *root, const char *str, patricia
     size_t common = patricia_lcp(p, edge->suffix, edge->len);
     if (common == edge->len) {
       p += common;
-      if (*p == '\0') {
+      if (*p == L'\0') {
         edge->min = -1;
         edge->fn = fn;
         return;
@@ -2970,16 +2888,16 @@ static inline void patricia_insert(PatriciaNode *root, const char *str, patricia
       edge->suffix += common;
       edge->len -= common;
       node->edges[i] = split;
-      split->edges[edge->suffix[0] - 'a'] = edge;
+      split->edges[edge->suffix[0] - L'a'] = edge;
       p += common;
-      if (*p == '\0') {
+      if (*p == L'\0') {
         split->min = -1;
         split->fn = fn;
       } else {
-        PatriciaNode *remainder = patricia_node(p, strlen(p));
+        PatriciaNode *remainder = patricia_node(p, wcslen(p));
         remainder->fn = fn;
-        int32_t edge_i = edge->suffix[0] - 'a';
-        int32_t next_i = *p - 'a';
+        int32_t edge_i = edge->suffix[0] - L'a';
+        int32_t next_i = *p - L'a';
         split->edges[next_i] = remainder;
         // update internal node lexicographical minimum
         if (next_i < edge_i) {
@@ -2999,15 +2917,111 @@ static void cmd_help(void) {
   log_message(LOG_INFO, "Help");
 }
 
+static void cmd_reroll(void) {
+  log_message(LOG_INFO, "Reroll");
+}
+
+static PatriciaNode *cmd_trie = NULL;
+
 static void init_commands(void) {
-  PatriciaNode *root = patricia_node(NULL, 0);
-  patricia_insert(root, "help", cmd_help);
-  patricia_fn fn = patricia_query(root, "h");
+  cmd_trie = patricia_node(NULL, 0);
+  patricia_insert(cmd_trie, L"help", cmd_help);
+  patricia_fn fn = patricia_query(cmd_trie, L"h");
   if (fn == NULL) {
     log_message(LOG_INFO, "Pattern not found.");
   } else {
     fn();
   }
+}
+
+static patricia_fn parse_repl(void) {
+  // Grammar rules:
+  // 1. First character must be either empty or in L'a'..L'z' (letter) or in L'1'..L'9' (digit)
+  // 2. Empty (whitespace*\0) is a command
+  // 3. Letter must precede one of: 'letter', 'space', '\0';
+  // 3a. 'letter' concatenates a string character
+  // 3b. 'space' finishes the string to setup (possible) command 'letter+'
+  // 3c. '\0' is (possibly) a command comprised of 'letter+'
+  // 4. Digit must precede one of: 'digit', '\0', 'space', 'letter'.
+  // 4a. 'digit' concatenates a decimal number
+  // 4b. '\0' is a command: consumes the number (array)
+  // 4c. 'space' pushes decimal number onto the numbers array
+  // 4d. 'letter' finishes the number array for command 'letter+' consumption
+  // 5. Command 'letter+' with 'space' (3b) may precede 'unicode*'
+  // 5a. 'unicode*' string is finished with '\0'
+  array_reserve(repl.msg, 1);
+  repl.msg->items[repl.msg->count] = L'\0';
+  wchar_t *p = repl.msg->items;
+  while (*p && iswspace(*p)) ++p;
+  if (!*p) {
+    // 2. command
+    return cmd_reroll;
+  }
+  wchar_t *start = p;
+  while (cin_wisloweralpha(*p)) ++p;
+  if (p - start > 0) {
+    // 3/3a. letter+, command begins at start, ends at p
+    if (!*p) {
+      // 3c. possible command
+      return patricia_query(cmd_trie, start);
+    }
+    if (*p != L' ') {
+      // error not a valid command
+      return NULL; // todo
+    }
+    ++p;
+    // 5a. unicode starts at at p, ends at \0
+    return NULL; // todo
+  }
+  size_t number = 0;
+  if (cin_wisnum_1based(*p)) {
+    number = *p;
+    for (++p;; ++p) {
+      if (!*p) {
+        // 4b. command
+        return NULL; // todo
+      }
+      if (cin_wisnum_1based(*p)) {
+        // 4a. build decimal number
+        number *= 10;
+        number += *p - L'0';
+      } else if (*p == ' ') {
+        if (number > 0) {
+          // 4c. push number onto array
+        }
+        number = 0;
+      } else if (cin_wisloweralpha(*p)) {
+        // 4d. process 'letter*
+        start = p;
+        ++p;
+        while (cin_wisloweralpha(*p)) ++p;
+        if (p - start > 0) {
+          // 3/3a. letter+, command begins at start, ends at p
+          if (!*p) {
+            // 3c. possible command
+            return NULL; // todo
+          }
+          // 3b. consume space
+          if (*p != L' ') {
+            // error not a valid command
+            return NULL; // todo
+          }
+          ++p;
+          // 5a. unicode starts at at p, ends at \0
+          return NULL; // todo
+        }
+        break;
+      } else {
+        // error invalid input
+        return NULL; // todo
+      }
+    }
+  }
+  return NULL; // todo;
+}
+
+static void update_preview(void) {
+  parse_repl();
 }
 
 int main(int argc, char **argv) {
@@ -3021,7 +3035,7 @@ int main(int argc, char **argv) {
   InitializeCriticalSectionAndSpinCount(&log_lock, 0);
   if (!init_timers()) exit(1);
   if (!init_config("cinema.conf")) exit(1);
-  // init_commands();
+  init_commands();
   if (!init_document_listing()) exit(1);
   // uint8_t pattern[] = "twitch.tv";
   // document_listing(pattern, (int32_t)strlen((const char *)pattern));
