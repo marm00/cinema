@@ -2953,11 +2953,30 @@ static patricia_fn parse_repl(void) {
   repl.msg->items[repl.msg->count] = L'\0';
   wchar_t *p = repl.msg->items;
   while (*p && iswspace(*p)) ++p;
+  for (size_t number = 0; *p; ++p) {
+    if (cin_wisnum_1based(*p)) {
+      // 4a. build decimal number
+      number *= 10;
+      number += *p - L'0';
+    } else if (*p == ' ') {
+      if (number > 0) {
+        // 4c. push decimal number onto array
+      }
+      number = 0;
+    } else if (cin_wisloweralpha(*p)) {
+      // if numbers array empty and number > 0, push
+      break;
+    } else {
+      // error invalid input
+      return NULL; // todo
+    }
+  }
   if (!*p) {
-    // 2. command
+    // 2/4b. command
     return cmd_reroll;
   }
   wchar_t *start = p;
+  ++p;
   while (cin_wisloweralpha(*p)) ++p;
   if (p - start > 0) {
     // 3/3a. letter+, command begins at start, ends at p
@@ -2975,51 +2994,6 @@ static patricia_fn parse_repl(void) {
     ++p;
     // 5a. unicode starts at p ends at \0
     return cmd;
-  }
-  size_t number = 0;
-  if (cin_wisnum_1based(*p)) {
-    number = *p;
-    for (++p;; ++p) {
-      if (!*p) {
-        // 4b. command
-        return cmd_reroll;
-      }
-      if (cin_wisnum_1based(*p)) {
-        // 4a. build decimal number
-        number *= 10;
-        number += *p - L'0';
-      } else if (*p == ' ') {
-        if (number > 0) {
-          // 4c. push number onto array
-        }
-        number = 0;
-      } else if (cin_wisloweralpha(*p)) {
-        // 4d. process 'letter*
-        start = p;
-        while (cin_wisloweralpha(*p)) ++p;
-        if (p - start > 0) {
-          // 3/3a. letter+, command begins at start, ends at p
-          if (!*p) {
-            // 3c. possible command
-            return patricia_query(cmd_trie, start);
-          }
-          if (*p != L' ') {
-            // error not a valid command
-            return NULL; // todo
-          }
-          *p = L'\0';
-          patricia_fn cmd = patricia_query(cmd_trie, start);
-          *p = L' ';
-          ++p;
-          // 5a. unicode starts at p ends at \0
-          return cmd;
-        }
-        break;
-      } else {
-        // error invalid input
-        return NULL; // todo
-      }
-    }
   }
   return NULL; // todo;
 }
