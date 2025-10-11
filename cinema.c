@@ -2969,9 +2969,12 @@ static patricia_fn parse_repl(void) {
       // error not a valid command
       return NULL; // todo
     }
+    *p = L'\0';
+    patricia_fn cmd = patricia_query(cmd_trie, start);
+    *p = L' ';
     ++p;
-    // 5a. unicode starts at at p, ends at \0
-    return NULL; // todo
+    // 5a. unicode starts at p ends at \0
+    return cmd;
   }
   size_t number = 0;
   if (cin_wisnum_1based(*p)) {
@@ -2979,7 +2982,7 @@ static patricia_fn parse_repl(void) {
     for (++p;; ++p) {
       if (!*p) {
         // 4b. command
-        return NULL; // todo
+        return cmd_reroll;
       }
       if (cin_wisnum_1based(*p)) {
         // 4a. build decimal number
@@ -2993,22 +2996,23 @@ static patricia_fn parse_repl(void) {
       } else if (cin_wisloweralpha(*p)) {
         // 4d. process 'letter*
         start = p;
-        ++p;
         while (cin_wisloweralpha(*p)) ++p;
         if (p - start > 0) {
           // 3/3a. letter+, command begins at start, ends at p
           if (!*p) {
             // 3c. possible command
-            return NULL; // todo
+            return patricia_query(cmd_trie, start);
           }
-          // 3b. consume space
           if (*p != L' ') {
             // error not a valid command
             return NULL; // todo
           }
+          *p = L'\0';
+          patricia_fn cmd = patricia_query(cmd_trie, start);
+          *p = L' ';
           ++p;
-          // 5a. unicode starts at at p, ends at \0
-          return NULL; // todo
+          // 5a. unicode starts at p ends at \0
+          return cmd;
         }
         break;
       } else {
@@ -3021,7 +3025,8 @@ static patricia_fn parse_repl(void) {
 }
 
 static void update_preview(void) {
-  parse_repl();
+  patricia_fn fn = parse_repl();
+  if (fn) fn();
 }
 
 int main(int argc, char **argv) {
