@@ -509,12 +509,143 @@ static inline BOOL GetConsoleScreenBufferInfo_safe(HANDLE hConsoleOutput, PCONSO
   return TRUE;
 }
 
+// TODO: probably change to byte-by-byte
+static int32_t lcps(const uint8_t *a, const uint8_t *b) {
+  static const int32_t CHUNK_SIZE = 1 << 3;
+  const uint8_t *start = a;
+  while ((((uintptr_t)a & 7) != 0 || ((uintptr_t)b & 7) != 0) &&
+         *a == *b && *a != '\0') {
+    a++;
+    b++;
+  }
+  while (((uintptr_t)a & 7) == 0 && ((uintptr_t)b & 7) == 0) {
+    uint64_t wa = *(const uint64_t *)a;
+    uint64_t wb = *(const uint64_t *)b;
+    if (wa != wb || (wa - 0x0101010101010101ULL) & (~wa & 0x8080808080808080ULL)) {
+      break;
+    }
+    a += CHUNK_SIZE;
+    b += CHUNK_SIZE;
+  }
+  while (*a == *b && *a != '\0') {
+    a++;
+    b++;
+  }
+  return (int32_t)(a - start);
+}
+
+static inline bool cin_lower_isalpha(char *out) {
+  if (*out <= 'Z' && *out >= 'A') {
+    *out += ('a' - 'A');
+    return true;
+  }
+  return *out <= 'z' && *out >= 'a';
+}
+
+static inline wchar_t cin_wlower(wchar_t c) {
+  if (c <= L'Z' && c >= 'A') return c + (L'a' - L'A');
+  if (c < 128) return c;
+  wchar_t unicode = c;
+  LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE, &c, 1, &unicode, 1, NULL, NULL, 0);
+  return unicode;
+}
+
+static inline bool cin_wisloweralpha(wchar_t c) {
+  return c <= L'z' && c >= L'a';
+}
+
+static inline bool cin_wisnum(wchar_t c) {
+  return c <= L'9' && c >= L'0';
+}
+
+static inline bool cin_wisnum_1based(wchar_t c) {
+  return c <= L'9' && c >= L'1';
+}
+
 #define CIN_PREVIEW_CAP 256
 
 static wchar_t preview_buf[CIN_PREVIEW_CAP];
 
-static void update_preview(void) {
+static void parse_repl(void) {
+  // Grammar rules:
+  // 1. First character must be either empty or in L'a'..L'z' (letter) or in L'1'..L'9' (digit)
+  // 2. Empty (whitespace*\0) is a command
+  // 3. Letter must precede one of: 'letter', 'space', '\0';
+  // 3a. 'letter' concatenates a string character
+  // 3b. 'space' finishes the string to setup (possible) command 'letter+'
+  // 3c. '\0' is (possibly) a command comprised of 'letter+'
+  // 4. Digit must precede one of: 'digit', '\0', 'space', 'letter'.
+  // 4a. 'digit' concatenates a decimal number
+  // 4b. '\0' is a command: consumes the number (array)
+  // 4c. 'space' pushes decimal number onto the numbers array
+  // 4d. 'letter' finishes the number array for command 'letter+' consumption
+  // 5. Command 'letter+' with 'space' (3b) may precede 'unicode*'
+  // 5a. 'unicode*' string is finished with '\0'
+  array_reserve(repl.msg, 1);
+  repl.msg->items[repl.msg->count] = L'\0';
+  wchar_t *p = repl.msg->items;
+  while (p && iswspace(*p)) ++p;
+  if (!p) {
+    // 2. command
+    return;
+  }
+  wchar_t *start = p;
+  while (cin_wisloweralpha(*p)) ++p;
+  if (p - start > 0) {
+    // 3/3a. letter+, command begins at start, ends at p
+    if (!p) {
+      // 3c. possible command
+      return;
+    }
+    // 3b. consume space
+    if (iswspace(*p)) ++p;
+    // 5a. unicode starts at at p, ends at \0
+    return;
+  }
+  size_t number = 0;
+  if (cin_wisnum_1based(*p)) {
+    number = *p;
+    for (++p;; ++p) {
+      if (!p) {
+        // 4b. command
+        return;
+      }
+      if (cin_wisnum_1based(*p)) {
+        // 4a. build decimal number
+        number *= 10;
+        number += *p;
+      } else if (iswspace(*p)) {
+        if (number > 0) {
+          // 4c. push number onto array
+        }
+        number = 0;
+      } else if (cin_wisloweralpha(*p)) {
+        // 4d. process 'letter*
+        start = p;
+        ++p;
+        while (cin_wisloweralpha(*p)) ++p;
+        if (p - start > 0) {
+          // 3/3a. letter+, command begins at start, ends at p
+          if (!p) {
+            // 3c. possible command
+            return;
+          }
+          // 3b. consume space
+          if (iswspace(*p)) ++p;
+          // 5a. unicode starts at at p, ends at \0
+          return;
+        }
+        break;
+      } else {
+        // error invalid input
+        return;
+      }
+    }
+  }
+}
 
+static void update_preview(void) {
+  parse_repl();
 }
 
 static void log_preview(void) {
@@ -992,47 +1123,6 @@ static inline radix_v radix_query(RadixTree *tree, const uint8_t *pattern, size_
     node = internal->child[bit];
   }
   return NULL;
-}
-
-// TODO: probably change to byte-by-byte
-static int32_t lcps(const uint8_t *a, const uint8_t *b) {
-  static const int32_t CHUNK_SIZE = 1 << 3;
-  const uint8_t *start = a;
-  while ((((uintptr_t)a & 7) != 0 || ((uintptr_t)b & 7) != 0) &&
-         *a == *b && *a != '\0') {
-    a++;
-    b++;
-  }
-  while (((uintptr_t)a & 7) == 0 && ((uintptr_t)b & 7) == 0) {
-    uint64_t wa = *(const uint64_t *)a;
-    uint64_t wb = *(const uint64_t *)b;
-    if (wa != wb || (wa - 0x0101010101010101ULL) & (~wa & 0x8080808080808080ULL)) {
-      break;
-    }
-    a += CHUNK_SIZE;
-    b += CHUNK_SIZE;
-  }
-  while (*a == *b && *a != '\0') {
-    a++;
-    b++;
-  }
-  return (int32_t)(a - start);
-}
-
-static inline bool cin_lower_isalpha(char *out) {
-  if (*out <= 'Z' && *out >= 'A') {
-    *out += ('a' - 'A');
-    return true;
-  }
-  return *out <= 'z' && *out >= 'a';
-}
-
-static inline wchar_t cin_wlower(wchar_t c) {
-  if (c <= L'Z' && c >= 'A') return c + (L'a' - L'A');
-  if (c < 128) return c;
-  wchar_t unicode = c;
-  LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE, &c, 1, &unicode, 1, NULL, NULL, 0);
-  return unicode;
 }
 
 typedef struct Conf_Key {
