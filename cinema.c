@@ -637,16 +637,20 @@ static inline int32_t utf8_to_utf16_raw(const char *str) {
   return MultiByteToWideChar(CP_UTF8, 0, str, -1, utf16_buf_raw.items, n_chars);
 }
 
+static inline int32_t utf16_norm(const wchar_t *str) {
+  // n_chars represents the possibly updated wchar_t count needed
+  int32_t n_chars = LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE,
+                                  str, -1, NULL, 0, NULL, NULL, 0);
+  assert(n_chars);
+  array_resize(&utf16_buf_norm, (size_t)n_chars);
+  return LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE, str,
+                       -1, utf16_buf_norm.items, n_chars, NULL, NULL, 0);
+}
+
 static inline int32_t utf8_to_utf16_norm(const char *str) {
   int32_t len = utf8_to_utf16_raw(str);
   assert(len);
-  // n_chars represents the possibly updated wchar_t count needed
-  int32_t n_chars = LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE,
-                                  utf16_buf_raw.items, -1, NULL, 0, NULL, NULL, 0);
-  assert(n_chars);
-  array_resize(&utf16_buf_norm, (size_t)n_chars);
-  return LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE, utf16_buf_raw.items,
-                       -1, utf16_buf_norm.items, n_chars, NULL, NULL, 0);
+  return utf16_norm(utf16_buf_raw.items);
 }
 
 static void log_wmessage(Cin_Log_Level level, const wchar_t *wmessage, ...) {
@@ -1015,6 +1019,22 @@ static int32_t lcps(const uint8_t *a, const uint8_t *b) {
   return (int32_t)(a - start);
 }
 
+static inline bool cin_lower_isalpha(char *out) {
+  if (*out <= 'Z' && *out >= 'A') {
+    *out += ('a' - 'A');
+    return true;
+  }
+  return *out <= 'z' && *out >= 'a';
+}
+
+static inline wchar_t cin_wlower(wchar_t c) {
+  if (c <= L'Z' && c >= 'A') return c + (L'a' - L'A');
+  if (c < 128) return c;
+  wchar_t unicode = c;
+  LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE, &c, 1, &unicode, 1, NULL, NULL, 0);
+  return unicode;
+}
+
 typedef struct Conf_Key {
   char *items;
   size_t count;
@@ -1092,14 +1112,6 @@ static inline void conf_enter_scope(Conf_Scope_Type type) {
 static inline void conf_error_log(size_t row, size_t col, const char *allowed) {
   // TODO: replace with log
   writef("Skipping line %zu due to unexpected token at position %zu. Allowed: %s.\r\n", row + 1, col + 1, allowed);
-}
-
-static inline bool lower_isalpha(char *out) {
-  if (*out <= 'Z' && *out >= 'A') {
-    *out += ('a' - 'A');
-    return true;
-  }
-  return *out <= 'z' && *out >= 'a';
 }
 
 static inline bool conf_kcmp(char *k, Conf_Scope_Type type, Conf_Key *out, bool unique) {
@@ -1222,12 +1234,12 @@ static bool parse_config(const char *filename) {
     }
     assert(conf_parser.buf.items[conf_parser.len] == '\0');
     assert(conf_parser.buf.items[conf_parser.len - 1] != '\n');
-    char first = lower_isalpha(&conf_parser.buf.items[0]) ? 'a' : conf_parser.buf.items[0];
+    char first = cin_lower_isalpha(&conf_parser.buf.items[0]) ? 'a' : conf_parser.buf.items[0];
     switch (first) {
     case 'a': {
       // expect abc=def123 or zyx  = wvu123
       char *p = conf_parser.buf.items + 1;
-      while (lower_isalpha(p)) ++p;
+      while (cin_lower_isalpha(p)) ++p;
       conf_parser.k_len = (size_t)(p - conf_parser.buf.items);
       while (*p == ' ') ++p;
       if (*p != '=') {
@@ -1257,7 +1269,7 @@ static bool parse_config(const char *filename) {
     case '[': {
       // expect abc]
       char *p = conf_parser.buf.items + 1;
-      while (lower_isalpha(p)) ++p;
+      while (cin_lower_isalpha(p)) ++p;
       conf_parser.k_len = (size_t)(p - conf_parser.buf.items) - 1;
       if (*p != ']') {
         conf_parser.buf.items[conf_parser.k_len + 1] = '\0';
@@ -1738,16 +1750,14 @@ static void setup_directory(const char *path, TagDirectories *tag_dirs) {
       if (data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
         continue; // skip junction
       }
-      wchar_t *file = data.cFileName;
-      CharLowerW(file);
+      size_t file_len = utf16_norm(data.cFileName);
+      wchar_t *file = utf16_buf_norm.items;
       bool is_dir = data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY;
       if (is_dir && (file[0] == L'.') && (!file[1] || (file[1] == L'.' && !file[2]))) {
         continue; // skip dot entry
       }
-      size_t file_len = wcslen(file) + 1; // add \0
       size_t path_len = dir.len + file_len;
       if (path_len >= CIN_MAX_PATH) {
-        assert(false);
         continue; // skip absolute path (+ NUL) if silently truncated
       }
       if (is_dir) {
@@ -1821,9 +1831,8 @@ static inline void setup_pattern(const char *pattern, TagPatternItems *tag_patte
     if (data.dwFileAttributes & file_mask) {
       continue; // skip directories
     }
-    wchar_t *file = data.cFileName;
-    CharLowerW(file);
-    size_t file_len = wcslen(file) + 1; // add \0
+    size_t file_len = utf16_norm(data.cFileName);
+    wchar_t *file = utf16_buf_norm.items;
     int32_t path_len = (int32_t)(abs_len + file_len);
     if (path_len >= CIN_MAX_PATH) {
       continue; // skip absolute path (+ NUL) if silently truncated
@@ -3131,6 +3140,7 @@ int main(int argc, char **argv) {
       continue;
     default:
       if (!c || c == PREFIX_TOKEN) continue;
+      c = cin_wlower(c);
       assert(repl.msg_index <= repl.msg->count);
       if (repl.msg_index == repl.msg->count) {
         wwrite(&c, 1);
@@ -3142,7 +3152,7 @@ int main(int argc, char **argv) {
         ++repl.msg_index;
         cursor_curr();
       }
-      log_wmessage(LOG_TRACE, L"char=%hu (%lc), v=%hu (%lc), pressed=%d, ctrl=%d",
+      log_wmessage(LOG_ERROR, L"char=%hu (%lc), v=%hu (%lc), pressed=%d, ctrl=%d",
                    c, c, vk, vk ? vk : L' ', input.Event.KeyEvent.bKeyDown, ctrl_on(&input));
       break;
     }
