@@ -984,6 +984,26 @@ static inline void patricia_insert(PatriciaNode *root, const wchar_t *str, patri
   }
 }
 
+static inline void patricia_nodes_list(PatriciaNode *root) {
+  assert(root);
+  bool leaf = true;
+  for (int32_t i = 0; i < COMMAND_ALPHABET; i++) {
+    if (root->edges[i]) {
+      leaf = false;
+      break;
+    }
+  }
+  if (leaf) {
+    wwrite(root->suffix, (DWORD)root->len);
+    wwrite(L", ", 2);
+  }
+  for (int32_t i = 0; i < COMMAND_ALPHABET; i++) {
+    if (root->edges[i]) {
+      patricia_nodes_list(root->edges[i]);
+    }
+  }
+}
+
 typedef void *radix_v;
 
 typedef enum {
@@ -2766,7 +2786,7 @@ static struct CommandContext {
 } cmd_ctx = {0};
 
 static inline void set_preview(bool error, const wchar_t *format, ...) {
-  assert(preview.count == 0);
+  preview.count = 0;
   if (error) {
     array_wsextend(&preview, COMMAND_ERROR_WMESSAGE);
   }
@@ -2785,7 +2805,15 @@ static inline void set_preview(bool error, const wchar_t *format, ...) {
 }
 
 static void cmd_help_executor(void) {
-  log_message(LOG_INFO, "Help executor");
+  EnterCriticalSection(&log_lock);
+  hide_cursor();
+  cursor_home();
+  writef(CR "[%s] List of all commands: ", LOG_LEVELS[LOG_INFO]);
+  patricia_nodes_list(cmd_ctx.trie);
+  wwrite(L"\b\b\0", 3);
+  rewrite_post_log();
+  LeaveCriticalSection(&log_lock);
+  set_preview(false, L"scroll up to see a list of all commands");
 }
 
 static void cmd_reroll_executor(void) {
@@ -2845,7 +2873,6 @@ static cmd_validator parse_repl(void) {
   // 4d. 'letter' finishes the number array for command 'letter+' consumption
   // 5. Command 'letter+' with 'space' (3b) may precede 'unicode*'
   // 5a. 'unicode*' string is finished with '\0'
-  preview.count = 0;
   cmd_ctx.executor = NULL;
   cmd_ctx.numbers.count = 0;
   cmd_ctx.unicode = NULL;
@@ -3001,6 +3028,9 @@ int main(int argc, char **argv) {
         repl.msg->prev = msg_tail;
         repl.msg_index = 0;
         repl.msg->count = 0;
+      }
+      if (cmd_ctx.executor) {
+        cmd_ctx.executor();
       }
     } break;
     case VK_ESCAPE: {
