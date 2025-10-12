@@ -116,13 +116,13 @@ static const char *LOG_LEVELS[LOG_TRACE + 1] = {"ERROR", "WARNING", "INFO", "DEB
     memcpy((a)->items, (new_items), (n) * sizeof(*(a)->items)); \
   } while (0)
 
-#define warray_set(a, new_items, n)        \
+#define array_wset(a, new_items, n)        \
   do {                                     \
     array_resize((a), (n));                \
     wmemcpy((a)->items, (new_items), (n)); \
   } while (0)
 
-#define sarray_set(a, new_items)        \
+#define array_sset(a, new_items)        \
   do {                                  \
     size_t n = sizeof((new_items)) - 1; \
     array_set((a), (new_items), n);     \
@@ -135,17 +135,23 @@ static const char *LOG_LEVELS[LOG_TRACE + 1] = {"ERROR", "WARNING", "INFO", "DEB
     (a)->count += (n);                                                       \
   } while (0)
 
-#define warray_extend(a, new_items, n)                  \
+#define array_wextend(a, new_items, n)                  \
   do {                                                  \
     array_reserve((a), (n));                            \
     wmemcpy((a)->items + (a)->count, (new_items), (n)); \
     (a)->count += (n);                                  \
   } while (0)
 
-#define sarray_extend(a, new_items)     \
+#define array_sextend(a, new_items)     \
   do {                                  \
     size_t n = sizeof((new_items)) - 1; \
     array_extend((a), (new_items), n);  \
+  } while (0);
+
+#define array_wsextend(a, new_items)                             \
+  do {                                                           \
+    size_t n = sizeof((new_items)) / sizeof(*((new_items))) - 1; \
+    array_wextend((a), (new_items), n);                          \
   } while (0);
 
 #define array_splice(a, i, new_items, n)                              \
@@ -159,7 +165,7 @@ static const char *LOG_LEVELS[LOG_TRACE + 1] = {"ERROR", "WARNING", "INFO", "DEB
     (a)->count += (n);                                                \
   } while (0)
 
-#define warray_splice(a, i, new_items, n)                                 \
+#define array_wsplice(a, i, new_items, n)                                 \
   do {                                                                    \
     assert((i) <= (a)->count);                                            \
     array_reserve((a), (n));                                              \
@@ -181,7 +187,7 @@ static const char *LOG_LEVELS[LOG_TRACE + 1] = {"ERROR", "WARNING", "INFO", "DEB
     (a)->count++;                                        \
   } while (0)
 
-#define warray_insert(a, i, new_item)                                     \
+#define array_winsert(a, i, new_item)                                     \
   do {                                                                    \
     assert((i) <= (a)->count);                                            \
     array_reserve((a), 1);                                                \
@@ -2728,6 +2734,52 @@ static inline bool init_timers(void) {
   return true;
 }
 
+#define COMMAND_NUMBERS_CAP 8
+
+typedef PatriciaNode *cmd_trie;
+typedef patricia_fn cmd_validator;
+typedef patricia_fn cmd_executor;
+typedef wchar_t *cmd_unicode;
+
+typedef struct CommandPreview {
+  wchar_t *items;
+  size_t count;
+  size_t capacity;
+} CommandPreview;
+
+typedef struct CommandNumbers {
+  size_t *items;
+  size_t count;
+  size_t capacity;
+} CommandNumbers;
+
+static struct CommandContext {
+  cmd_trie trie;
+  CommandPreview preview;
+  cmd_executor executor;
+  CommandNumbers numbers;
+  cmd_unicode unicode;
+} cmd_ctx = {0};
+
+static inline void set_cmd_preview(bool error, const wchar_t *format, ...) {
+  assert(cmd_ctx.preview.count == 0);
+  if (error) {
+    array_wsextend(&cmd_ctx.preview, L"ERROR: ");
+  }
+  size_t start = cmd_ctx.preview.count;
+  va_list args;
+  va_list args_dup;
+  va_start(args, format);
+  va_copy(args_dup, args);
+  int32_t len_i32 = _vscwprintf(format, args);
+  assert(len_i32 >= 0);
+  size_t len = (size_t)len_i32;
+  va_end(args);
+  array_grow(&cmd_ctx.preview, len + 1);
+  _vsnwprintf_s(cmd_ctx.preview.items + start, cmd_ctx.preview.capacity, len, format, args_dup);
+  va_end(args_dup);
+}
+
 static void cmd_help(void) {
   log_message(LOG_INFO, "Help");
 }
@@ -2736,20 +2788,19 @@ static void cmd_reroll(void) {
   log_message(LOG_INFO, "Reroll");
 }
 
-static PatriciaNode *cmd_trie = NULL;
-
 static void init_commands(void) {
-  cmd_trie = patricia_node(NULL, 0);
-  patricia_insert(cmd_trie, L"help", cmd_help);
-  patricia_fn fn = patricia_query(cmd_trie, L"h");
-  if (fn == NULL) {
+  cmd_ctx.trie = patricia_node(NULL, 0);
+  array_alloc(&cmd_ctx.numbers, COMMAND_NUMBERS_CAP);
+  patricia_insert(cmd_ctx.trie, L"help", cmd_help);
+  cmd_validator validator_fn = patricia_query(cmd_ctx.trie, L"h");
+  if (validator_fn == NULL) {
     log_message(LOG_INFO, "Pattern not found.");
   } else {
-    fn();
+    validator_fn();
   }
 }
 
-static patricia_fn parse_repl(void) {
+static cmd_validator parse_repl(void) {
   // Grammar rules:
   // 1. First character must be either empty or in L'a'..L'z' (letter) or in L'1'..L'9' (digit)
   // 2. Empty (whitespace*\0) is a command
@@ -2764,6 +2815,10 @@ static patricia_fn parse_repl(void) {
   // 4d. 'letter' finishes the number array for command 'letter+' consumption
   // 5. Command 'letter+' with 'space' (3b) may precede 'unicode*'
   // 5a. 'unicode*' string is finished with '\0'
+  cmd_ctx.preview.count = 0;
+  cmd_ctx.executor = NULL;
+  cmd_ctx.numbers.count = 0;
+  cmd_ctx.unicode = NULL;
   array_reserve(repl.msg, 1);
   repl.msg->items[repl.msg->count] = L'\0';
   wchar_t *p = repl.msg->items;
@@ -2776,14 +2831,22 @@ static patricia_fn parse_repl(void) {
     } else if (*p == ' ') {
       if (number) {
         // 4c. push decimal number onto array
+        array_push(&cmd_ctx.numbers, number);
       }
       number = 0;
     } else if (cin_wisloweralpha(*p)) {
       // if numbers array empty and number, push
+      if (!cmd_ctx.numbers.count && number) {
+        array_push(&cmd_ctx.numbers, number);
+      }
       break;
     } else {
-      // error invalid input
-      return NULL; // todo
+      int64_t pos = p - repl.msg->items;
+      assert(pos >= 0);
+      set_cmd_preview(true, L"unexpected character '%lc' at position %lld,"
+                            L" expected: alphanumeric, space, enter",
+                      *p, pos + 1);
+      return NULL;
     }
   }
   if (!*p) {
@@ -2796,14 +2859,18 @@ static patricia_fn parse_repl(void) {
   // 3/3a. letter+, command begins at start, ends at p
   if (!*p) {
     // 3c. possible command
-    return patricia_query(cmd_trie, start);
+    return patricia_query(cmd_ctx.trie, start);
   }
   if (*p != L' ') {
-    // error not a valid command
+    int64_t pos = p - repl.msg->items;
+    assert(pos >= 0);
+    set_cmd_preview(true, L"unexpected character '%lc' at position %lld,"
+                          L" expected: letter, space, enter",
+                    *p, pos + 1);
     return NULL; // todo
   }
   *p = L'\0';
-  patricia_fn cmd = patricia_query(cmd_trie, start);
+  patricia_fn cmd = patricia_query(cmd_ctx.trie, start);
   *p = L' ';
   ++p;
   // 5a. unicode starts at p ends at \0
@@ -2811,8 +2878,9 @@ static patricia_fn parse_repl(void) {
 }
 
 static void update_preview(void) {
-  patricia_fn fn = parse_repl();
+  cmd_validator fn = parse_repl();
   if (fn) fn();
+  else if (cmd_ctx.preview.count > 0) log_wmessage(LOG_ERROR, cmd_ctx.preview.items);
 }
 
 int main(int argc, char **argv) {
