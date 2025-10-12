@@ -1152,9 +1152,7 @@ static inline void radix_insert(RadixTree *tree, const uint8_t *key, size_t len,
 
 static inline radix_v radix_query(RadixTree *tree, const uint8_t *pattern, size_t len) {
   assert(tree);
-  assert(tree->root);
   assert(pattern);
-  assert(len > 0);
   RadixNode *node = tree->root;
   while (node) {
     if (node->type == RADIX_LEAF) {
@@ -2751,6 +2749,7 @@ typedef PatriciaNode *cmd_trie;
 typedef patricia_fn cmd_validator;
 typedef patricia_fn cmd_executor;
 typedef wchar_t *cmd_unicode;
+typedef Cin_Layout *cmd_layout;
 
 typedef struct CommandNumbers {
   size_t *items;
@@ -2760,6 +2759,7 @@ typedef struct CommandNumbers {
 
 static struct CommandContext {
   cmd_trie trie;
+  cmd_layout layout;
   cmd_executor executor;
   CommandNumbers numbers;
   cmd_unicode unicode;
@@ -2784,24 +2784,49 @@ static inline void set_preview(bool error, const wchar_t *format, ...) {
   va_end(args_dup);
 }
 
-static void cmd_help(void) {
-  log_message(LOG_INFO, "Help");
+static void cmd_help_executor(void) {
+  log_message(LOG_INFO, "Help executor");
 }
 
-static void cmd_reroll(void) {
-  log_message(LOG_INFO, "Reroll");
+static void cmd_reroll_executor(void) {
+  log_message(LOG_INFO, "Reroll executor");
+}
+
+static void cmd_help_validator(void) {
+  cmd_ctx.executor = cmd_help_executor;
+  set_preview(false, L"help (show a list of all commands)");
+}
+
+static void cmd_reroll_validator(void) {
+  size_t n = cmd_ctx.numbers.count;
+  size_t screen_count = cmd_ctx.layout->count;
+  if (n > screen_count) {
+    set_preview(true, L"layout only has %zu screens (%zu provided)", screen_count, n);
+    return;
+  }
+  for (size_t i = 0; i < cmd_ctx.numbers.count; ++i) {
+    size_t screen_index = cmd_ctx.numbers.items[i] - 1;
+    if (screen_index >= screen_count) {
+      set_preview(true, L"screen %zu not found, layout only has %zu screens",
+                  screen_index + 1, screen_count);
+      return;
+    }
+  }
+  cmd_ctx.executor = cmd_reroll_executor;
+  set_preview(false, L"reroll %zu screen%lc", n ? n : screen_count, n == 1 ? L'\0' : L's');
 }
 
 static bool init_commands(void) {
+  radix_v layout_v = radix_query(layout_tree, (const uint8_t *)"", 0);
+  if (!layout_v) {
+    log_message(LOG_ERROR, "No layouts found in config file");
+    return false;
+  }
+  cmd_ctx.layout = (cmd_layout)layout_v;
   cmd_ctx.trie = patricia_node(NULL, 0);
   array_alloc(&cmd_ctx.numbers, COMMAND_NUMBERS_CAP);
-  patricia_insert(cmd_ctx.trie, L"help", cmd_help);
-  cmd_validator validator_fn = patricia_query(cmd_ctx.trie, L"h");
-  if (validator_fn == NULL) {
-    log_message(LOG_INFO, "Pattern not found.");
-  } else {
-    validator_fn();
-  }
+  patricia_insert(cmd_ctx.trie, L"help", cmd_help_validator);
+  patricia_insert(cmd_ctx.trie, L"reroll", cmd_reroll_validator);
   return true;
 }
 
@@ -2827,8 +2852,9 @@ static cmd_validator parse_repl(void) {
   array_reserve(repl.msg, 1);
   repl.msg->items[repl.msg->count] = L'\0';
   wchar_t *p = repl.msg->items;
-  while (*p && iswspace(*p)) ++p;
-  for (size_t number = 0; *p; ++p) {
+  while (iswspace(*p)) ++p;
+  size_t number = 0;
+  for (; *p; ++p) {
     if (cin_wisnum_1based(*p)) {
       // 4a. build decimal number
       number *= 10;
@@ -2843,6 +2869,7 @@ static cmd_validator parse_repl(void) {
       // if numbers array empty and number, push
       if (!cmd_ctx.numbers.count && number) {
         array_push(&cmd_ctx.numbers, number);
+        number = 0;
       }
       break;
     } else {
@@ -2856,7 +2883,10 @@ static cmd_validator parse_repl(void) {
   }
   if (!*p) {
     // 2/4b. command
-    return cmd_reroll;
+    if (number) {
+      array_push(&cmd_ctx.numbers, number);
+    }
+    return cmd_reroll_validator;
   }
   wchar_t *start = p;
   ++p;
@@ -2866,7 +2896,7 @@ static cmd_validator parse_repl(void) {
     // 3c. possible command
     cmd_validator validator = patricia_query(cmd_ctx.trie, start);
     if (!validator) {
-      set_preview(true, L"no command starts with '%lc'", *start);
+      set_preview(true, L"'%ls' is not a valid command", start);
     }
     return validator;
   }
@@ -2881,11 +2911,12 @@ static cmd_validator parse_repl(void) {
   *p = L'\0';
   cmd_validator validator = patricia_query(cmd_ctx.trie, start);
   if (!validator) {
-    set_preview(true, L"no command starts with '%lc'", *start);
+    set_preview(true, L"'%ls' is not a valid command", start);
   }
   *p = L' ';
   ++p;
   // 5a. unicode starts at p ends at \0
+  cmd_ctx.unicode = p;
   return validator;
 }
 
@@ -2893,9 +2924,6 @@ static void update_preview(void) {
   cmd_validator validator_fn = parse_repl();
   if (validator_fn) {
     validator_fn();
-  } else if (preview.count) {
-  } else {
-    assert(false);
   }
 }
 
