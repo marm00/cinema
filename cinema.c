@@ -2735,6 +2735,7 @@ static inline bool init_timers(void) {
 }
 
 #define COMMAND_NUMBERS_CAP 8
+#define COMMAND_ERROR_WMESSAGE L"ERROR: "
 
 typedef PatriciaNode *cmd_trie;
 typedef patricia_fn cmd_validator;
@@ -2764,7 +2765,7 @@ static struct CommandContext {
 static inline void set_cmd_preview(bool error, const wchar_t *format, ...) {
   assert(cmd_ctx.preview.count == 0);
   if (error) {
-    array_wsextend(&cmd_ctx.preview, L"ERROR: ");
+    array_wsextend(&cmd_ctx.preview, COMMAND_ERROR_WMESSAGE);
   }
   size_t start = cmd_ctx.preview.count;
   va_list args;
@@ -2859,7 +2860,11 @@ static cmd_validator parse_repl(void) {
   // 3/3a. letter+, command begins at start, ends at p
   if (!*p) {
     // 3c. possible command
-    return patricia_query(cmd_ctx.trie, start);
+    cmd_validator validator = patricia_query(cmd_ctx.trie, start);
+    if (!validator) {
+      set_cmd_preview(true, L"no command starts with '%lc'", *start);
+    }
+    return validator;
   }
   if (*p != L' ') {
     int64_t pos = p - repl.msg->items;
@@ -2867,20 +2872,28 @@ static cmd_validator parse_repl(void) {
     set_cmd_preview(true, L"unexpected character '%lc' at position %lld,"
                           L" expected: letter, space, enter",
                     *p, pos + 1);
-    return NULL; // todo
+    return NULL;
   }
   *p = L'\0';
-  patricia_fn cmd = patricia_query(cmd_ctx.trie, start);
+  cmd_validator validator = patricia_query(cmd_ctx.trie, start);
+  if (!validator) {
+    set_cmd_preview(true, L"no command starts with '%lc'", *start);
+  }
   *p = L' ';
   ++p;
   // 5a. unicode starts at p ends at \0
-  return cmd;
+  return validator;
 }
 
 static void update_preview(void) {
-  cmd_validator fn = parse_repl();
-  if (fn) fn();
-  else if (cmd_ctx.preview.count > 0) log_wmessage(LOG_ERROR, cmd_ctx.preview.items);
+  cmd_validator validator_fn = parse_repl();
+  if (validator_fn) {
+    validator_fn();
+  } else if (cmd_ctx.preview.count) {
+    log_wmessage(LOG_ERROR, cmd_ctx.preview.items);
+  } else {
+    assert(false);
+  }
 }
 
 int main(int argc, char **argv) {
