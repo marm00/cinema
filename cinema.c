@@ -568,31 +568,31 @@ static inline bool cin_wisnum_1based(wchar_t c) {
   return c <= L'9' && c >= L'1';
 }
 
-#define CIN_PREVIEW_CAP 256
-
-static wchar_t preview_buf[CIN_PREVIEW_CAP];
-
 static void log_preview(void) {
-  // TODO: dynamic msg
-  wchar_t *msg2 = L"123456789012345678922012345678904567890123456789012348888555";
-  assert(wcslen(msg2) <= SIZE_MAX && "Corrupted string");
-  DWORD msg_len = (DWORD)wcslen(msg2);
-  preview.len = min(msg_len, repl.dwSize_X);
-  assert(wmemchr(msg2, PREFIX_TOKEN, preview.len) == NULL);
+  if (!preview.count) return;
+  preview.len = min(preview.count, repl.dwSize_X);
+  assert(wmemchr(preview.items, PREFIX_TOKEN, preview.len) == NULL);
   // set cursor to scroll down (and prep next write if < repl.dwSize_X)
   SetConsoleCursorPosition(repl.out, preview.pos);
-  if (msg_len < repl.dwSize_X) {
-    wwrite(msg2, msg_len);
-  } else if (msg_len > repl.dwSize_X) {
-    array_ensure_capacity(&preview, repl.dwSize_X);
-    assert(msg_len > 3);
-    wmemcpy(preview.items, msg2, repl.dwSize_X - 3);
-    preview.items[repl.dwSize_X - 3] = '.';
-    preview.items[repl.dwSize_X - 2] = '.';
-    preview.items[repl.dwSize_X - 1] = '.';
+  if (preview.count < repl.dwSize_X) {
+    wwrite(preview.items, preview.count);
+  } else if (preview.count > repl.dwSize_X) {
+    assert(preview.count > 3);
+    DWORD tmp1_pos = repl.dwSize_X - 1;
+    DWORD tmp2_pos = repl.dwSize_X - 2;
+    DWORD tmp3_pos = repl.dwSize_X - 3;
+    wchar_t tmp1 = preview.items[tmp1_pos];
+    wchar_t tmp2 = preview.items[tmp2_pos];
+    wchar_t tmp3 = preview.items[tmp3_pos];
+    preview.items[tmp1_pos] = '.';
+    preview.items[tmp2_pos] = '.';
+    preview.items[tmp3_pos] = '.';
     WriteConsoleOutputCharacterW(repl.out, preview.items, preview.len, preview.pos, &repl._filled);
+    preview.items[tmp1_pos] = tmp1;
+    preview.items[tmp2_pos] = tmp2;
+    preview.items[tmp3_pos] = tmp3;
   } else {
-    WriteConsoleOutputCharacterW(repl.out, msg2, preview.len, preview.pos, &repl._filled);
+    WriteConsoleOutputCharacterW(repl.out, preview.items, preview.len, preview.pos, &repl._filled);
   }
   FillConsoleOutputAttribute(repl.out, FOREGROUND_INTENSITY, preview.len, preview.pos, &repl._filled);
   cursor_curr();
@@ -2742,12 +2742,6 @@ typedef patricia_fn cmd_validator;
 typedef patricia_fn cmd_executor;
 typedef wchar_t *cmd_unicode;
 
-typedef struct CommandPreview {
-  wchar_t *items;
-  size_t count;
-  size_t capacity;
-} CommandPreview;
-
 typedef struct CommandNumbers {
   size_t *items;
   size_t count;
@@ -2756,18 +2750,17 @@ typedef struct CommandNumbers {
 
 static struct CommandContext {
   cmd_trie trie;
-  CommandPreview preview;
   cmd_executor executor;
   CommandNumbers numbers;
   cmd_unicode unicode;
 } cmd_ctx = {0};
 
-static inline void set_cmd_preview(bool error, const wchar_t *format, ...) {
-  assert(cmd_ctx.preview.count == 0);
+static inline void set_preview(bool error, const wchar_t *format, ...) {
+  assert(preview.count == 0);
   if (error) {
-    array_wsextend(&cmd_ctx.preview, COMMAND_ERROR_WMESSAGE);
+    array_wsextend(&preview, COMMAND_ERROR_WMESSAGE);
   }
-  size_t start = cmd_ctx.preview.count;
+  size_t start = preview.count;
   va_list args;
   va_list args_dup;
   va_start(args, format);
@@ -2776,8 +2769,8 @@ static inline void set_cmd_preview(bool error, const wchar_t *format, ...) {
   assert(len_i32 >= 0);
   size_t len = (size_t)len_i32;
   va_end(args);
-  array_grow(&cmd_ctx.preview, len + 1);
-  _vsnwprintf_s(cmd_ctx.preview.items + start, cmd_ctx.preview.capacity, len, format, args_dup);
+  array_grow(&preview, len + 1);
+  _vsnwprintf_s(preview.items + start, preview.capacity, len, format, args_dup);
   va_end(args_dup);
 }
 
@@ -2789,7 +2782,7 @@ static void cmd_reroll(void) {
   log_message(LOG_INFO, "Reroll");
 }
 
-static void init_commands(void) {
+static bool init_commands(void) {
   cmd_ctx.trie = patricia_node(NULL, 0);
   array_alloc(&cmd_ctx.numbers, COMMAND_NUMBERS_CAP);
   patricia_insert(cmd_ctx.trie, L"help", cmd_help);
@@ -2799,6 +2792,7 @@ static void init_commands(void) {
   } else {
     validator_fn();
   }
+  return true;
 }
 
 static cmd_validator parse_repl(void) {
@@ -2816,7 +2810,7 @@ static cmd_validator parse_repl(void) {
   // 4d. 'letter' finishes the number array for command 'letter+' consumption
   // 5. Command 'letter+' with 'space' (3b) may precede 'unicode*'
   // 5a. 'unicode*' string is finished with '\0'
-  cmd_ctx.preview.count = 0;
+  preview.count = 0;
   cmd_ctx.executor = NULL;
   cmd_ctx.numbers.count = 0;
   cmd_ctx.unicode = NULL;
@@ -2844,9 +2838,9 @@ static cmd_validator parse_repl(void) {
     } else {
       int64_t pos = p - repl.msg->items;
       assert(pos >= 0);
-      set_cmd_preview(true, L"unexpected character '%lc' at position %lld,"
-                            L" expected: alphanumeric, space, enter",
-                      *p, pos + 1);
+      set_preview(true, L"unexpected character '%lc' at position %lld,"
+                        L" expected: alphanumeric, space, enter",
+                  *p, pos + 1);
       return NULL;
     }
   }
@@ -2862,22 +2856,22 @@ static cmd_validator parse_repl(void) {
     // 3c. possible command
     cmd_validator validator = patricia_query(cmd_ctx.trie, start);
     if (!validator) {
-      set_cmd_preview(true, L"no command starts with '%lc'", *start);
+      set_preview(true, L"no command starts with '%lc'", *start);
     }
     return validator;
   }
   if (*p != L' ') {
     int64_t pos = p - repl.msg->items;
     assert(pos >= 0);
-    set_cmd_preview(true, L"unexpected character '%lc' at position %lld,"
-                          L" expected: letter, space, enter",
-                    *p, pos + 1);
+    set_preview(true, L"unexpected character '%lc' at position %lld,"
+                      L" expected: letter, space, enter",
+                *p, pos + 1);
     return NULL;
   }
   *p = L'\0';
   cmd_validator validator = patricia_query(cmd_ctx.trie, start);
   if (!validator) {
-    set_cmd_preview(true, L"no command starts with '%lc'", *start);
+    set_preview(true, L"no command starts with '%lc'", *start);
   }
   *p = L' ';
   ++p;
@@ -2889,8 +2883,7 @@ static void update_preview(void) {
   cmd_validator validator_fn = parse_repl();
   if (validator_fn) {
     validator_fn();
-  } else if (cmd_ctx.preview.count) {
-    log_wmessage(LOG_ERROR, cmd_ctx.preview.items);
+  } else if (preview.count) {
   } else {
     assert(false);
   }
@@ -2904,10 +2897,10 @@ int main(int argc, char **argv) {
   return 1;
 #endif
   if (!init_repl()) exit(1);
-  InitializeCriticalSectionAndSpinCount(&log_lock, 0);
+  if (!InitializeCriticalSectionAndSpinCount(&log_lock, 0)) exit(1);
   if (!init_timers()) exit(1);
   if (!init_config("cinema.conf")) exit(1);
-  init_commands();
+  if (!init_commands()) exit(1);
   if (!init_document_listing()) exit(1);
   // uint8_t pattern[] = "twitch.tv";
   // document_listing(pattern, (int32_t)strlen((const char *)pattern));
