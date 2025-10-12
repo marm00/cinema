@@ -856,6 +856,118 @@ static RMQPosition rmq_positional(RMQPosition **m, const int left, const int rig
   return min_left.value < min_right.value ? min_left : min_right;
 }
 
+#define COMMAND_ALPHABET 26
+
+typedef void (*patricia_fn)(void);
+
+typedef struct PatriciaNode {
+  struct PatriciaNode *edges[COMMAND_ALPHABET];
+  const wchar_t *suffix;
+  size_t len;
+  patricia_fn fn;
+  int32_t min;
+} PatriciaNode;
+
+static inline PatriciaNode *patricia_node(const wchar_t *suffix, size_t len) {
+  PatriciaNode *node = calloc(1, sizeof(PatriciaNode));
+  assert(node);
+  node->suffix = suffix;
+  node->len = len;
+  return node;
+}
+
+static inline size_t patricia_lcp(const wchar_t *a, const wchar_t *b, size_t max) {
+  size_t i = 0;
+  while (i < max && a[i] && a[i] == b[i]) ++i;
+  return i;
+}
+
+static inline patricia_fn patricia_query(PatriciaNode *root, const wchar_t *pattern) {
+  assert(root);
+  assert(wcslen(pattern) > 0);
+  assert((*pattern >= L'a' && *pattern <= L'z'));
+  PatriciaNode *node = root;
+  const wchar_t *p = pattern;
+  while (*p) {
+    assert((*p >= L'a' && *p <= L'z'));
+    int32_t i = *p - L'a';
+    PatriciaNode *edge = node->edges[i];
+    if (edge == NULL) {
+      return NULL;
+    }
+    size_t common = patricia_lcp(p, edge->suffix, edge->len);
+    if (p[common] == L'\0') {
+      return edge->fn;
+    }
+    if (common < edge->len) {
+      return NULL;
+    }
+    p += common;
+    node = edge;
+  }
+  return node->fn;
+}
+
+static inline void patricia_insert(PatriciaNode *root, const wchar_t *str, patricia_fn fn) {
+  assert(root);
+  assert(wcslen(str) > 0);
+  assert((*str >= L'a' && *str <= L'z'));
+  PatriciaNode *node = root;
+  const wchar_t *p = str;
+  while (*p) {
+    assert((*p >= L'a' && *p <= L'z'));
+    int32_t i = *p - L'a';
+    PatriciaNode *edge = node->edges[i];
+    if (edge == NULL) {
+      edge = patricia_node(p, wcslen(p));
+      edge->fn = fn;
+      node->edges[i] = edge;
+      if ((node->min == -1) || i < node->min) {
+        // update parent lexicographical minimum
+        node->min = i;
+        node->fn = fn;
+      }
+      return;
+    }
+    size_t common = patricia_lcp(p, edge->suffix, edge->len);
+    if (common == edge->len) {
+      p += common;
+      if (*p == L'\0') {
+        edge->min = -1;
+        edge->fn = fn;
+        return;
+      }
+      node = edge;
+    } else {
+      PatriciaNode *split = patricia_node(edge->suffix, common);
+      edge->suffix += common;
+      edge->len -= common;
+      node->edges[i] = split;
+      split->edges[edge->suffix[0] - L'a'] = edge;
+      p += common;
+      if (*p == L'\0') {
+        split->min = -1;
+        split->fn = fn;
+      } else {
+        PatriciaNode *remainder = patricia_node(p, wcslen(p));
+        remainder->fn = fn;
+        int32_t edge_i = edge->suffix[0] - L'a';
+        int32_t next_i = *p - L'a';
+        split->edges[next_i] = remainder;
+        // update internal node lexicographical minimum
+        if (next_i < edge_i) {
+          split->min = next_i;
+          split->fn = fn;
+        } else {
+          split->min = edge_i;
+          split->fn = edge->fn;
+        }
+      }
+      return;
+    }
+  }
+}
+
 typedef void *radix_v;
 
 typedef enum {
@@ -1041,6 +1153,91 @@ static inline radix_v radix_query(RadixTree *tree, const uint8_t *pattern, size_
     node = internal->child[bit];
   }
   return NULL;
+}
+
+static inline uint64_t fnv1a_hash(const uint8_t *str, size_t len) {
+  uint64_t hash = 0xcbf29ce484222325ULL;
+  for (size_t i = 0; i < len; ++i) {
+    hash ^= str[i];
+    hash *= 0x100000001b3ULL;
+  }
+  return hash;
+}
+
+typedef struct RobinHoodBucket {
+  uint64_t hash;
+  size_t k_offset;
+  int32_t v;
+  int32_t filled;
+} RobinHoodBucket;
+
+typedef struct RobinHoodMap {
+  RobinHoodBucket *items;
+  size_t count;
+  size_t capacity;
+  size_t mask;
+} RobinHoodMap;
+
+#define RH_LOAD_FACTOR 85
+
+static inline void rh_double(RobinHoodMap *map) {
+  size_t prev_cap = map->capacity;
+  RobinHoodBucket *prev_buckets = map->items;
+  table_double(map);
+  map->mask = map->capacity - 1;
+  for (size_t i = 0; i < prev_cap; ++i) {
+    if (prev_buckets[i].filled) {
+      size_t home = prev_buckets[i].hash & map->mask;
+      size_t dist = 0;
+      RobinHoodBucket bucket = prev_buckets[i];
+      while (map->items[home].filled) {
+        size_t cur_dist = (home - (map->items[home].hash & map->mask)) & map->mask;
+        if (cur_dist < dist) {
+          RobinHoodBucket tmp = map->items[home];
+          map->items[home] = bucket;
+          bucket = tmp;
+          dist = cur_dist;
+        }
+        home = (home + 1) & map->mask;
+        ++dist;
+      }
+      map->items[home] = bucket;
+      ++map->count;
+    }
+  }
+  free(prev_buckets);
+}
+
+static inline int32_t rh_insert(RobinHoodMap *map, uint8_t *k_arena, size_t k_offset, size_t len, int32_t v) {
+  // robin hood hashing (without tombstones) with fnv-1a
+  uint8_t *k = k_arena + k_offset;
+  if (map->count >= (map->capacity * RH_LOAD_FACTOR) / 100) {
+    rh_double(map);
+  }
+  uint64_t hash = fnv1a_hash(k, len);
+  size_t i = hash & map->mask;
+  size_t dist = 0;
+  RobinHoodBucket candidate = {.hash = hash, .v = v, .k_offset = k_offset, .filled = 1};
+  while (map->items[i].filled) {
+    uint8_t *i_k = k_arena + map->items[i].k_offset;
+    if (map->items[i].hash == hash && strcmp((char *)i_k, (char *)k) == 0) {
+      log_message(LOG_DEBUG, "Found duplicate key '%s' in hashmap", k);
+      return map->items[i].v;
+    }
+    size_t cur_dist = (i - (map->items[i].hash & map->mask)) & map->mask;
+    if (cur_dist < dist) {
+      // evict rich to house poor
+      RobinHoodBucket tmp = map->items[i];
+      map->items[i] = candidate;
+      candidate = tmp;
+      dist = cur_dist;
+    }
+    i = (i + 1) & map->mask;
+    ++dist;
+  }
+  map->items[i] = candidate;
+  ++map->count;
+  return -1;
 }
 
 typedef struct Conf_Key {
@@ -1313,155 +1510,6 @@ end:
   return ok;
 }
 
-static char *read_json(const char *filename) {
-  if (filename == NULL || filename[0] == '\0') {
-    log_message(LOG_ERROR, "Invalid filename provided (empty string)");
-    return NULL;
-  }
-  FILE *file;
-  int result = fopen_s(&file, filename, "rb");
-  if (result != 0) {
-    char err_buf[CIN_STRERROR_BYTES];
-    strerror_s(err_buf, CIN_STRERROR_BYTES, result);
-    log_message(LOG_ERROR, "Failed to open config file '%s': %s", filename, err_buf);
-    return NULL;
-  }
-  // Move pointer to get size in bytes and back
-  fseek(file, 0, SEEK_END);
-  long filesize = ftell(file);
-  rewind(file);
-  if (filesize < 0L) {
-    log_message(LOG_ERROR, "Failed to get valid file position");
-    fclose(file);
-    return NULL;
-  }
-  // Buffer for file + null terminator
-  char *json_content = (char *)malloc((size_t)filesize + 1L);
-  if (json_content == NULL) {
-    char err_buf[CIN_STRERROR_BYTES];
-    _strerror_s(err_buf, CIN_STRERROR_BYTES, NULL);
-    log_message(LOG_ERROR, "Failed to allocate memory for file '%s' with size '%ld': %s",
-                filename, filesize + 1, err_buf);
-    fclose(file);
-    return NULL;
-  }
-  // Read into buffer with null terminator
-  fread(json_content, 1, (size_t)filesize, file);
-  json_content[filesize] = '\0';
-  fclose(file);
-  return json_content;
-}
-
-static cJSON *parse_json(const char *filename) {
-  char *json_string = read_json(filename);
-  if (json_string == NULL) {
-    return NULL;
-  }
-  cJSON *json = cJSON_Parse(json_string);
-  if (json == NULL) {
-    const char *error_ptr = cJSON_GetErrorPtr();
-    if (error_ptr != NULL) {
-      log_message(LOG_ERROR, "JSON parsing error in file '%s' for contents: %s", filename, error_ptr);
-    }
-  }
-  free(json_string);
-  return json;
-}
-
-static int setup_int(const cJSON *json, const char *key, int default_val) {
-  int result = default_val;
-  cJSON *option = cJSON_GetObjectItemCaseSensitive(json, key);
-  if (cJSON_IsNumber(option)) {
-    result = option->valueint;
-  } else {
-    log_message(LOG_WARNING, "Defaulting '%s' to '%d': did not find number in JSON", key, default_val);
-  }
-  return result;
-}
-
-static double parse_percentage(const char *input, double default_val) {
-  if (input == NULL || input[0] == '\0') {
-    log_message(LOG_WARNING, "Defaulting percentage to '%f': empty input", input);
-    return default_val;
-  }
-  int chars_read = 0;
-  int int_result;
-  int success = sscanf_s(input, "%d%n", &int_result, &chars_read);
-  if (success == 1 && input[chars_read] == '\0') {
-    return (double)int_result;
-  }
-  double double_result;
-  chars_read = 0;
-  success = sscanf_s(input, "%lf%n", &double_result, &chars_read);
-  if (success == 1 && input[chars_read] == '\0') {
-    return double_result;
-  }
-  log_message(LOG_WARNING, "Defaulting percentage '%s' to '%f': failed to parse", input, default_val);
-  return default_val;
-}
-
-static int setup_screen_value(const cJSON *json, const char *key, int default_val, int monitor_dimension) {
-  int result = default_val;
-  cJSON *option = cJSON_GetObjectItemCaseSensitive(json, key);
-  if (cJSON_IsNumber(option)) {
-    result = option->valueint;
-  } else if (cJSON_IsString(option)) {
-    double percentage = parse_percentage(option->valuestring, (double)default_val);
-    if (percentage >= 0 && percentage <= 100) {
-      result = (int)(percentage * monitor_dimension / 100 + 0.5);
-    } else {
-      log_message(LOG_WARNING, "Defaulting '%s' to '%d': percentage '%f' is out of bounds",
-                  key, default_val, percentage);
-      result = default_val;
-    }
-  } else {
-    log_message(LOG_WARNING, "Defaulting '%s' to '%d': did not find number in JSON", key, default_val);
-  }
-  return result;
-}
-
-static bool setup_bool(const cJSON *json, const char *key, int default_val) {
-  if (default_val != 0 && default_val != 1) {
-    log_message(LOG_WARNING, "Default value '%d' invalid for '%s'; defaulting to '0'", default_val, key);
-    default_val = 0;
-  }
-  int result = default_val;
-  cJSON *option = cJSON_GetObjectItemCaseSensitive(json, key);
-  if (cJSON_IsBool(option)) {
-    result = cJSON_IsTrue(option) ? true : false;
-  } else {
-    log_message(LOG_WARNING, "Defaulting '%s' to '%d': did not find boolean in JSON", key, default_val);
-  }
-  return result;
-}
-
-// TODO: remove this function
-static wchar_t *setup_wstring(const cJSON *json, const char *key, const wchar_t *default_val) {
-  if (default_val == NULL) {
-    log_message(LOG_DEBUG, "Passed NULL as default value for setup_wstring");
-  }
-  cJSON *option = cJSON_GetObjectItemCaseSensitive(json, key);
-  wchar_t *result = NULL;
-  if (cJSON_IsString(option) && option->valuestring) {
-    result = malloc(sizeof(wchar_t) * CIN_MAX_PATH);
-    utf8_to_utf16_raw(option->valuestring);
-    if (result == NULL) {
-      log_wmessage(LOG_WARNING, L"Failed to convert JSON string '%s' for key '%s' to UTF-16",
-                   option->valuestring, key);
-    }
-  }
-  if (result == NULL) {
-    if (default_val != NULL) {
-      log_wmessage(LOG_WARNING, L"Defaulting '%s' to '%ls': did not find valid string in JSON",
-                   key, default_val);
-      result = _wcsdup(default_val);
-    } else {
-      log_message(LOG_WARNING, "Returning NULL for '%s': did not find valid string in JSON or default", key);
-    }
-  }
-  return result;
-}
-
 typedef struct Local_Collection {
   // Each byte represents a UTF-8 unit
   uint8_t *text;
@@ -1513,91 +1561,6 @@ static void locals_append(const uint8_t *utf8, int len) {
     locals.bytes += len;
     locals.doc_count++;
   }
-}
-
-static inline uint64_t fnv1a_hash(const uint8_t *str, size_t len) {
-  uint64_t hash = 0xcbf29ce484222325ULL;
-  for (size_t i = 0; i < len; ++i) {
-    hash ^= str[i];
-    hash *= 0x100000001b3ULL;
-  }
-  return hash;
-}
-
-typedef struct RobinHoodBucket {
-  uint64_t hash;
-  size_t k_offset;
-  int32_t v;
-  int32_t filled;
-} RobinHoodBucket;
-
-typedef struct RobinHoodMap {
-  RobinHoodBucket *items;
-  size_t count;
-  size_t capacity;
-  size_t mask;
-} RobinHoodMap;
-
-#define RH_LOAD_FACTOR 85
-
-static inline void rh_double(RobinHoodMap *map) {
-  size_t prev_cap = map->capacity;
-  RobinHoodBucket *prev_buckets = map->items;
-  table_double(map);
-  map->mask = map->capacity - 1;
-  for (size_t i = 0; i < prev_cap; ++i) {
-    if (prev_buckets[i].filled) {
-      size_t home = prev_buckets[i].hash & map->mask;
-      size_t dist = 0;
-      RobinHoodBucket bucket = prev_buckets[i];
-      while (map->items[home].filled) {
-        size_t cur_dist = (home - (map->items[home].hash & map->mask)) & map->mask;
-        if (cur_dist < dist) {
-          RobinHoodBucket tmp = map->items[home];
-          map->items[home] = bucket;
-          bucket = tmp;
-          dist = cur_dist;
-        }
-        home = (home + 1) & map->mask;
-        ++dist;
-      }
-      map->items[home] = bucket;
-      ++map->count;
-    }
-  }
-  free(prev_buckets);
-}
-
-static inline int32_t rh_insert(RobinHoodMap *map, uint8_t *k_arena, size_t k_offset, size_t len, int32_t v) {
-  // robin hood hashing (without tombstones) with fnv-1a
-  uint8_t *k = k_arena + k_offset;
-  if (map->count >= (map->capacity * RH_LOAD_FACTOR) / 100) {
-    rh_double(map);
-  }
-  uint64_t hash = fnv1a_hash(k, len);
-  size_t i = hash & map->mask;
-  size_t dist = 0;
-  RobinHoodBucket candidate = {.hash = hash, .v = v, .k_offset = k_offset, .filled = 1};
-  while (map->items[i].filled) {
-    uint8_t *i_k = k_arena + map->items[i].k_offset;
-    if (map->items[i].hash == hash && strcmp((char *)i_k, (char *)k) == 0) {
-      log_message(LOG_DEBUG, "Found duplicate key '%s' in hashmap", k);
-      return map->items[i].v;
-    }
-    size_t cur_dist = (i - (map->items[i].hash & map->mask)) & map->mask;
-    if (cur_dist < dist) {
-      // evict rich to house poor
-      RobinHoodBucket tmp = map->items[i];
-      map->items[i] = candidate;
-      candidate = tmp;
-      dist = cur_dist;
-    }
-    i = (i + 1) & map->mask;
-    ++dist;
-  }
-  map->items[i] = candidate;
-  ++map->count;
-  return -1;
 }
 
 typedef struct DirectoryNode {
@@ -2048,6 +2011,66 @@ static bool init_config(const char *filename) {
   return true;
 }
 
+static bool init_document_listing(void) {
+  gsa = malloc(locals.bytes_mul32);
+#if defined(LIBSAIS_OPENMP)
+  int32_t result = libsais_gsa_omp(locals.text, gsa, locals.bytes, 0, NULL, 0);
+#else
+  int32_t result = libsais_gsa(locals.text, gsa, locals.bytes, 0, NULL);
+#endif
+  if (result != 0) {
+    log_message(LOG_ERROR, "Failed to build SA");
+    return false;
+  }
+  int32_t *plcp = malloc(locals.bytes_mul32);
+#if defined(LIBSAIS_OPENMP)
+  result = libsais_plcp_gsa_omp(locals.text, gsa, plcp, locals.bytes, 0);
+#else
+  result = libsais_plcp_gsa(locals.text, gsa, plcp, locals.bytes);
+#endif
+  if (result != 0) {
+    log_message(LOG_ERROR, "Failed to build PLCP array");
+    return false;
+  }
+  lcp = malloc(locals.bytes_mul32);
+#if defined(LIBSAIS_OPENMP)
+  result = libsais_lcp_omp(plcp, gsa, lcp, locals.bytes, 0);
+#else
+  result = libsais_lcp(plcp, gsa, lcp, locals.bytes);
+#endif
+  if (result != 0) {
+    log_message(LOG_ERROR, "Failed to build LCP array");
+    return false;
+  }
+  free(plcp);
+  suffix_to_doc = malloc(locals.bytes_mul32);
+  dedup_counters = calloc((size_t)locals.bytes, sizeof(uint16_t));
+  suffix_to_doc[0] = 0;
+  for (int32_t i = 1; i < locals.doc_count; ++i) {
+    suffix_to_doc[i] = gsa[i - 1] + 1;
+  }
+  // TODO: there is probably a faster approach than
+  // binary search, but with omp it is very fast
+#if defined(CIN_OPENMP)
+#pragma omp parallel for if (locals.bytes >= (1 << 16))
+#endif
+  for (int32_t i = locals.doc_count; i < locals.bytes; ++i) {
+    int32_t left = 0;
+    int32_t right = locals.doc_count - 1;
+    int32_t curr = gsa[i];
+    while (left < right) {
+      int32_t mid = left + ((right - left + 1) >> 1);
+      if (suffix_to_doc[mid] <= curr) {
+        left = mid;
+      } else {
+        right = mid - 1;
+      }
+    }
+    suffix_to_doc[i] = suffix_to_doc[left];
+  }
+  return true;
+}
+
 static void document_listing(const uint8_t *pattern, int32_t pattern_len) {
   int32_t left = locals.doc_count;
   int32_t right = locals.bytes - 1;
@@ -2130,102 +2153,6 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len) {
     memset(dedup_counters, 0, (size_t)locals.bytes * sizeof(uint16_t));
     dedup_counter = 1;
   }
-}
-
-static bool init_document_listing(void) {
-  gsa = malloc(locals.bytes_mul32);
-#if defined(LIBSAIS_OPENMP)
-  int32_t result = libsais_gsa_omp(locals.text, gsa, locals.bytes, 0, NULL, 0);
-#else
-  int32_t result = libsais_gsa(locals.text, gsa, locals.bytes, 0, NULL);
-#endif
-  if (result != 0) {
-    log_message(LOG_ERROR, "Failed to build SA");
-    return false;
-  }
-  int32_t *plcp = malloc(locals.bytes_mul32);
-#if defined(LIBSAIS_OPENMP)
-  result = libsais_plcp_gsa_omp(locals.text, gsa, plcp, locals.bytes, 0);
-#else
-  result = libsais_plcp_gsa(locals.text, gsa, plcp, locals.bytes);
-#endif
-  if (result != 0) {
-    log_message(LOG_ERROR, "Failed to build PLCP array");
-    return false;
-  }
-  lcp = malloc(locals.bytes_mul32);
-#if defined(LIBSAIS_OPENMP)
-  result = libsais_lcp_omp(plcp, gsa, lcp, locals.bytes, 0);
-#else
-  result = libsais_lcp(plcp, gsa, lcp, locals.bytes);
-#endif
-  if (result != 0) {
-    log_message(LOG_ERROR, "Failed to build LCP array");
-    return false;
-  }
-  free(plcp);
-  suffix_to_doc = malloc(locals.bytes_mul32);
-  dedup_counters = calloc((size_t)locals.bytes, sizeof(uint16_t));
-  suffix_to_doc[0] = 0;
-  for (int32_t i = 1; i < locals.doc_count; ++i) {
-    suffix_to_doc[i] = gsa[i - 1] + 1;
-  }
-  // TODO: there is probably a faster approach than
-  // binary search, but with omp it is very fast
-#if defined(CIN_OPENMP)
-#pragma omp parallel for if (locals.bytes >= (1 << 16))
-#endif
-  for (int32_t i = locals.doc_count; i < locals.bytes; ++i) {
-    int32_t left = 0;
-    int32_t right = locals.doc_count - 1;
-    int32_t curr = gsa[i];
-    while (left < right) {
-      int32_t mid = left + ((right - left + 1) >> 1);
-      if (suffix_to_doc[mid] <= curr) {
-        left = mid;
-      } else {
-        right = mid - 1;
-      }
-    }
-    suffix_to_doc[i] = suffix_to_doc[left];
-  }
-  return true;
-}
-
-static bool setup_layouts(const cJSON *layouts) {
-  if (layouts == NULL) {
-    return false;
-  }
-  // https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getsystemmetrics
-  int monitor_width = GetSystemMetrics(SM_CXSCREEN);
-  int monitor_height = GetSystemMetrics(SM_CYSCREEN);
-  if (monitor_width == 0 || monitor_height == 0) {
-    log_message(LOG_ERROR, "Failed to scan monitor for screen dimensions.");
-    return false;
-  }
-  log_message(LOG_INFO, "Monitor dimensions: %dx%d", monitor_width, monitor_height);
-  const cJSON *layout = layouts->child;
-  while (layout != NULL) {
-    log_message(LOG_DEBUG, "Processing layout '%s'", layout->string);
-    if (!cJSON_IsArray(layout)) {
-      log_message(LOG_ERROR, "Layout '%s' is not an Array", layout->string);
-      return false;
-    }
-    const cJSON *screen = layout->child;
-    int i = 0;
-    while (screen != NULL) {
-      log_message(LOG_DEBUG, "Adding screen %d", i);
-      int left = setup_screen_value(screen, "left", 0, monitor_width);
-      int top = setup_screen_value(screen, "top", 0, monitor_height);
-      int width = setup_screen_value(screen, "width", 0, monitor_width);
-      int height = setup_screen_value(screen, "height", 0, monitor_height);
-      log_message(LOG_DEBUG, "left=%d top=%d width=%d height=%d", left, top, width, height);
-      screen = screen->next;
-      ++i;
-    }
-    layout = layout->next;
-  }
-  return true;
 }
 
 // https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-transactnamedpipe
@@ -2799,118 +2726,6 @@ static inline bool init_timers(void) {
   if (!register_console_timer(CIN_TIMER_RESIZE, resize_console, 100LL)) return false;
   // if (!register_console_timer(CIN_TIMER_EVALUATE, evaluate_input, 2000LL)) return false;
   return true;
-}
-
-#define COMMAND_ALPHABET 26
-
-typedef void (*patricia_fn)(void);
-
-typedef struct PatriciaNode {
-  struct PatriciaNode *edges[COMMAND_ALPHABET];
-  const wchar_t *suffix;
-  size_t len;
-  patricia_fn fn;
-  int32_t min;
-} PatriciaNode;
-
-static inline PatriciaNode *patricia_node(const wchar_t *suffix, size_t len) {
-  PatriciaNode *node = calloc(1, sizeof(PatriciaNode));
-  assert(node);
-  node->suffix = suffix;
-  node->len = len;
-  return node;
-}
-
-static inline size_t patricia_lcp(const wchar_t *a, const wchar_t *b, size_t max) {
-  size_t i = 0;
-  while (i < max && a[i] && a[i] == b[i]) ++i;
-  return i;
-}
-
-static inline patricia_fn patricia_query(PatriciaNode *root, const wchar_t *pattern) {
-  assert(root);
-  assert(wcslen(pattern) > 0);
-  assert((*pattern >= L'a' && *pattern <= L'z'));
-  PatriciaNode *node = root;
-  const wchar_t *p = pattern;
-  while (*p) {
-    assert((*p >= L'a' && *p <= L'z'));
-    int32_t i = *p - L'a';
-    PatriciaNode *edge = node->edges[i];
-    if (edge == NULL) {
-      return NULL;
-    }
-    size_t common = patricia_lcp(p, edge->suffix, edge->len);
-    if (p[common] == L'\0') {
-      return edge->fn;
-    }
-    if (common < edge->len) {
-      return NULL;
-    }
-    p += common;
-    node = edge;
-  }
-  return node->fn;
-}
-
-static inline void patricia_insert(PatriciaNode *root, const wchar_t *str, patricia_fn fn) {
-  assert(root);
-  assert(wcslen(str) > 0);
-  assert((*str >= L'a' && *str <= L'z'));
-  PatriciaNode *node = root;
-  const wchar_t *p = str;
-  while (*p) {
-    assert((*p >= L'a' && *p <= L'z'));
-    int32_t i = *p - L'a';
-    PatriciaNode *edge = node->edges[i];
-    if (edge == NULL) {
-      edge = patricia_node(p, wcslen(p));
-      edge->fn = fn;
-      node->edges[i] = edge;
-      if ((node->min == -1) || i < node->min) {
-        // update parent lexicographical minimum
-        node->min = i;
-        node->fn = fn;
-      }
-      return;
-    }
-    size_t common = patricia_lcp(p, edge->suffix, edge->len);
-    if (common == edge->len) {
-      p += common;
-      if (*p == L'\0') {
-        edge->min = -1;
-        edge->fn = fn;
-        return;
-      }
-      node = edge;
-    } else {
-      PatriciaNode *split = patricia_node(edge->suffix, common);
-      edge->suffix += common;
-      edge->len -= common;
-      node->edges[i] = split;
-      split->edges[edge->suffix[0] - L'a'] = edge;
-      p += common;
-      if (*p == L'\0') {
-        split->min = -1;
-        split->fn = fn;
-      } else {
-        PatriciaNode *remainder = patricia_node(p, wcslen(p));
-        remainder->fn = fn;
-        int32_t edge_i = edge->suffix[0] - L'a';
-        int32_t next_i = *p - L'a';
-        split->edges[next_i] = remainder;
-        // update internal node lexicographical minimum
-        if (next_i < edge_i) {
-          split->min = next_i;
-          split->fn = fn;
-        } else {
-          split->min = edge_i;
-          split->fn = edge->fn;
-        }
-      }
-      return;
-    }
-  }
 }
 
 static void cmd_help(void) {
