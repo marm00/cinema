@@ -1170,7 +1170,7 @@ static inline void radix_insert(RadixTree *tree, const uint8_t *key, size_t len,
   *parent = (RadixNode *)new_internal;
 }
 
-static inline radix_v radix_query(RadixTree *tree, const uint8_t *pattern, size_t len) {
+static inline radix_v radix_query(RadixTree *tree, const uint8_t *pattern, size_t len, const uint8_t **out) {
   assert(tree);
   assert(pattern);
   RadixNode *node = tree->root;
@@ -1178,6 +1178,7 @@ static inline radix_v radix_query(RadixTree *tree, const uint8_t *pattern, size_
     if (node->type == RADIX_LEAF) {
       RadixLeaf *leaf = (RadixLeaf *)node;
       if (leaf->len >= len && memcmp(leaf->key, pattern, len) == 0) {
+        if (out) *out = leaf->key;
         return leaf->base.v;
       }
       return NULL;
@@ -2770,6 +2771,7 @@ typedef patricia_fn cmd_validator;
 typedef patricia_fn cmd_executor;
 typedef wchar_t *cmd_unicode;
 typedef Cin_Layout *cmd_layout;
+typedef TagItems *cmd_tag;
 
 typedef struct CommandNumbers {
   size_t *items;
@@ -2780,6 +2782,7 @@ typedef struct CommandNumbers {
 static struct CommandContext {
   cmd_trie trie;
   cmd_layout layout;
+  cmd_tag tag;
   cmd_executor executor;
   CommandNumbers numbers;
   cmd_unicode unicode;
@@ -2804,6 +2807,24 @@ static inline void set_preview(bool error, const wchar_t *format, ...) {
   va_end(args_dup);
 }
 
+static inline bool validate_screens(void) {
+  size_t n = cmd_ctx.numbers.count;
+  size_t screen_count = cmd_ctx.layout->count;
+  if (n > screen_count) {
+    set_preview(true, L"layout only has %zu screens (%zu provided)", screen_count, n);
+    return false;
+  }
+  for (size_t i = 0; i < cmd_ctx.numbers.count; ++i) {
+    size_t screen_index = cmd_ctx.numbers.items[i] - 1;
+    if (screen_index >= screen_count) {
+      set_preview(true, L"screen %zu not found, layout only has %zu screens",
+                  screen_index + 1, screen_count);
+      return false;
+    }
+  }
+  return true;
+}
+
 static void cmd_help_executor(void) {
   EnterCriticalSection(&log_lock);
   hide_cursor();
@@ -2816,36 +2837,55 @@ static void cmd_help_executor(void) {
   set_preview(false, L"scroll up to see a list of all commands");
 }
 
+static void cmd_help_validator(void) {
+  set_preview(false, L"help (show a list of all commands)");
+  cmd_ctx.executor = cmd_help_executor;
+}
+
 static void cmd_reroll_executor(void) {
   log_message(LOG_INFO, "Reroll executor");
 }
 
-static void cmd_help_validator(void) {
-  cmd_ctx.executor = cmd_help_executor;
-  set_preview(false, L"help (show a list of all commands)");
-}
-
 static void cmd_reroll_validator(void) {
+  if (!validate_screens()) return;
   size_t n = cmd_ctx.numbers.count;
   size_t screen_count = cmd_ctx.layout->count;
-  if (n > screen_count) {
-    set_preview(true, L"layout only has %zu screens (%zu provided)", screen_count, n);
-    return;
-  }
-  for (size_t i = 0; i < cmd_ctx.numbers.count; ++i) {
-    size_t screen_index = cmd_ctx.numbers.items[i] - 1;
-    if (screen_index >= screen_count) {
-      set_preview(true, L"screen %zu not found, layout only has %zu screens",
-                  screen_index + 1, screen_count);
+  set_preview(false, L"reroll %zu screen%lc", n ? n : screen_count, n == 1 ? L'\0' : L's');
+  cmd_ctx.executor = cmd_reroll_executor;
+}
+
+static void cmd_tag_executor(void) {
+  log_message(LOG_INFO, "Tag executor");
+}
+
+static void cmd_tag_validator(void) {
+  if (!validate_screens()) return;
+  radix_v tag = NULL;
+  const uint8_t *tag_name = NULL;
+  if (cmd_ctx.unicode) {
+    int32_t len = utf16_to_utf8(cmd_ctx.unicode);
+    tag = radix_query(tag_tree, utf8_buf.items, (size_t)len - 1, &tag_name);
+    if (!tag) {
+      set_preview(true, L"tag does not exist: '%ls'", cmd_ctx.unicode);
+      return;
+    }
+  } else {
+    tag = radix_query(tag_tree, (const uint8_t *)"", 0, &tag_name);
+    if (!tag) {
+      set_preview(true, L"configuration does not contain any tags");
       return;
     }
   }
-  cmd_ctx.executor = cmd_reroll_executor;
-  set_preview(false, L"reroll %zu screen%lc", n ? n : screen_count, n == 1 ? L'\0' : L's');
+  assert(tag);
+  assert(tag_name);
+  utf8_to_utf16_raw((char *)tag_name);
+  set_preview(false, L"tag %ls", utf16_buf_raw.items);
+  cmd_ctx.tag = (cmd_tag)tag;
+  cmd_ctx.executor = cmd_tag_executor;
 }
 
 static bool init_commands(void) {
-  radix_v layout_v = radix_query(layout_tree, (const uint8_t *)"", 0);
+  radix_v layout_v = radix_query(layout_tree, (const uint8_t *)"", 0, NULL);
   if (!layout_v) {
     log_message(LOG_ERROR, "No layouts found in config file");
     return false;
@@ -2855,6 +2895,7 @@ static bool init_commands(void) {
   array_alloc(&cmd_ctx.numbers, COMMAND_NUMBERS_CAP);
   patricia_insert(cmd_ctx.trie, L"help", cmd_help_validator);
   patricia_insert(cmd_ctx.trie, L"reroll", cmd_reroll_validator);
+  patricia_insert(cmd_ctx.trie, L"tag", cmd_tag_validator);
   return true;
 }
 
@@ -2894,7 +2935,7 @@ static cmd_validator parse_repl(void) {
       number = 0;
     } else if (cin_wisloweralpha(*p)) {
       // if numbers array empty and number, push
-      if (!cmd_ctx.numbers.count && number) {
+      if (number) {
         array_push(&cmd_ctx.numbers, number);
         number = 0;
       }
@@ -3176,6 +3217,7 @@ int main(int argc, char **argv) {
     case VK_TAB:
       continue;
     default:
+      // TODO: treat surrogate pairs as single units
       if (!c || c == PREFIX_TOKEN) continue;
       c = cin_wlower(c);
       assert(repl.msg_index <= repl.msg->count);
