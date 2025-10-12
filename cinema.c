@@ -298,6 +298,7 @@ static struct Console_Preview {
   wchar_t *items;
   DWORD count;
   DWORD capacity;
+  DWORD prev_len;
   DWORD len;
   COORD pos;
 } preview = {0};
@@ -570,14 +571,22 @@ static inline bool cin_wisnum_1based(wchar_t c) {
 
 static void log_preview(void) {
   if (!preview.count) return;
+  DWORD msg_len = preview.count;
   preview.len = min(preview.count, repl.dwSize_X);
   assert(wmemchr(preview.items, PREFIX_TOKEN, preview.len) == NULL);
   // set cursor to scroll down (and prep next write if < repl.dwSize_X)
   SetConsoleCursorPosition(repl.out, preview.pos);
-  if (preview.count < repl.dwSize_X) {
-    wwrite(preview.items, preview.count);
-  } else if (preview.count > repl.dwSize_X) {
-    assert(preview.count > 3);
+  if (msg_len < repl.dwSize_X) {
+    if (preview.prev_len > msg_len) {
+      DWORD leftover = max(preview.prev_len, repl.dwSize_X) - msg_len;
+      SHORT prev_posX = preview.pos.X;
+      preview.pos.X = (SHORT)msg_len;
+      FillConsoleOutputCharacterW(repl.out, CIN_SPACE, leftover, preview.pos, &repl._filled);
+      preview.pos.X = prev_posX;
+    }
+    wwrite(preview.items, msg_len);
+  } else if (msg_len > repl.dwSize_X) {
+    assert(msg_len > 3);
     DWORD tmp1_pos = repl.dwSize_X - 1;
     DWORD tmp2_pos = repl.dwSize_X - 2;
     DWORD tmp3_pos = repl.dwSize_X - 3;
@@ -596,6 +605,7 @@ static void log_preview(void) {
   }
   FillConsoleOutputAttribute(repl.out, FOREGROUND_INTENSITY, preview.len, preview.pos, &repl._filled);
   cursor_curr();
+  preview.prev_len = preview.len;
 }
 
 static inline void rewrite_post_log(void) {
