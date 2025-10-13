@@ -1287,7 +1287,7 @@ static inline int32_t rh_insert(RobinHoodMap *map, uint8_t *k_arena, size_t k_of
   while (map->items[i].filled) {
     uint8_t *i_k = k_arena + map->items[i].k_offset;
     if (map->items[i].hash == hash && strcmp((char *)i_k, (char *)k) == 0) {
-      log_message(LOG_DEBUG, "Found duplicate key '%s' in hashmap", k);
+      log_message(LOG_TRACE, "Found duplicate key '%s' in hashmap", k);
       return map->items[i].v;
     }
     size_t cur_dist = (i - (map->items[i].hash & map->mask)) & map->mask;
@@ -2917,7 +2917,7 @@ static void cmd_tag_executor(void) {
           size_t start_len = strlen((char *)start_str);
           int32_t dup = rh_insert(&duplicates, k_arena, start->k_offset, start_len + 1, 0);
           if (dup >= 0) continue;
-          log_message(LOG_DEBUG, "Tag directory: %s (%zu)", start_str, start_len);
+          log_message(LOG_TRACE, "Tag directory: %s (%zu)", start_str, start_len);
           array_extend(collected, start->items, start->count);
           for (size_t j = ++node_index; j < dir_node_arena.count; ++j) {
             DirectoryNode *node = &dir_node_arena.items[j];
@@ -2927,7 +2927,7 @@ static void cmd_tag_executor(void) {
             size_t len = strlen((char *)str);
             dup = rh_insert(&duplicates, k_arena, node->k_offset, len + 1, 0);
             if (dup >= 0) continue;
-            log_message(LOG_DEBUG, "Tag directory: %s", str);
+            log_message(LOG_TRACE, "Tag directory: %s", str);
             array_extend(collected, node->items, node->count);
           }
         }
@@ -2998,6 +2998,25 @@ static void cmd_tag_validator(void) {
   cmd_ctx.executor = cmd_tag_executor;
 }
 
+static void cmd_search_executor(void) {
+  log_message(LOG_INFO, "Search executor");
+  uint8_t *pattern = (uint8_t *)"";
+  int32_t len = 0;
+  if (cmd_ctx.unicode) {
+    len = utf16_to_utf8(cmd_ctx.unicode);
+    pattern = utf8_buf.items;
+  }
+  log_message(LOG_DEBUG, "Search with pattern: %s, len: %d", pattern, len);
+  document_listing(pattern, len - 1);
+  // TODO:
+}
+
+static void cmd_search_validator(void) {
+  if (!validate_screens()) return;
+  set_preview(false, L"search %s", cmd_ctx.unicode ? cmd_ctx.unicode : L"");
+  cmd_ctx.executor = cmd_search_executor;
+}
+
 static bool init_commands(void) {
   radix_v layout_v = radix_query(layout_tree, (const uint8_t *)"", 0, NULL);
   if (!layout_v) {
@@ -3010,6 +3029,7 @@ static bool init_commands(void) {
   patricia_insert(cmd_ctx.trie, L"help", cmd_help_validator);
   patricia_insert(cmd_ctx.trie, L"reroll", cmd_reroll_validator);
   patricia_insert(cmd_ctx.trie, L"tag", cmd_tag_validator);
+  patricia_insert(cmd_ctx.trie, L"search", cmd_search_validator);
   return true;
 }
 
