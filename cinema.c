@@ -3023,7 +3023,7 @@ static void cmd_maximize_executor(void) {
   Cin_Screen *screen = &cmd_ctx.layout->items[target];
   uint8_t *geometry = screen_arena.items + screen->offset;
   int32_t len = screen->len;
-  log_message(LOG_DEBUG, "Screen: %s (%d)", (char*) geometry, len);
+  log_message(LOG_DEBUG, "Screen: %s (%d)", (char *)geometry, len);
 }
 
 static void cmd_maximize_validator(void) {
@@ -3046,6 +3046,53 @@ static void cmd_maximize_validator(void) {
   cmd_ctx.executor = cmd_maximize_executor;
 }
 
+static void cmd_swap_executor(void) {
+  log_message(LOG_INFO, "Swap executor");
+  size_t first = cmd_ctx.numbers.items[0];
+  size_t second = cmd_ctx.numbers.items[1];
+  log_message(LOG_DEBUG, "Swapping screen %zu with %zu", first, second);
+}
+
+static void cmd_swap_validator(void) {
+  size_t n = cmd_ctx.numbers.count;
+  size_t screen_count = cmd_ctx.layout->count;
+  if (screen_count < 2) {
+    set_preview(false, L"swap requires a layout with at least 2 screens");
+    return;
+  }
+  switch (n) {
+  case 2:
+    size_t first = cmd_ctx.numbers.items[0];
+    size_t second = cmd_ctx.numbers.items[1];
+    if (first == second) {
+      set_preview(false, L"swap needs 2 unique screens, not both %zu", first);
+      return;
+    }
+    if (first > screen_count || second > screen_count) {
+      set_preview(false, L"cannot swap screen %zu with %zu, layout only has %zu screens",
+                  first, second, screen_count);
+      return;
+    }
+    break;
+  case 1:
+    set_preview(false, L"swap misses another number: %zu ... swap", cmd_ctx.numbers.items[0]);
+    return;
+  case 0:
+    if (cmd_ctx.layout->count != 2) {
+      set_preview(false, L"swap requires 2 numbers or a layout with 2 screens");
+      return;
+    }
+    array_push(&cmd_ctx.numbers, 1);
+    array_push(&cmd_ctx.numbers, 2);
+    break;
+  default:
+    set_preview(false, L"swap must have 2 or 0 numbers, not %zu", n);
+    return;
+  }
+  cmd_ctx.executor = cmd_swap_executor;
+  set_preview(true, L"swap screen %zu with %zu", cmd_ctx.numbers.items[0], cmd_ctx.numbers.items[1]);
+}
+
 static bool init_commands(void) {
   radix_v layout_v = radix_query(layout_tree, (const uint8_t *)"", 0, NULL);
   if (!layout_v) {
@@ -3060,6 +3107,7 @@ static bool init_commands(void) {
   patricia_insert(cmd_ctx.trie, L"tag", cmd_tag_validator);
   patricia_insert(cmd_ctx.trie, L"search", cmd_search_validator);
   patricia_insert(cmd_ctx.trie, L"maximize", cmd_maximize_validator);
+  patricia_insert(cmd_ctx.trie, L"swap", cmd_swap_validator);
   return true;
 }
 
