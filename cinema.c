@@ -206,6 +206,7 @@ static const char *LOG_LEVELS[LOG_TRACE + 1] = {"ERROR", "WARNING", "INFO", "DEB
     (t)->items = calloc((cap), sizeof(*(t)->items)); \
     (t)->capacity = (cap);                           \
     (t)->count = 0;                                  \
+    (t)->mask = (t)->capacity - 1;                   \
   } while (0)
 
 #define table_double(t)                                      \
@@ -801,6 +802,43 @@ static int32_t hash_i32(const Hash_Table_I32 *table, const int32_t value) {
     hash = (hash + 1) & (table->len - 1);
   }
   return hash;
+}
+
+static inline size_t deduplicate_i32(int32_t *items, size_t len) {
+  if (len <= 128) {
+    size_t k = 0;
+    for (size_t i = 0; i < len; ++i) {
+      size_t j;
+      for (j = 0; j < k; ++j) {
+        if (items[i] == items[j]) break;
+      }
+      if (j == k) items[k++] = items[i];
+    }
+    return k;
+  } else {
+    size_t hash_n = 1;
+    while (hash_n < len * 2) hash_n <<= 1;
+    int32_t *seen = calloc(hash_n, sizeof(int32_t));
+    uint8_t *set = calloc(hash_n, sizeof(int32_t));
+    size_t k = 0;
+    size_t mask = hash_n - 1;
+    for (size_t i = 0; i < len; ++i) {
+      int32_t v = items[i];
+      size_t hash = (size_t)v * 2654435761U;
+      size_t index = hash & mask;
+      while (set[index]) {
+        if (seen[index] == v) goto next;
+        index = (index + 1) & mask;
+      }
+      seen[index] = v;
+      set[index] = 1;
+      items[k++] = v;
+    next:;
+    }
+    free(seen);
+    free(set);
+    return k;
+  }
 }
 
 static int **rmqa(const int *a, const int n) {
@@ -1592,6 +1630,7 @@ static void locals_append(const uint8_t *utf8, int len) {
 }
 
 typedef struct DirectoryNode {
+  size_t k_offset;
   int32_t *items;
   size_t count;
   size_t capacity;
@@ -1620,7 +1659,14 @@ typedef struct TagUrlItems {
   size_t capacity;
 } TagUrlItems;
 
+typedef struct TagCollected {
+  int32_t *items;
+  size_t count;
+  size_t capacity;
+} TagCollected;
+
 typedef struct TagItems {
+  TagCollected *collected;
   TagDirectories *directories;
   TagPatternItems *pattern_items;
   TagUrlItems *url_items;
@@ -1704,12 +1750,6 @@ static void setup_directory(const char *path, TagDirectories *tag_dirs) {
       // into the dynamic nodes arena. Lazy evaluation: the terminator but must
       // be calculated (e.g., using the document ids to retrieve file names and
       // recognize depth reduction)
-      DirectoryNode *dup_node = &dir_node_arena.items[dup_index];
-      assert(dup_node >= dir_node_arena.items);
-      assert(dup_node < dir_node_arena.items + dir_node_arena.count);
-      for (DirectoryNode *p = dup_node; p < dir_node_arena.items + dir_node_arena.count; ++p) {
-        // log_message(LOG_INFO, "count=%llu", p->count);
-      }
       if (tag_dirs) {
         array_push(tag_dirs, dup_index);
       }
@@ -1740,6 +1780,7 @@ static void setup_directory(const char *path, TagDirectories *tag_dirs) {
     dir_string_arena.count += bytes;
     array_grow(&dir_node_arena, 1);
     DirectoryNode *node = &dir_node_arena.items[node_tail];
+    node->k_offset = k_offset;
     assert(node);
     array_alloc(node, CIN_DIRECTORY_ITEMS_CAP);
     if (tag_dirs) {
@@ -1924,9 +1965,6 @@ static bool init_config(const char *filename) {
   table_calloc(&dir_map, CIN_DIRECTORIES_CAP);
   table_calloc(&pat_map, CIN_PATTERN_ITEMS_CAP);
   table_calloc(&url_map, CIN_URLS_CAP);
-  dir_map.mask = dir_map.capacity - 1;
-  pat_map.mask = pat_map.capacity - 1;
-  url_map.mask = url_map.capacity - 1;
   array_alloc(&dir_node_arena, CIN_DIRECTORIES_CAP);
   array_alloc(&dir_string_arena, CIN_DIRECTORY_STRINGS_CAP);
   tag_tree = radix_tree();
@@ -2021,7 +2059,6 @@ static bool init_config(const char *filename) {
   table_free(dir_map);
   table_free(pat_map);
   table_free(url_map);
-  array_free(dir_string_arena);
   array_free(dir_stack);
   array_free(conf_parser.scopes);
   array_free(conf_parser.buf);
@@ -2849,6 +2886,90 @@ static void cmd_reroll_validator(void) {
 
 static void cmd_tag_executor(void) {
   log_message(LOG_INFO, "Tag executor");
+  TagCollected *collected = cmd_ctx.tag->collected;
+  if (collected) {
+    // TODO:
+    return;
+  }
+  collected = calloc(1, sizeof(TagCollected));
+  size_t directory_k = 0;
+  size_t pattern_k = 0;
+  size_t url_k = 0;
+#if defined(CIN_OPENMP)
+#pragma omp parallel
+#pragma omp single
+#endif
+  {
+    if (cmd_ctx.tag->directories) {
+#if defined(CIN_OPENMP)
+#pragma omp task priority(8)
+#endif
+      {
+        TagDirectories *directories = cmd_ctx.tag->directories;
+        directory_k = deduplicate_i32(directories->items, directories->count);
+        RobinHoodMap duplicates = {0};
+        table_calloc(&duplicates, CIN_DIRECTORIES_CAP);
+        uint8_t *k_arena = dir_string_arena.items;
+        for (size_t i = 0; i < directory_k; ++i) {
+          size_t node_index = (size_t)directories->items[i];
+          DirectoryNode *start = &dir_node_arena.items[node_index];
+          uint8_t *start_str = dir_string_arena.items + start->k_offset;
+          size_t start_len = strlen((char *)start_str);
+          int32_t dup = rh_insert(&duplicates, k_arena, start->k_offset, start_len + 1, 0);
+          if (dup >= 0) continue;
+          log_message(LOG_DEBUG, "Tag directory: %s (%zu)", start_str, start_len);
+          array_extend(collected, start->items, start->count);
+          for (size_t j = ++node_index; j < dir_node_arena.count; ++j) {
+            DirectoryNode *node = &dir_node_arena.items[j];
+            if (!node->count) continue;
+            uint8_t *str = dir_string_arena.items + node->k_offset;
+            if (strncmp((char *)str, (char *)start_str, start_len) != 0) break;
+            size_t len = strlen((char *)str);
+            dup = rh_insert(&duplicates, k_arena, node->k_offset, len + 1, 0);
+            if (dup >= 0) continue;
+            log_message(LOG_DEBUG, "Tag directory: %s", str);
+            array_extend(collected, node->items, node->count);
+          }
+        }
+        table_free(duplicates);
+      }
+    }
+    if (cmd_ctx.tag->pattern_items) {
+#if defined(CIN_OPENMP)
+#pragma omp task priority(4)
+#endif
+      {
+        TagPatternItems *patterns = cmd_ctx.tag->pattern_items;
+        pattern_k = deduplicate_i32(patterns->items, patterns->count);
+      }
+    }
+    if (cmd_ctx.tag->url_items) {
+#if defined(CIN_OPENMP)
+#pragma omp task priority(2)
+#endif
+      {
+        TagUrlItems *urls = cmd_ctx.tag->url_items;
+        url_k = deduplicate_i32(urls->items, urls->count);
+      }
+    }
+#if defined(CIN_OPENMP)
+#pragma omp taskwait
+#endif
+  }
+  if (directory_k) {
+    array_free(*cmd_ctx.tag->directories);
+    free(cmd_ctx.tag->directories);
+  }
+  if (pattern_k) {
+    array_extend(collected, cmd_ctx.tag->pattern_items->items, pattern_k);
+    array_free(*cmd_ctx.tag->pattern_items);
+    free(cmd_ctx.tag->pattern_items);
+  }
+  if (url_k) {
+    array_extend(collected, cmd_ctx.tag->url_items->items, url_k);
+    array_free(*cmd_ctx.tag->url_items);
+    free(cmd_ctx.tag->url_items);
+  }
 }
 
 static void cmd_tag_validator(void) {
