@@ -577,13 +577,6 @@ static void log_preview(void) {
   // set cursor to scroll down (and prep next write if < repl.dwSize_X)
   SetConsoleCursorPosition(repl.out, preview.pos);
   if (msg_len < repl.dwSize_X) {
-    if (preview.prev_len > msg_len) {
-      DWORD leftover = max(preview.prev_len, repl.dwSize_X) - msg_len;
-      SHORT prev_posX = preview.pos.X;
-      preview.pos.X = (SHORT)msg_len;
-      FillConsoleOutputCharacterW(repl.out, CIN_SPACE, leftover, preview.pos, &repl._filled);
-      preview.pos.X = prev_posX;
-    }
     wwrite(preview.items, msg_len);
   } else if (msg_len > repl.dwSize_X) {
     assert(msg_len > 3);
@@ -3217,19 +3210,44 @@ int main(int argc, char **argv) {
     case VK_TAB:
       continue;
     default:
-      // TODO: treat surrogate pairs as single units
       if (!c || c == PREFIX_TOKEN) continue;
-      c = cin_wlower(c);
-      assert(repl.msg_index <= repl.msg->count);
-      if (repl.msg_index == repl.msg->count) {
-        wwrite(&c, 1);
-        array_push(repl.msg, c);
-        ++repl.msg_index;
-      } else {
-        array_insert(repl.msg, repl.msg_index, c);
-        wwrite(repl.msg->items + repl.msg_index, repl.msg->count - repl.msg_index);
-        ++repl.msg_index;
+      static wchar_t surrogates[4] = {0};
+      static wchar_t surrogate_count = 0;
+      assert(surrogate_count < 4);
+      if (surrogate_count == 3) {
+        // completed grapheme cluster
+        // overwrite first written pair
+        assert(IS_LOW_SURROGATE(c));
+        surrogates[surrogate_count] = c;
+        array_wsplice(repl.msg, repl.msg_index, surrogates + 2, 2);
+        repl.msg_index -= 2;
         cursor_curr();
+        wwrite(repl.msg->items + repl.msg_index, repl.msg->count - repl.msg_index);
+        repl.msg_index += 4;
+        cursor_curr();
+        surrogate_count = 0;
+      } else if (surrogate_count == 1) {
+        // pair might be completed, write just in case
+        assert(IS_LOW_SURROGATE(c));
+        surrogates[surrogate_count++] = c;
+        array_wsplice(repl.msg, repl.msg_index, surrogates, 2);
+        wwrite(repl.msg->items + repl.msg_index, repl.msg->count - repl.msg_index);
+        repl.msg_index += 2;
+        cursor_curr();
+      } else {
+        if (IS_HIGH_SURROGATE(c)) {
+          surrogates[surrogate_count++] = c;
+          continue;
+        } else {
+          assert(!IS_LOW_SURROGATE(c));
+          c = cin_wlower(c);
+          array_winsert(repl.msg, repl.msg_index, c);
+          wwrite(repl.msg->items + repl.msg_index, repl.msg->count - repl.msg_index);
+          ++repl.msg_index;
+          cursor_curr();
+          surrogate_count = 0;
+        }
+        break;
       }
       log_wmessage(LOG_TRACE, L"char=%hu (%lc), v=%hu (%lc), pressed=%d, ctrl=%d",
                    c, c, vk, vk ? vk : L' ', input.Event.KeyEvent.bKeyDown, ctrl_on(&input));
@@ -3247,6 +3265,7 @@ int main(int argc, char **argv) {
       }
     }
     set_preview_pos(preview_line);
+    clear_preview(0);
     update_preview();
     log_preview();
   }
