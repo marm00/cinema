@@ -3211,6 +3211,12 @@ int main(int argc, char **argv) {
       continue;
     default:
       if (!c || c == PREFIX_TOKEN) continue;
+      // NOTE: When a surrogate is encountered, build a grapheme cluster.
+      // This ensures that, not only do we store the wchar_t properly, we also
+      // print it accurately as it arrives - the console normally appends a space
+      // after every single surrogate, so a pair will be 4 cells (now 2).
+      // Unfortunately, surrogate pairs still corrupt cursor positioning, which
+      // you could try to alleviate by tracking cells - simply not worth.
       static wchar_t surrogates[4] = {0};
       static wchar_t surrogate_count = 0;
       assert(surrogate_count < 4);
