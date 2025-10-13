@@ -2818,9 +2818,9 @@ static struct CommandContext {
   cmd_unicode unicode;
 } cmd_ctx = {0};
 
-static inline void set_preview(bool error, const wchar_t *format, ...) {
+static inline void set_preview(bool success, const wchar_t *format, ...) {
   preview.count = 0;
-  if (error) {
+  if (!success) {
     array_wsextend(&preview, COMMAND_ERROR_WMESSAGE);
   }
   size_t start = preview.count;
@@ -2841,13 +2841,13 @@ static inline bool validate_screens(void) {
   size_t n = cmd_ctx.numbers.count;
   size_t screen_count = cmd_ctx.layout->count;
   if (n > screen_count) {
-    set_preview(true, L"layout only has %zu screens (%zu provided)", screen_count, n);
+    set_preview(false, L"layout only has %zu screens (%zu provided)", screen_count, n);
     return false;
   }
   for (size_t i = 0; i < cmd_ctx.numbers.count; ++i) {
     size_t screen_index = cmd_ctx.numbers.items[i] - 1;
     if (screen_index >= screen_count) {
-      set_preview(true, L"screen %zu not found, layout only has %zu screens",
+      set_preview(false, L"screen %zu not found, layout only has %zu screens",
                   screen_index + 1, screen_count);
       return false;
     }
@@ -2864,11 +2864,11 @@ static void cmd_help_executor(void) {
   wwrite(L"\b\b\0", 3);
   rewrite_post_log();
   LeaveCriticalSection(&log_lock);
-  set_preview(false, L"scroll up to see a list of all commands");
+  set_preview(true, L"scroll up to see a list of all commands");
 }
 
 static void cmd_help_validator(void) {
-  set_preview(false, L"help (show a list of all commands)");
+  set_preview(true, L"help (show a list of all commands)");
   cmd_ctx.executor = cmd_help_executor;
 }
 
@@ -2880,7 +2880,7 @@ static void cmd_reroll_validator(void) {
   if (!validate_screens()) return;
   size_t n = cmd_ctx.numbers.count;
   size_t screen_count = cmd_ctx.layout->count;
-  set_preview(false, L"reroll %zu screen%lc", n ? n : screen_count, n == 1 ? L'\0' : L's');
+  set_preview(true, L"reroll %zu screen%lc", n ? n : screen_count, n == 1 ? L'\0' : L's');
   cmd_ctx.executor = cmd_reroll_executor;
 }
 
@@ -2980,20 +2980,20 @@ static void cmd_tag_validator(void) {
     int32_t len = utf16_to_utf8(cmd_ctx.unicode);
     tag = radix_query(tag_tree, utf8_buf.items, (size_t)len - 1, &tag_name);
     if (!tag) {
-      set_preview(true, L"tag does not exist: '%ls'", cmd_ctx.unicode);
+      set_preview(false, L"tag does not exist: '%ls'", cmd_ctx.unicode);
       return;
     }
   } else {
     tag = radix_query(tag_tree, (const uint8_t *)"", 0, &tag_name);
     if (!tag) {
-      set_preview(true, L"configuration does not contain any tags");
+      set_preview(false, L"configuration does not contain any tags");
       return;
     }
   }
   assert(tag);
   assert(tag_name);
   utf8_to_utf16_raw((char *)tag_name);
-  set_preview(false, L"tag %ls", utf16_buf_raw.items);
+  set_preview(true, L"tag %ls", utf16_buf_raw.items);
   cmd_ctx.tag = (cmd_tag)tag;
   cmd_ctx.executor = cmd_tag_executor;
 }
@@ -3013,8 +3013,37 @@ static void cmd_search_executor(void) {
 
 static void cmd_search_validator(void) {
   if (!validate_screens()) return;
-  set_preview(false, L"search %s", cmd_ctx.unicode ? cmd_ctx.unicode : L"");
+  set_preview(true, L"search %s", cmd_ctx.unicode ? cmd_ctx.unicode : L"");
   cmd_ctx.executor = cmd_search_executor;
+}
+
+static void cmd_maximize_executor(void) {
+  log_message(LOG_INFO, "Maximize executor");
+  size_t target = cmd_ctx.numbers.count ? cmd_ctx.numbers.items[0] - 1 : 0;
+  Cin_Screen *screen = &cmd_ctx.layout->items[target];
+  uint8_t *geometry = screen_arena.items + screen->offset;
+  int32_t len = screen->len;
+  log_message(LOG_DEBUG, "Screen: %s (%d)", (char*) geometry, len);
+}
+
+static void cmd_maximize_validator(void) {
+  size_t n = cmd_ctx.numbers.count;
+  if (n > 1) {
+    set_preview(false, L"maximize supports 1 screen, not %zu", n);
+    return;
+  }
+  size_t screen = 1;
+  if (n) {
+    size_t target = cmd_ctx.numbers.items[0];
+    if (target > cmd_ctx.layout->count) {
+      set_preview(false, L"cannot maximize screen %zu, layout only has %zu screens",
+                  target, cmd_ctx.layout->count);
+      return;
+    }
+    screen = target;
+  }
+  set_preview(true, L"maximize screen %zu", screen);
+  cmd_ctx.executor = cmd_maximize_executor;
 }
 
 static bool init_commands(void) {
@@ -3030,6 +3059,7 @@ static bool init_commands(void) {
   patricia_insert(cmd_ctx.trie, L"reroll", cmd_reroll_validator);
   patricia_insert(cmd_ctx.trie, L"tag", cmd_tag_validator);
   patricia_insert(cmd_ctx.trie, L"search", cmd_search_validator);
+  patricia_insert(cmd_ctx.trie, L"maximize", cmd_maximize_validator);
   return true;
 }
 
@@ -3077,8 +3107,8 @@ static cmd_validator parse_repl(void) {
     } else {
       int64_t pos = p - repl.msg->items;
       assert(pos >= 0);
-      set_preview(true, L"unexpected character '%lc' at position %lld,"
-                        L" expected: alphanumeric, space, enter",
+      set_preview(false, L"unexpected character '%lc' at position %lld,"
+                         L" expected: alphanumeric, space, enter",
                   *p, pos + 1);
       return NULL;
     }
@@ -3098,22 +3128,22 @@ static cmd_validator parse_repl(void) {
     // 3c. possible command
     cmd_validator validator = patricia_query(cmd_ctx.trie, start);
     if (!validator) {
-      set_preview(true, L"'%ls' is not a valid command", start);
+      set_preview(false, L"'%ls' is not a valid command", start);
     }
     return validator;
   }
   if (*p != L' ') {
     int64_t pos = p - repl.msg->items;
     assert(pos >= 0);
-    set_preview(true, L"unexpected character '%lc' at position %lld,"
-                      L" expected: letter, space, enter",
+    set_preview(false, L"unexpected character '%lc' at position %lld,"
+                       L" expected: letter, space, enter",
                 *p, pos + 1);
     return NULL;
   }
   *p = L'\0';
   cmd_validator validator = patricia_query(cmd_ctx.trie, start);
   if (!validator) {
-    set_preview(true, L"'%ls' is not a valid command", start);
+    set_preview(false, L"'%ls' is not a valid command", start);
   }
   *p = L' ';
   ++p;
