@@ -2886,12 +2886,12 @@ static void cmd_reroll_validator(void) {
 
 static void cmd_tag_executor(void) {
   log_message(LOG_INFO, "Tag executor");
-  TagCollected *collected = cmd_ctx.tag->collected;
-  if (collected) {
+  if (cmd_ctx.tag->collected) {
     // TODO:
     return;
   }
-  collected = calloc(1, sizeof(TagCollected));
+  cmd_ctx.tag->collected = calloc(1, sizeof(TagCollected));
+  TagCollected *collected = cmd_ctx.tag->collected;
   size_t directory_k = 0;
   size_t pattern_k = 0;
   size_t url_k = 0;
