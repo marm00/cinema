@@ -2828,6 +2828,7 @@ typedef struct CommandTargets {
 static struct CommandContext {
   cmd_trie trie;
   cmd_layout layout;
+  cmd_layout queued_layout;
   cmd_tag tag;
   cmd_executor executor;
   CommandNumbers numbers;
@@ -3037,7 +3038,7 @@ static void cmd_search_executor(void) {
     len = utf16_to_utf8(cmd_ctx.unicode);
     pattern = utf8_buf.items;
   }
-  log_message(LOG_DEBUG, "Search with pattern: %s, len: %d", pattern, len);
+  log_message(LOG_DEBUG, "Search with pattern: '%s', len: %d", pattern, len);
   document_listing(pattern, len - 1);
   // TODO:
 }
@@ -3122,15 +3123,44 @@ static void cmd_swap_validator(void) {
   set_preview(true, L"swap screen %zu with %zu", cmd_ctx.numbers.items[0], cmd_ctx.numbers.items[1]);
 }
 
-static inline void cmd_quit_executor(void) {
+static void cmd_quit_executor(void) {
   clear_preview(0);
   show_cursor();
   exit(1);
 }
 
-static inline void cmd_quit_validator(void) {
+static void cmd_quit_validator(void) {
   set_preview(true, L"quit (also closes screens)");
   cmd_ctx.executor = cmd_quit_executor;
+}
+
+static void cmd_layout_executor(void) {
+  cmd_ctx.layout = cmd_ctx.queued_layout;
+}
+
+static void cmd_layout_validator(void) {
+  radix_v layout = NULL;
+  const uint8_t *layout_name = NULL;
+  if (cmd_ctx.unicode) {
+    int32_t len = utf16_to_utf8(cmd_ctx.unicode);
+    layout = radix_query(layout_tree, utf8_buf.items, (size_t)len - 1, &layout_name);
+    if (!layout) {
+      set_preview(false, L"layout does not exist: '%ls'", cmd_ctx.unicode);
+      return;
+    }
+  } else {
+    layout = radix_query(layout_tree, (const uint8_t *)"", 0, &layout_name);
+    if (!layout) {
+      set_preview(false, L"configuration does not contain any layouts");
+      return;
+    }
+  }
+  assert(layout);
+  assert(layout_name);
+  utf8_to_utf16_raw((char *)layout_name);
+  set_preview(true, L"change layout to '%s'", utf16_buf_raw.items);
+  cmd_ctx.queued_layout = (cmd_layout)layout;
+  cmd_ctx.executor = cmd_layout_executor;
 }
 
 static inline void register_cmd(const wchar_t *name, const wchar_t *help, cmd_validator validator) {
@@ -3154,9 +3184,10 @@ static bool init_commands(void) {
   cmd_ctx.layout = (cmd_layout)layout_v;
   cmd_ctx.trie = patricia_node(NULL, 0);
   array_alloc(&cmd_ctx.numbers, COMMAND_NUMBERS_CAP);
-  array_wsextend(&cmd_ctx.help, CR L"Available commands:" WCRLF L"  "
-                                   L"Note: optional arguments before/after in brackets []" WCRLF);
+  array_wsextend(&cmd_ctx.help, WCR L"Available commands:" WCRLF L"  "
+                                    L"Note: optional arguments before/after in brackets []" WCRLF);
   register_cmd(L"help", L"Show all commands", cmd_help_validator);
+  register_cmd(L"layout", L"Change layout to name [layout (name)]", cmd_layout_validator);
   register_cmd(L"reroll", L"Shuffle media [(1 2 ..) reroll]", cmd_reroll_validator);
   register_cmd(L"tag", L"Limit media to tag [(1 2 ..) tag (name)]", cmd_tag_validator);
   register_cmd(L"search", L"Limit media to term [(1 2 ..) search (term)]", cmd_search_validator);
