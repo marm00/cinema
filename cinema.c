@@ -728,6 +728,16 @@ static void log_wmessage(Cin_Log_Level level, const wchar_t *wmessage, ...) {
   LeaveCriticalSection(&log_lock);
 }
 
+static void wwrite_safe(const wchar_t *str, DWORD len) {
+  clear_preview(0);
+  EnterCriticalSection(&log_lock);
+  hide_cursor();
+  cursor_home();
+  wwrite(str, len);
+  rewrite_post_log();
+  LeaveCriticalSection(&log_lock);
+}
+
 static void log_last_error(const char *message, ...) {
   static const DWORD dw_flags = FORMAT_MESSAGE_ALLOCATE_BUFFER |
                                 FORMAT_MESSAGE_FROM_SYSTEM |
@@ -1011,26 +1021,6 @@ static inline void patricia_insert(PatriciaNode *root, const wchar_t *str, patri
         }
       }
       return;
-    }
-  }
-}
-
-static inline void patricia_nodes_list(PatriciaNode *root) {
-  assert(root);
-  bool leaf = true;
-  for (int32_t i = 0; i < COMMAND_ALPHABET; i++) {
-    if (root->edges[i]) {
-      leaf = false;
-      break;
-    }
-  }
-  if (leaf) {
-    wwrite(root->suffix, (DWORD)root->len);
-    wwrite(L", ", 2);
-  }
-  for (int32_t i = 0; i < COMMAND_ALPHABET; i++) {
-    if (root->edges[i]) {
-      patricia_nodes_list(root->edges[i]);
     }
   }
 }
@@ -2809,6 +2799,12 @@ typedef struct CommandNumbers {
   size_t capacity;
 } CommandNumbers;
 
+typedef struct CommandHelp {
+  wchar_t *items;
+  size_t count;
+  size_t capacity;
+} CommandHelp;
+
 static struct CommandContext {
   cmd_trie trie;
   cmd_layout layout;
@@ -2816,6 +2812,7 @@ static struct CommandContext {
   cmd_executor executor;
   CommandNumbers numbers;
   cmd_unicode unicode;
+  CommandHelp help;
 } cmd_ctx = {0};
 
 static inline void set_preview(bool success, const wchar_t *format, ...) {
@@ -2856,14 +2853,7 @@ static inline bool validate_screens(void) {
 }
 
 static void cmd_help_executor(void) {
-  EnterCriticalSection(&log_lock);
-  hide_cursor();
-  cursor_home();
-  writef(CR "[%s] List of all commands: ", LOG_LEVELS[LOG_INFO]);
-  patricia_nodes_list(cmd_ctx.trie);
-  wwrite(L"\b\b\0", 3);
-  rewrite_post_log();
-  LeaveCriticalSection(&log_lock);
+  wwrite_safe(cmd_ctx.help.items, (DWORD)cmd_ctx.help.count);
   set_preview(true, L"scroll up to see a list of all commands");
 }
 
@@ -3093,6 +3083,18 @@ static void cmd_swap_validator(void) {
   set_preview(true, L"swap screen %zu with %zu", cmd_ctx.numbers.items[0], cmd_ctx.numbers.items[1]);
 }
 
+static inline void register_cmd(const wchar_t *name, const wchar_t *help, cmd_validator validator) {
+  assert(wmemchr(help, PREFIX_TOKEN, wcslen(help)) == NULL);
+  patricia_insert(cmd_ctx.trie, name, validator);
+  const wchar_t *v_str = WCRLF L"  %-10s %s";
+  int32_t len_i32 = _scwprintf(v_str, name, help);
+  assert(len_i32);
+  size_t len = (size_t)len_i32 + 1;
+  array_reserve(&cmd_ctx.help, len);
+  swprintf(cmd_ctx.help.items + cmd_ctx.help.count, len, v_str, name, help);
+  cmd_ctx.help.count += len;
+}
+
 static bool init_commands(void) {
   radix_v layout_v = radix_query(layout_tree, (const uint8_t *)"", 0, NULL);
   if (!layout_v) {
@@ -3102,12 +3104,15 @@ static bool init_commands(void) {
   cmd_ctx.layout = (cmd_layout)layout_v;
   cmd_ctx.trie = patricia_node(NULL, 0);
   array_alloc(&cmd_ctx.numbers, COMMAND_NUMBERS_CAP);
-  patricia_insert(cmd_ctx.trie, L"help", cmd_help_validator);
-  patricia_insert(cmd_ctx.trie, L"reroll", cmd_reroll_validator);
-  patricia_insert(cmd_ctx.trie, L"tag", cmd_tag_validator);
-  patricia_insert(cmd_ctx.trie, L"search", cmd_search_validator);
-  patricia_insert(cmd_ctx.trie, L"maximize", cmd_maximize_validator);
-  patricia_insert(cmd_ctx.trie, L"swap", cmd_swap_validator);
+  array_wsextend(&cmd_ctx.help, CR L"Available commands:" WCRLF L"  "
+                                   L"Note: optional arguments before/after in brackets []" WCRLF);
+  register_cmd(L"help", L"Show all commands", cmd_help_validator);
+  register_cmd(L"reroll", L"Shuffle media [(1 2 ..) reroll]", cmd_reroll_validator);
+  register_cmd(L"tag", L"Limit media to given tag [(1 2 ..) tag name]", cmd_tag_validator);
+  register_cmd(L"search", L"Limit media to given term [(1 2 ..) search term]", cmd_search_validator);
+  register_cmd(L"maximize", L"Maximize and close others [(1) maximize]", cmd_maximize_validator);
+  register_cmd(L"swap", L"Swap screen contents [(1 2) swap]", cmd_swap_validator);
+  array_push(&cmd_ctx.help, L'\0');
   return true;
 }
 
