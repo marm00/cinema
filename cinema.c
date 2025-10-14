@@ -3135,7 +3135,9 @@ static void cmd_quit_validator(void) {
 }
 
 static void cmd_layout_executor(void) {
+  cmd_layout tmp_layout = cmd_ctx.layout;
   cmd_ctx.layout = cmd_ctx.queued_layout;
+  cmd_ctx.queued_layout = tmp_layout;
 }
 
 static void cmd_layout_validator(void) {
@@ -3148,17 +3150,14 @@ static void cmd_layout_validator(void) {
       set_preview(false, L"layout does not exist: '%ls'", cmd_ctx.unicode);
       return;
     }
+    utf8_to_utf16_raw((char *)layout_name);
+    assert(layout);
+    assert(layout_name);
+    set_preview(true, L"change layout to '%s'", utf16_buf_raw.items);
   } else {
-    layout = radix_query(layout_tree, (const uint8_t *)"", 0, &layout_name);
-    if (!layout) {
-      set_preview(false, L"configuration does not contain any layouts");
-      return;
-    }
+    layout = cmd_ctx.queued_layout;
+    set_preview(true, L"use previous layout");
   }
-  assert(layout);
-  assert(layout_name);
-  utf8_to_utf16_raw((char *)layout_name);
-  set_preview(true, L"change layout to '%s'", utf16_buf_raw.items);
   cmd_ctx.queued_layout = (cmd_layout)layout;
   cmd_ctx.executor = cmd_layout_executor;
 }
@@ -3182,6 +3181,7 @@ static bool init_commands(void) {
     return false;
   }
   cmd_ctx.layout = (cmd_layout)layout_v;
+  cmd_ctx.queued_layout = cmd_ctx.layout;
   cmd_ctx.trie = patricia_node(NULL, 0);
   array_alloc(&cmd_ctx.numbers, COMMAND_NUMBERS_CAP);
   array_wsextend(&cmd_ctx.help, WCR L"Available commands:" WCRLF L"  "
