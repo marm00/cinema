@@ -122,6 +122,12 @@ static const char *LOG_LEVELS[LOG_TRACE + 1] = {"ERROR", "WARNING", "INFO", "DEB
     wmemcpy((a)->items, (new_items), (n)); \
   } while (0)
 
+#define array_wsset(a, new_items)                                \
+  do {                                                           \
+    size_t n = sizeof((new_items)) / sizeof(*((new_items))) - 1; \
+    array_wset((a), (new_items), n);                             \
+  } while (0)
+
 #define array_sset(a, new_items)        \
   do {                                  \
     size_t n = sizeof((new_items)) - 1; \
@@ -438,6 +444,10 @@ static inline COORD tail_cursor(void) {
   return index_to_cursor_repl(repl.msg->count);
 }
 
+static inline COORD home_cursor(void) {
+  return repl.home;
+}
+
 static inline void cursor_home(void) {
   SetConsoleCursorPosition(repl.out, repl.home);
 }
@@ -448,6 +458,10 @@ static inline void cursor_curr(void) {
 
 static inline void cursor_tail(void) {
   SetConsoleCursorPosition(repl.out, tail_cursor());
+}
+
+static inline void cursor_set(COORD cursor) {
+  SetConsoleCursorPosition(repl.out, cursor);
 }
 
 static inline void clear_tail(DWORD count) {
@@ -2805,6 +2819,12 @@ typedef struct CommandHelp {
   size_t capacity;
 } CommandHelp;
 
+typedef struct CommandTargets {
+  wchar_t *items;
+  size_t count;
+  size_t capacity;
+} CommandTargets;
+
 static struct CommandContext {
   cmd_trie trie;
   cmd_layout layout;
@@ -2812,6 +2832,7 @@ static struct CommandContext {
   cmd_executor executor;
   CommandNumbers numbers;
   cmd_unicode unicode;
+  CommandTargets targets;
   CommandHelp help;
 } cmd_ctx = {0};
 
@@ -2834,14 +2855,17 @@ static inline void set_preview(bool success, const wchar_t *format, ...) {
   va_end(args_dup);
 }
 
+#define CIN_SCREEN_SEPARATOR L", "
+#define CIN_SCREEN_SEPARATOR_LEN sizeof(CIN_SCREEN_SEPARATOR) / sizeof(*CIN_SCREEN_SEPARATOR) - 1
+
 static inline bool validate_screens(void) {
-  size_t n = cmd_ctx.numbers.count;
+  size_t n_count = cmd_ctx.numbers.count;
   size_t screen_count = cmd_ctx.layout->count;
-  if (n > screen_count) {
-    set_preview(false, L"layout only has %zu screens (%zu provided)", screen_count, n);
+  if (n_count > screen_count) {
+    set_preview(false, L"layout only has %zu screens (%zu provided)", screen_count, n_count);
     return false;
   }
-  for (size_t i = 0; i < cmd_ctx.numbers.count; ++i) {
+  for (size_t i = 0; i < n_count; ++i) {
     size_t screen_index = cmd_ctx.numbers.items[i] - 1;
     if (screen_index >= screen_count) {
       set_preview(false, L"screen %zu not found, layout only has %zu screens",
@@ -2849,12 +2873,34 @@ static inline bool validate_screens(void) {
       return false;
     }
   }
+  cmd_ctx.targets.count = 0;
+  if (!n_count || n_count == screen_count) {
+    array_wsextend(&cmd_ctx.targets, L"(all screens)\0");
+  } else {
+    if (n_count == 1) {
+      array_wsextend(&cmd_ctx.targets, L"(screen ");
+    } else {
+      array_wsextend(&cmd_ctx.targets, L"(screens ");
+    }
+    const wchar_t *v_str = L"%zu" CIN_SCREEN_SEPARATOR;
+    for (size_t i = 0; i < n_count; ++i) {
+      size_t number = cmd_ctx.numbers.items[i];
+      int32_t len_i32 = _scwprintf(v_str, number);
+      assert(len_i32);
+      size_t len = (size_t)len_i32 + 1;
+      array_reserve(&cmd_ctx.targets, len);
+      swprintf(cmd_ctx.targets.items + cmd_ctx.targets.count, len, v_str, number);
+      cmd_ctx.targets.count += len - 1;
+    }
+    cmd_ctx.targets.count -= CIN_SCREEN_SEPARATOR_LEN;
+    array_push(&cmd_ctx.targets, L')');
+    cmd_ctx.targets.items[cmd_ctx.targets.count] = L'\0';
+  }
   return true;
 }
 
 static void cmd_help_executor(void) {
   wwrite_safe(cmd_ctx.help.items, (DWORD)cmd_ctx.help.count);
-  set_preview(true, L"scroll up to see a list of all commands");
 }
 
 static void cmd_help_validator(void) {
@@ -2867,9 +2913,7 @@ static void cmd_reroll_executor(void) {
 
 static void cmd_reroll_validator(void) {
   if (!validate_screens()) return;
-  size_t n = cmd_ctx.numbers.count;
-  size_t screen_count = cmd_ctx.layout->count;
-  set_preview(true, L"reroll %zu screen%lc", n ? n : screen_count, n == 1 ? L'\0' : L's');
+  set_preview(true, L"reroll %s", cmd_ctx.targets.items);
   cmd_ctx.executor = cmd_reroll_executor;
 }
 
@@ -2981,7 +3025,7 @@ static void cmd_tag_validator(void) {
   assert(tag);
   assert(tag_name);
   utf8_to_utf16_raw((char *)tag_name);
-  set_preview(true, L"tag %ls", utf16_buf_raw.items);
+  set_preview(true, L"tag '%s' %s", utf16_buf_raw.items, cmd_ctx.targets.items);
   cmd_ctx.tag = (cmd_tag)tag;
   cmd_ctx.executor = cmd_tag_executor;
 }
@@ -3000,7 +3044,7 @@ static void cmd_search_executor(void) {
 
 static void cmd_search_validator(void) {
   if (!validate_screens()) return;
-  set_preview(true, L"search %s", cmd_ctx.unicode ? cmd_ctx.unicode : L"");
+  set_preview(true, L"search '%s' %s", cmd_ctx.unicode ? cmd_ctx.unicode : L"", cmd_ctx.targets.items);
   cmd_ctx.executor = cmd_search_executor;
 }
 
@@ -3098,7 +3142,7 @@ static inline void register_cmd(const wchar_t *name, const wchar_t *help, cmd_va
   size_t len = (size_t)len_i32 + 1;
   array_reserve(&cmd_ctx.help, len);
   swprintf(cmd_ctx.help.items + cmd_ctx.help.count, len, v_str, name, help);
-  cmd_ctx.help.count += len;
+  cmd_ctx.help.count += len - 1;
 }
 
 static bool init_commands(void) {
@@ -3114,12 +3158,11 @@ static bool init_commands(void) {
                                    L"Note: optional arguments before/after in brackets []" WCRLF);
   register_cmd(L"help", L"Show all commands", cmd_help_validator);
   register_cmd(L"reroll", L"Shuffle media [(1 2 ..) reroll]", cmd_reroll_validator);
-  register_cmd(L"tag", L"Limit media to given tag [(1 2 ..) tag name]", cmd_tag_validator);
-  register_cmd(L"search", L"Limit media to given term [(1 2 ..) search term]", cmd_search_validator);
+  register_cmd(L"tag", L"Limit media to tag [(1 2 ..) tag (name)]", cmd_tag_validator);
+  register_cmd(L"search", L"Limit media to term [(1 2 ..) search (term)]", cmd_search_validator);
   register_cmd(L"maximize", L"Maximize and close others [(1) maximize]", cmd_maximize_validator);
   register_cmd(L"swap", L"Swap screen contents [(1 2) swap]", cmd_swap_validator);
   register_cmd(L"quit", L"Close screens and quit Cinema", cmd_quit_validator);
-  array_push(&cmd_ctx.help, L'\0');
   return true;
 }
 
