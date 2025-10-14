@@ -2863,7 +2863,6 @@ static void cmd_help_validator(void) {
 }
 
 static void cmd_reroll_executor(void) {
-  log_message(LOG_INFO, "Reroll executor");
 }
 
 static void cmd_reroll_validator(void) {
@@ -2875,7 +2874,6 @@ static void cmd_reroll_validator(void) {
 }
 
 static void cmd_tag_executor(void) {
-  log_message(LOG_INFO, "Tag executor");
   if (cmd_ctx.tag->collected) {
     // TODO:
     return;
@@ -2989,9 +2987,8 @@ static void cmd_tag_validator(void) {
 }
 
 static void cmd_search_executor(void) {
-  log_message(LOG_INFO, "Search executor");
   uint8_t *pattern = (uint8_t *)"";
-  int32_t len = 0;
+  int32_t len = 1;
   if (cmd_ctx.unicode) {
     len = utf16_to_utf8(cmd_ctx.unicode);
     pattern = utf8_buf.items;
@@ -3008,7 +3005,6 @@ static void cmd_search_validator(void) {
 }
 
 static void cmd_maximize_executor(void) {
-  log_message(LOG_INFO, "Maximize executor");
   size_t target = cmd_ctx.numbers.count ? cmd_ctx.numbers.items[0] - 1 : 0;
   Cin_Screen *screen = &cmd_ctx.layout->items[target];
   uint8_t *geometry = screen_arena.items + screen->offset;
@@ -3037,7 +3033,6 @@ static void cmd_maximize_validator(void) {
 }
 
 static void cmd_swap_executor(void) {
-  log_message(LOG_INFO, "Swap executor");
   size_t first = cmd_ctx.numbers.items[0];
   size_t second = cmd_ctx.numbers.items[1];
   log_message(LOG_DEBUG, "Swapping screen %zu with %zu", first, second);
@@ -3083,6 +3078,17 @@ static void cmd_swap_validator(void) {
   set_preview(true, L"swap screen %zu with %zu", cmd_ctx.numbers.items[0], cmd_ctx.numbers.items[1]);
 }
 
+static inline void cmd_quit_executor(void) {
+  clear_preview(0);
+  show_cursor();
+  exit(1);
+}
+
+static inline void cmd_quit_validator(void) {
+  set_preview(true, L"quit (also closes screens)");
+  cmd_ctx.executor = cmd_quit_executor;
+}
+
 static inline void register_cmd(const wchar_t *name, const wchar_t *help, cmd_validator validator) {
   assert(wmemchr(help, PREFIX_TOKEN, wcslen(help)) == NULL);
   patricia_insert(cmd_ctx.trie, name, validator);
@@ -3112,6 +3118,7 @@ static bool init_commands(void) {
   register_cmd(L"search", L"Limit media to given term [(1 2 ..) search term]", cmd_search_validator);
   register_cmd(L"maximize", L"Maximize and close others [(1) maximize]", cmd_maximize_validator);
   register_cmd(L"swap", L"Swap screen contents [(1 2) swap]", cmd_swap_validator);
+  register_cmd(L"quit", L"Close screens and quit Cinema", cmd_quit_validator);
   array_push(&cmd_ctx.help, L'\0');
   return true;
 }
@@ -3477,7 +3484,6 @@ int main(int argc, char **argv) {
           cursor_curr();
           surrogate_count = 0;
         }
-        break;
       }
       log_wmessage(LOG_TRACE, L"char=%hu (%lc), v=%hu (%lc), pressed=%d, ctrl=%d",
                    c, c, vk, vk ? vk : L' ', input.Event.KeyEvent.bKeyDown, ctrl_on(&input));
