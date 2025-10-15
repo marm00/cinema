@@ -31,7 +31,6 @@
 #include <windows.h>
 #endif
 
-#include "cJSON.h"
 #include "libsais.h"
 
 #if defined(CIN_OPENMP)
@@ -2341,41 +2340,9 @@ static bool overlap_read(Instance *instance) {
   return true;
 }
 
-static cJSON *mpv_command(const char *command, int64_t request_id) {
-  cJSON *json = cJSON_CreateObject();
-  if (json == NULL) {
-    goto end;
-  }
-  cJSON *cmd_array = cJSON_CreateArray();
-  if (cmd_array == NULL) {
-    goto end;
-  }
-  cJSON *cmd_element = cJSON_CreateString(command);
-  if (cmd_element == NULL) {
-    goto end;
-  }
-  cJSON_AddItemToArray(cmd_array, cmd_element);
-  cJSON_AddItemToObject(json, "command", cmd_array);
-  // NOTE: precision loss when request_id is extremely
-  // large (unrealistic), but mostly a problem if the data type
-  // changes from int64_t to something else
-  cJSON *cmd_id = cJSON_CreateNumber((double)request_id);
-  cJSON_AddItemToObject(json, "request_id", cmd_id);
-  return json;
-end:
-  cJSON_Delete(json);
-  return NULL;
-}
-
-static bool overlap_write(Instance *instance, cJSON *command) {
-  // TODO: dont use cjson, use static buffer
+static bool overlap_write(Instance *instance, const char *command_str) {
+  // TODO: redesign
   log_message(LOG_TRACE, "Initializing write on PID %lu", instance->pi.dwProcessId);
-  char *command_str = cJSON_PrintUnformatted(command);
-  cJSON_Delete(command);
-  if (command_str == NULL) {
-    log_message(LOG_ERROR, "Failed to cJSON_PrintUnformatted the mpv command.");
-    return false;
-  }
   size_t len = strlen(command_str);
   Overlapped_Write *write = calloc(1, sizeof(*write));
   if (write == NULL) {
@@ -2386,16 +2353,11 @@ static bool overlap_write(Instance *instance, cJSON *command) {
     log_message(LOG_ERROR, "Message len '%d' bigger than buffer '%d'", len, sizeof(write->buffer));
     return false;
   }
-  // shift \0 up to insert \n
-  // and include \0 in len (bytes)
-  command_str[len++] = '\n';
-  command_str[len++] = '\0';
   memcpy(write->buffer, command_str, len);
   write->ovl_context.is_write = true;
   write->bytes = len;
   write->request_id = instance->request_id - 1;
-  log_message(LOG_DEBUG, "Writing message: %.*s", len - 2, write->buffer);
-  free(command_str);
+  log_message(LOG_DEBUG, "Writing message: %.*s", len, write->buffer);
   if (!WriteFile(instance->pipe, write->buffer, (DWORD)len, NULL, &write->ovl_context.ovl)) {
     switch (GetLastError()) {
     case ERROR_IO_PENDING:
@@ -2531,25 +2493,19 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
         break;
       }
     } else {
-      cJSON *json = cJSON_Parse(instance->read_buffer);
-      if (json == NULL) {
-        // TODO: when observed, resolve instead of break
-        log_message(LOG_ERROR, "Failed to parse instance read buffer as JSON");
-        break;
-      }
-      cJSON *request_id = cJSON_GetObjectItemCaseSensitive(json, "request_id");
-      if (cJSON_IsNumber(request_id)) {
-        Overlapped_Write *write = find_write(instance, request_id->valueint);
-        log_message(LOG_DEBUG, "Written to pipe    (%p): %.*s", (void *)instance->pipe, strlen(write->buffer) - 1, write->buffer);
-        // TODO: free the write struct and prune pending_writes
-        // TODO: handle different return cases beyond request_id
-      }
+      // TODO: free the write struct and prune pending_writes
+      // TODO: handle different return cases beyond request_id
       // TODO: read each line (separated by \n character) separately
       // TODO: Currently, embedded 0 bytes terminate the current line, but you should not rely on this.
       instance->read_buffer[bytes] = '\0'; // TODO: handle buffer gracefully
       log_message(LOG_DEBUG, "Got data from pipe (%p): %.*s", (void *)instance->pipe, strlen(instance->read_buffer) - 1, instance->read_buffer);
       log_message(LOG_DEBUG, "END data from pipe (%p)", (void *)instance->pipe);
-      cJSON_Delete(json);
+      if (false) {
+        // TODO: parse mpv response
+        int64_t request_id = 0;
+        Overlapped_Write *write = find_write(instance, request_id);
+        log_message(LOG_DEBUG, "Written to pipe    (%p): %.*s", (void *)instance->pipe, strlen(write->buffer) - 1, write->buffer);
+      }
       if (!overlap_read((Instance *)completion_key)) {
         // TODO: when observed, resolve instead of break
         break;
@@ -3614,27 +3570,14 @@ int main(int argc, char **argv) {
   }
 
   process_layout(count, pipes, name, iocp);
-  free(name);
   for (size_t i = 0; i < count; ++i) {
     log_message(LOG_INFO, "Instance[%zu] Process ID: %lu", i, (unsigned long)pipes[i].pi.dwProcessId);
   }
 
-  Sleep(2000);
-  cJSON *command = mpv_command("loadfile", pipes[0].request_id++);
-  cJSON *command_array = cJSON_GetObjectItem(command, "command");
-  cJSON *command_arg = cJSON_CreateString("D:\\Test\\video ❗.mp4");
-  cJSON_AddItemToArray(command_array, command_arg);
-  overlap_write(&pipes[0], command);
+  const char *command_str = "{\"command\":[\"loadfile\",\"D:\\\\Test\\\\video ❗.mp4\"],\"request_id\":0}\n";
 
   Sleep(2000);
-  // normalizing backslash probably not worth
-  cJSON *command2 = mpv_command("normalize-path", pipes[0].request_id++);
-  cJSON *command_array2 = cJSON_GetObjectItem(command2, "command");
-  cJSON *command_arg2 = cJSON_CreateString("D:/Test/video ❗.mp4");
-  cJSON_AddItemToArray(command_array2, command_arg2);
-  overlap_write(&pipes[0], command2);
-
-  Sleep(2000);
+  overlap_write(&pipes[0], command_str);
 
   // https://mpv.io/manual/stable/#json-ipc
   // mpv file.mkv --input-ipc-server=\\.\pipe\mpvsocket
@@ -3646,7 +3589,6 @@ int main(int argc, char **argv) {
 
   // TODO: subtitles conf
   // TODO: urls
-  // TODO: substring search with SA/LCP
   // TODO: tag lookup with circular buffer and exclusion window
   return 0;
 }
