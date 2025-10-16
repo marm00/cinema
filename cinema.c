@@ -29,6 +29,8 @@
 
 #if defined(_WIN32)
 #include <windows.h>
+#pragma comment(lib, "user32")
+#pragma comment(lib, "advapi32")
 #endif
 
 #include "libsais.h"
@@ -2340,6 +2342,26 @@ static bool overlap_read(Instance *instance) {
   return true;
 }
 
+static DWORD cin_flAllocationType = MEM_RESERVE;
+
+static inline bool init_memory(void) {
+  HANDLE token;
+  if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES, &token)) {
+    LUID luid;
+    if (LookupPrivilegeValueW(NULL, L"SeLockMemoryPrivilege", &luid)) {
+      TOKEN_PRIVILEGES privileges;
+      privileges.PrivilegeCount = 1;
+      privileges.Privileges[0].Luid = luid;
+      privileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+      if (AdjustTokenPrivileges(token, FALSE, &privileges, sizeof(privileges), NULL, NULL)) {
+        cin_flAllocationType |= MEM_LARGE_PAGES | MEM_COMMIT;
+      }
+    }
+    CloseHandle(token);
+  }
+  return true;
+}
+
 static bool overlap_write(Instance *instance, const uint8_t *command_str, size_t len) {
   // TODO: redesign
   log_message(LOG_TRACE, "Initializing write on PID %lu", instance->pi.dwProcessId);
@@ -3255,6 +3277,7 @@ int main(int argc, char **argv) {
   printf("Error: Your operating system is not supported, Windows-only currently.\n");
   return 1;
 #endif
+  if (!init_memory()) exit(1);
   if (!init_repl()) exit(1);
   if (!InitializeCriticalSectionAndSpinCount(&log_lock, 0)) exit(1);
   if (!init_timers()) exit(1);
