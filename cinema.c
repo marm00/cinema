@@ -2340,10 +2340,9 @@ static bool overlap_read(Instance *instance) {
   return true;
 }
 
-static bool overlap_write(Instance *instance, const char *command_str) {
+static bool overlap_write(Instance *instance, const uint8_t *command_str, size_t len) {
   // TODO: redesign
   log_message(LOG_TRACE, "Initializing write on PID %lu", instance->pi.dwProcessId);
-  size_t len = strlen(command_str);
   Overlapped_Write *write = calloc(1, sizeof(*write));
   if (write == NULL) {
     log_message(LOG_ERROR, "Failed to allocate memory.");
@@ -3574,10 +3573,12 @@ int main(int argc, char **argv) {
     log_message(LOG_INFO, "Instance[%zu] Process ID: %lu", i, (unsigned long)pipes[i].pi.dwProcessId);
   }
 
-  const char *command_str = "{\"command\":[\"loadfile\",\"D:\\\\Test\\\\video ❗.mp4\"],\"request_id\":0}\n";
+  // TODO: arena
+  const uint8_t command_str[] = "{async:true,request_id:9223372036854775807,command:[\"loadfile\",\"D:\\\\Test\\\\video ❗.mp4\"]}\n";
+  size_t len = sizeof(command_str) + 1;
 
+  overlap_write(&pipes[0], command_str, len);
   Sleep(2000);
-  overlap_write(&pipes[0], command_str);
 
   // https://mpv.io/manual/stable/#json-ipc
   // mpv file.mkv --input-ipc-server=\\.\pipe\mpvsocket
