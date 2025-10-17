@@ -227,6 +227,40 @@ static const char *LOG_LEVELS[LOG_TRACE + 1] = {"ERROR", "WARNING", "INFO", "DEB
 
 #define table_free(t) free((t).items)
 
+static struct Cin_System {
+  // Assumnig large pages is the default, design around always committing
+  DWORD alloc_type;
+  DWORD page_size;
+  int32_t threads;
+} cin_system = {
+    .alloc_type = MEM_RESERVE | MEM_COMMIT,
+    .page_size = 4096,
+    .threads = 1};
+
+static inline bool init_os(void) {
+  SYSTEM_INFO system;
+  GetSystemInfo(&system);
+  cin_system.page_size = system.dwPageSize;
+  cin_system.threads = (int32_t)system.dwNumberOfProcessors;
+#if defined(CIN_OPENMP)
+  omp_set_num_threads(cin_system.threads);
+#endif
+  HANDLE token;
+  if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES, &token)) {
+    LUID luid;
+    if (LookupPrivilegeValueW(NULL, L"SeLockMemoryPrivilege", &luid)) {
+      TOKEN_PRIVILEGES p = {.PrivilegeCount = 1,
+                            .Privileges[0] = {.Luid = luid, .Attributes = SE_PRIVILEGE_ENABLED}};
+      if (AdjustTokenPrivileges(token, FALSE, &p, sizeof(p), NULL, NULL)) {
+        cin_system.alloc_type |= MEM_LARGE_PAGES;
+        cin_system.page_size = GetLargePageMinimum();
+      }
+    }
+    CloseHandle(token);
+  }
+  return true;
+}
+
 // https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
 // A path can have 248 "characters" (260 - 12 = 248)
 // with 12 reserved for 8.3 file name.
@@ -2084,7 +2118,7 @@ static bool init_config(const char *filename) {
 static bool init_document_listing(void) {
   gsa = malloc(locals.bytes_mul32);
 #if defined(LIBSAIS_OPENMP)
-  int32_t result = libsais_gsa_omp(locals.text, gsa, locals.bytes, 0, NULL, 0);
+  int32_t result = libsais_gsa_omp(locals.text, gsa, locals.bytes, 0, NULL, cin_system.threads);
 #else
   int32_t result = libsais_gsa(locals.text, gsa, locals.bytes, 0, NULL);
 #endif
@@ -2094,7 +2128,7 @@ static bool init_document_listing(void) {
   }
   int32_t *plcp = malloc(locals.bytes_mul32);
 #if defined(LIBSAIS_OPENMP)
-  result = libsais_plcp_gsa_omp(locals.text, gsa, plcp, locals.bytes, 0);
+  result = libsais_plcp_gsa_omp(locals.text, gsa, plcp, locals.bytes, cin_system.threads);
 #else
   result = libsais_plcp_gsa(locals.text, gsa, plcp, locals.bytes);
 #endif
@@ -2104,7 +2138,7 @@ static bool init_document_listing(void) {
   }
   lcp = malloc(locals.bytes_mul32);
 #if defined(LIBSAIS_OPENMP)
-  result = libsais_lcp_omp(plcp, gsa, lcp, locals.bytes, 0);
+  result = libsais_lcp_omp(plcp, gsa, lcp, locals.bytes, cin_system.threads);
 #else
   result = libsais_lcp(plcp, gsa, lcp, locals.bytes);
 #endif
@@ -2339,26 +2373,6 @@ static bool overlap_read(Instance *instance) {
     }
   }
   // Read is queued for iocp
-  return true;
-}
-
-static DWORD cin_flAllocationType = MEM_RESERVE;
-
-static inline bool init_memory(void) {
-  HANDLE token;
-  if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES, &token)) {
-    LUID luid;
-    if (LookupPrivilegeValueW(NULL, L"SeLockMemoryPrivilege", &luid)) {
-      TOKEN_PRIVILEGES privileges;
-      privileges.PrivilegeCount = 1;
-      privileges.Privileges[0].Luid = luid;
-      privileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-      if (AdjustTokenPrivileges(token, FALSE, &privileges, sizeof(privileges), NULL, NULL)) {
-        cin_flAllocationType |= MEM_LARGE_PAGES | MEM_COMMIT;
-      }
-    }
-    CloseHandle(token);
-  }
   return true;
 }
 
@@ -3277,7 +3291,7 @@ int main(int argc, char **argv) {
   printf("Error: Your operating system is not supported, Windows-only currently.\n");
   return 1;
 #endif
-  if (!init_memory()) exit(1);
+  if (!init_os()) exit(1);
   if (!init_repl()) exit(1);
   if (!InitializeCriticalSectionAndSpinCount(&log_lock, 0)) exit(1);
   if (!init_timers()) exit(1);
