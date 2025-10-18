@@ -268,24 +268,16 @@ typedef struct Arena {
   size_t capacity;
 } Arena;
 
-typedef struct WritePoolItem {
-  struct WritePoolItem *next;
-} WritePoolItem;
-
-typedef struct WritePool {
-  Arena *arena;
-  WritePoolItem *free_list;
-} WritePool;
-
 #define align(a, b) (((a) + (b) - 1) & (~((b) - 1)))
 #define kilobytes(n) ((n) << 10)
 #define megabytes(n) ((n) << 20)
-#define CIN_ARENA_CAP kilobytes(32)
-#define CIN_ARENA_BYTES align(sizeof(Arena), (size_t)64)
+#define CIN_ARENA_CAP (kilobytes(32))
+#define CIN_ARENA_BYTES (align(sizeof(Arena), (size_t)64))
 
-#define arena_alloc(a, n)                                                     \
+#define arena_alloc(a, bytes)                                                 \
   do {                                                                        \
-    size_t _dwSize = align((n), cin_system.page_size);                        \
+    assert(CIN_ARENA_BYTES % 2 == 0);                                         \
+    size_t _dwSize = align((bytes), cin_system.page_size);                    \
     (a) = VirtualAlloc(NULL, _dwSize, cin_system.alloc_type, PAGE_READWRITE); \
     (a)->curr = (a);                                                          \
     (a)->prev = NULL;                                                         \
@@ -315,6 +307,39 @@ typedef struct WritePool {
     }                                                   \
     out = (void *)((a)->curr + _left);                  \
     (a)->curr->count = _right;                          \
+  } while (0)
+
+typedef struct PoolSlot {
+  struct PoolSlot *next;
+} PoolSlot;
+
+typedef struct Pool {
+  size_t item_size;
+  Arena *arena;
+  PoolSlot *free_list;
+} Pool;
+
+#define pool_alloc(p, T, n)                   \
+  do {                                        \
+    arena_alloc((p)->arena, sizeof(T) * (n)); \
+    (p)->item_size = sizeof(T);               \
+  } while (0)
+
+#define pool_push(p, out)                               \
+  do {                                                  \
+    if ((p)->free_list) {                               \
+      out = (void *)(p)->free_list;                     \
+      (p)->free_list = (p)->free_list->next;            \
+    } else {                                            \
+      arena_push((p)->arena, (p)->item_size, 1, (out)); \
+    }                                                   \
+  } while (0)
+
+#define pool_free(p, address)               \
+  do {                                      \
+    PoolSlot *_tmp = (PoolSlot *)(address); \
+    _tmp->next = (p)->free_list;            \
+    (p)->free_list = _tmp;                  \
   } while (0)
 
 // https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
