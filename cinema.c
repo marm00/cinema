@@ -230,7 +230,7 @@ static const char *LOG_LEVELS[LOG_TRACE + 1] = {"ERROR", "WARNING", "INFO", "DEB
 static struct Cin_System {
   // Assumnig large pages is the default, design around always committing
   DWORD alloc_type;
-  DWORD page_size;
+  size_t page_size;
   int32_t threads;
 } cin_system = {
     .alloc_type = MEM_RESERVE | MEM_COMMIT,
@@ -240,7 +240,7 @@ static struct Cin_System {
 static inline bool init_os(void) {
   SYSTEM_INFO system;
   GetSystemInfo(&system);
-  cin_system.page_size = system.dwPageSize;
+  cin_system.page_size = (size_t)system.dwPageSize;
   cin_system.threads = (int32_t)system.dwNumberOfProcessors;
 #if defined(CIN_OPENMP)
   omp_set_num_threads(cin_system.threads);
@@ -260,6 +260,62 @@ static inline bool init_os(void) {
   }
   return true;
 }
+
+typedef struct Arena {
+  struct Arena *prev;
+  struct Arena *curr;
+  size_t count;
+  size_t capacity;
+} Arena;
+
+typedef struct WritePoolItem {
+  struct WritePoolItem *next;
+} WritePoolItem;
+
+typedef struct WritePool {
+  Arena *arena;
+  WritePoolItem *free_list;
+} WritePool;
+
+#define align(a, b) (((a) + (b) - 1) & (~((b) - 1)))
+#define kilobytes(n) ((n) << 10)
+#define megabytes(n) ((n) << 20)
+#define CIN_ARENA_CAP kilobytes(32)
+#define CIN_ARENA_BYTES align(sizeof(Arena), (size_t)64)
+
+#define arena_alloc(a, n)                                                     \
+  do {                                                                        \
+    size_t _dwSize = align((n), cin_system.page_size);                        \
+    (a) = VirtualAlloc(NULL, _dwSize, cin_system.alloc_type, PAGE_READWRITE); \
+    (a)->curr = (a);                                                          \
+    (a)->prev = NULL;                                                         \
+    (a)->count = CIN_ARENA_BYTES;                                             \
+    (a)->capacity = _dwSize;                                                  \
+  } while (0)
+
+#define arena_push(a, T, n, out)                        \
+  do {                                                  \
+    assert((a));                                        \
+    assert((a)->curr);                                  \
+    size_t _bytes = sizeof(T) * (n);                    \
+    size_t _align = max(8, __alignof(T));               \
+    size_t _left = align((a)->curr->count, _align);     \
+    size_t _right = _left + _bytes;                     \
+    if (_right >= (a)->curr->capacity) {                \
+      size_t _cap = (a)->curr->capacity;                \
+      if (_bytes + CIN_ARENA_BYTES > _cap) {            \
+        _cap = align(_bytes + CIN_ARENA_BYTES, _align); \
+      }                                                 \
+      Arena *_tmp = NULL;                               \
+      arena_alloc(_tmp, _cap);                          \
+      _tmp->prev = (a)->curr;                           \
+      (a)->curr = _tmp;                                 \
+      _left = align((a)->curr->count, _align);          \
+      _right = _left + _bytes;                          \
+    }                                                   \
+    out = (void *)((a)->curr + _left);                  \
+    (a)->curr->count = _right;                          \
+  } while (0)
 
 // https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
 // A path can have 248 "characters" (260 - 12 = 248)
@@ -2335,7 +2391,6 @@ static bool create_pipe(Instance *instance, const wchar_t *name) {
   int unfound_duration = 0;
   HANDLE hPipe = INVALID_HANDLE_VALUE;
   for (;;) {
-    // hPipe = CreateFileW(name, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
     hPipe = CreateFileW(name, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
     if (hPipe != INVALID_HANDLE_VALUE) {
       break;
