@@ -269,6 +269,7 @@ typedef struct Arena {
 } Arena;
 
 #define align(a, b) (((a) + (b) - 1) & (~((b) - 1)))
+#define align_size(T) (max(sizeof(size_t), __alignof(T)))
 #define kilobytes(n) ((n) << 10)
 #define megabytes(n) ((n) << 20)
 #define CIN_ARENA_CAP (kilobytes(32))
@@ -285,36 +286,37 @@ typedef struct Arena {
     (a)->capacity = _dwSize;                                                  \
   } while (0)
 
-#define arena_push(a, T, n, out)                        \
-  do {                                                  \
-    assert((a));                                        \
-    assert((a)->curr);                                  \
-    size_t _bytes = sizeof(T) * (n);                    \
-    size_t _align = max(8, __alignof(T));               \
-    size_t _left = align((a)->curr->count, _align);     \
-    size_t _right = _left + _bytes;                     \
-    if (_right >= (a)->curr->capacity) {                \
-      size_t _cap = (a)->curr->capacity;                \
-      if (_bytes + CIN_ARENA_BYTES > _cap) {            \
-        _cap = align(_bytes + CIN_ARENA_BYTES, _align); \
-      }                                                 \
-      Arena *_tmp = NULL;                               \
-      arena_alloc(_tmp, _cap);                          \
-      _tmp->prev = (a)->curr;                           \
-      (a)->curr = _tmp;                                 \
-      _left = align((a)->curr->count, _align);          \
-      _right = _left + _bytes;                          \
-    }                                                   \
-    out = (void *)((a)->curr + _left);                  \
-    (a)->curr->count = _right;                          \
+#define arena_push_raw(a, bytes, alignment, out)              \
+  do {                                                        \
+    assert((a));                                              \
+    assert((a)->curr);                                        \
+    size_t _left = align((a)->curr->count, (alignment));      \
+    size_t _right = _left + (bytes);                          \
+    if (_right >= (a)->curr->capacity) {                      \
+      size_t _cap = (a)->curr->capacity;                      \
+      if ((bytes) + CIN_ARENA_BYTES > _cap) {                 \
+        _cap = align((bytes) + CIN_ARENA_BYTES, (alignment)); \
+      }                                                       \
+      Arena *_tmp = NULL;                                     \
+      arena_alloc(_tmp, _cap);                                \
+      _tmp->prev = (a)->curr;                                 \
+      (a)->curr = _tmp;                                       \
+      _left = align((a)->curr->count, (alignment));           \
+      _right = _left + (bytes);                               \
+    }                                                         \
+    out = (void *)((a)->curr + _left);                        \
+    (a)->curr->count = _right;                                \
   } while (0)
+
+#define arena_push(a, T, n, out) arena_push_raw((a), sizeof(T) * (n), align_size(T), (out));
 
 typedef struct PoolSlot {
   struct PoolSlot *next;
 } PoolSlot;
 
 typedef struct Pool {
-  size_t item_size;
+  size_t item_bytes;
+  size_t item_align;
   Arena *arena;
   PoolSlot *free_list;
 } Pool;
@@ -322,17 +324,18 @@ typedef struct Pool {
 #define pool_alloc(p, T, n)                   \
   do {                                        \
     arena_alloc((p)->arena, sizeof(T) * (n)); \
-    (p)->item_size = sizeof(T);               \
+    (p)->item_bytes = sizeof(T);              \
+    (p)->item_align = align_size(T);          \
   } while (0)
 
-#define pool_push(p, out)                               \
-  do {                                                  \
-    if ((p)->free_list) {                               \
-      out = (void *)(p)->free_list;                     \
-      (p)->free_list = (p)->free_list->next;            \
-    } else {                                            \
-      arena_push((p)->arena, (p)->item_size, 1, (out)); \
-    }                                                   \
+#define pool_push(p, out)                                                  \
+  do {                                                                     \
+    if ((p)->free_list) {                                                  \
+      out = (void *)(p)->free_list;                                        \
+      (p)->free_list = (p)->free_list->next;                               \
+    } else {                                                               \
+      arena_push_raw((p)->arena, (p)->item_bytes, (p)->item_align, (out)); \
+    }                                                                      \
   } while (0)
 
 #define pool_free(p, address)               \
@@ -355,9 +358,9 @@ typedef struct Pool {
 // The cFileName from winapi uses a wchar_t buffer of
 // 260 (MAX_PATH) so surrogate pairs get truncated
 #define CIN_MAX_PATH MAX_PATH
-#define CIN_MAX_PATH_BYTES MAX_PATH * 4
-#define CIN_MAX_WRITABLE_PATH MAX_PATH - 12
-#define CIN_MAX_WRITABLE_PATH_BYTES (MAX_PATH - 12) * 4
+#define CIN_MAX_PATH_BYTES (MAX_PATH * 4)
+#define CIN_MAX_WRITABLE_PATH (MAX_PATH - 12)
+#define CIN_MAX_WRITABLE_PATH_BYTES ((MAX_PATH - 12) * 4)
 #define CIN_COMMAND_PROMPT_LIMIT 8191
 #define CIN_MAX_LOG_MESSAGE 1024
 
@@ -369,22 +372,22 @@ typedef struct Console_Message {
   struct Console_Message *next;
 } Console_Message;
 
-#define CM_INIT_CAP 64
+#define CIN_CM_CAP 64
 
 static Console_Message *create_console_message(void) {
   Console_Message *msg = malloc(sizeof(Console_Message));
   assert(msg);
 #if defined(NDEBUG)
-  wchar_t *items = malloc(CM_INIT_CAP * sizeof(wchar_t));
+  wchar_t *items = malloc(CIN_CM_CAP * sizeof(wchar_t));
 #else
-  wchar_t *items = calloc(CM_INIT_CAP, sizeof(wchar_t));
+  wchar_t *items = calloc(CIN_CM_CAP, sizeof(wchar_t));
 #endif
   assert(items);
   msg->next = NULL;
   msg->prev = NULL;
   msg->items = items;
   msg->count = 0;
-  msg->capacity = CM_INIT_CAP;
+  msg->capacity = CIN_CM_CAP;
   return msg;
 }
 
@@ -2339,6 +2342,30 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len) {
     dedup_counter = 1;
   }
 }
+
+#define CIN_WRITE_POOL_CAP 32
+#define CIN_WRITE_PREFIX "{async:true,request_id:"
+#define CIN_WRITE_DIGITS 19
+#define CIN_WRITE_CMD_START ",command:[\"loadfile\",\""
+#define CIN_WRITE_CMD_FILE CIN_MAX_PATH_BYTES
+#define CIN_WRITE_CMD_END "\"]}\n"
+#define CIN_WRITE_SIZE (CIN_WRITE_POOL_CAP + sizeof(CIN_WRITE_PREFIX) - 1 +  \
+                        CIN_WRITE_DIGITS + sizeof(CIN_WRITE_CMD_START) - 1 + \
+                        CIN_WRITE_CMD_FILE + sizeof(CIN_WRITE_CMD_END))
+
+typedef struct OverlappedContext {
+  OVERLAPPED ovl;
+  bool is_write;
+} OverlappedContext;
+
+typedef struct OverlappedWrite {
+  OverlappedContext ovl;
+  char buf[CIN_WRITE_SIZE];
+  size_t bytes;
+  int64_t request_id;
+} OverlappedWrite;
+
+static Pool write_pool = {0};
 
 // https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-transactnamedpipe
 // TODO: find better upper bound for transaction (pending 64kb writes can scale very fast, files are maxed to 260)
