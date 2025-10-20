@@ -321,8 +321,17 @@ typedef struct Pool {
   PoolSlot *free_list;
 } Pool;
 
+#define pool_assign(p, T, a)         \
+  do {                               \
+    assert((a));                     \
+    (p)->arena = (a);                \
+    (p)->item_bytes = sizeof(T);     \
+    (p)->item_align = align_size(T); \
+  } while (0)
+
 #define pool_alloc(p, T, n)                   \
   do {                                        \
+    assert(!(p)->arena);                      \
     arena_alloc((p)->arena, sizeof(T) * (n)); \
     (p)->item_bytes = sizeof(T);              \
     (p)->item_align = align_size(T);          \
@@ -1721,10 +1730,14 @@ static int32_t *lcp = NULL;
 static int32_t *suffix_to_doc = NULL;
 static uint16_t *dedup_counters = NULL;
 
-static void locals_append(const uint8_t *utf8, int len) {
+static void locals_append(uint8_t *utf8, int len) {
   // Geometric growth with clamp, based on 260 max path
   static const int locals_init = 1 << 15;
   static const int locals_clamp = 1 << 26;
+  // NOTE: When using mpv JSON ipc, backslash actually requires 2 bytes to be valid JSON.
+  // Instead of appending it, we replace it with forward slash.
+  for (int32_t i = 0; i < len; ++i)
+    if (utf8[i] == '\\') utf8[i] = '/';
   void *dst = NULL;
   if (locals.max_bytes - locals.bytes >= len) {
     dst = locals.text + locals.bytes;
@@ -2345,13 +2358,19 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len) {
 
 #define CIN_WRITE_POOL_CAP 32
 #define CIN_WRITE_PREFIX "{async:true,request_id:"
-#define CIN_WRITE_DIGITS 19
 #define CIN_WRITE_CMD_START ",command:[\"loadfile\",\""
-#define CIN_WRITE_CMD_FILE CIN_MAX_PATH_BYTES
 #define CIN_WRITE_CMD_END "\"]}\n"
-#define CIN_WRITE_SIZE (CIN_WRITE_POOL_CAP + sizeof(CIN_WRITE_PREFIX) - 1 +  \
-                        CIN_WRITE_DIGITS + sizeof(CIN_WRITE_CMD_START) - 1 + \
-                        CIN_WRITE_CMD_FILE + sizeof(CIN_WRITE_CMD_END))
+#define CIN_WRITE_I64DIGITS 19
+#define CIN_WRITE_CMD_FILE CIN_MAX_PATH_BYTES
+#define CIN_WRITE_PREFIX_LEN sizeof(CIN_WRITE_PREFIX) - 1
+#define CIN_WRITE_CMD_START_LEN sizeof(CIN_WRITE_CMD_START) - 1
+#define CIN_WRITE_CMD_END_LEN sizeof(CIN_WRITE_CMD_END)
+#define CIN_WRITE_SIZE (CIN_WRITE_POOL_CAP + CIN_WRITE_PREFIX_LEN +     \
+                        CIN_WRITE_I64DIGITS + CIN_WRITE_CMD_START_LEN + \
+                        CIN_WRITE_CMD_FILE + CIN_WRITE_CMD_END_LEN)
+#define CIN_READ_SIZE kilobytes(16)
+#define CIN_INSTANCE_POOL_CAP 4
+#define CIN_IO_ARENA_CAP megabytes(2)
 
 typedef struct OverlappedContext {
   OVERLAPPED ovl;
@@ -2359,51 +2378,31 @@ typedef struct OverlappedContext {
 } OverlappedContext;
 
 typedef struct OverlappedWrite {
-  OverlappedContext ovl;
+  OverlappedContext ovl_ctx;
   char buf[CIN_WRITE_SIZE];
   size_t bytes;
-  int64_t request_id;
 } OverlappedWrite;
 
-static Pool write_pool = {0};
-
-// https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-transactnamedpipe
-// TODO: find better upper bound for transaction (pending 64kb writes can scale very fast, files are maxed to 260)
-#define PIPE_WRITE_BUFFER 65536
-#define PIPE_READ_BUFFER 1024
-#define WRITES_CAPACITY 32
-
-typedef struct {
-  OVERLAPPED ovl;
-  bool is_write;
-} Overlapped_Ctx;
-
-typedef struct Overlapped_Write {
-  Overlapped_Ctx ovl_context;
-  char buffer[PIPE_WRITE_BUFFER];
-  size_t bytes;
-  int64_t request_id;
-} Overlapped_Write;
-
-typedef struct Pending_Writes {
-  Overlapped_Write **items;
-  size_t count;
-  size_t capacity;
-} Pending_Writes;
-
 typedef struct Instance {
-  // NOTE: currently, we use a single overlapped read per instance
-  // (unlike multiple writes). This could lead to gaps in incoming
-  // data if the OS buffer does not preserve it fully for the next
-  // read. If that is observed, switch to multiple reads as well
+  OverlappedContext ovl_ctx;
+  char buf[CIN_READ_SIZE];
   STARTUPINFOW si;
   PROCESS_INFORMATION pi;
   HANDLE pipe;
-  Overlapped_Ctx ovl_context;
-  CHAR read_buffer[PIPE_READ_BUFFER];
-  Pending_Writes pending_writes;
-  int64_t request_id;
 } Instance;
+
+static struct {
+  Arena *arena;
+  Pool writes;
+  Pool instances;
+} cin_io = {0};
+
+static inline bool init_mpv(void) {
+  arena_alloc(cin_io.arena, CIN_IO_ARENA_CAP);
+  pool_assign(&cin_io.writes, OverlappedWrite, cin_io.arena);
+  pool_assign(&cin_io.instances, Instance, cin_io.arena);
+  return true;
+}
 
 static bool create_process(Instance *instance, const wchar_t *pipe_name, const wchar_t *file_name) {
   static wchar_t command[CIN_COMMAND_PROMPT_LIMIT];
@@ -2472,8 +2471,8 @@ static bool create_pipe(Instance *instance, const wchar_t *name) {
 
 static bool overlap_read(Instance *instance) {
   log_message(LOG_TRACE, "Initializing read on PID %lu", instance->pi.dwProcessId);
-  ZeroMemory(&instance->ovl_context.ovl, sizeof(OVERLAPPED));
-  if (!ReadFile(instance->pipe, instance->read_buffer, (PIPE_READ_BUFFER)-1, NULL, &instance->ovl_context.ovl)) {
+  ZeroMemory(&instance->ovl_ctx.ovl, sizeof(OVERLAPPED));
+  if (!ReadFile(instance->pipe, instance->buf, sizeof(instance->buf), NULL, &instance->ovl_ctx.ovl)) {
     if (GetLastError() != ERROR_IO_PENDING) {
       log_last_error("Failed to initialize read");
       return false;
@@ -2483,24 +2482,21 @@ static bool overlap_read(Instance *instance) {
   return true;
 }
 
-static bool overlap_write(Instance *instance, const uint8_t *command_str, size_t len) {
-  // TODO: redesign
+static bool overlap_write(Instance *instance, const uint8_t *file) {
+  OverlappedWrite *write = NULL;
+  pool_push(&cin_io.writes, write);
+  int64_t request_id = (int64_t)(uintptr_t)write;
+  ZeroMemory(&write->ovl_ctx.ovl, sizeof(OVERLAPPED));
+  write->ovl_ctx.is_write = true;
+  int32_t bytes = snprintf(write->buf, CIN_WRITE_SIZE,
+                           CIN_WRITE_PREFIX
+                           "%lld" CIN_WRITE_CMD_START
+                           "%s" CIN_WRITE_CMD_END,
+                           request_id, file);
+  write->bytes = (size_t)bytes;
   log_message(LOG_TRACE, "Initializing write on PID %lu", instance->pi.dwProcessId);
-  Overlapped_Write *write = calloc(1, sizeof(*write));
-  if (write == NULL) {
-    log_message(LOG_ERROR, "Failed to allocate memory.");
-    return false;
-  }
-  if (len >= sizeof(write->buffer)) {
-    log_message(LOG_ERROR, "Message len '%d' bigger than buffer '%d'", len, sizeof(write->buffer));
-    return false;
-  }
-  memcpy(write->buffer, command_str, len);
-  write->ovl_context.is_write = true;
-  write->bytes = len;
-  write->request_id = instance->request_id - 1;
-  log_message(LOG_DEBUG, "Writing message: %.*s", len, write->buffer);
-  if (!WriteFile(instance->pipe, write->buffer, (DWORD)len, NULL, &write->ovl_context.ovl)) {
+  log_message(LOG_DEBUG, "Writing message (%zu bytes): %s", write->bytes, write->buf);
+  if (!WriteFile(instance->pipe, write->buf, (DWORD)write->bytes, NULL, &write->ovl_ctx.ovl)) {
     switch (GetLastError()) {
     case ERROR_IO_PENDING:
       // iocp will free write
@@ -2508,7 +2504,7 @@ static bool overlap_write(Instance *instance, const uint8_t *command_str, size_t
       return true;
     case ERROR_INVALID_HANDLE:
       // Code 6: The handle is invalid
-      log_message(LOG_DEBUG, "\t(ERR_START)\n\t%.*s\n\t(ERR_END)\n", (int)len - 2, write->buffer);
+      log_message(LOG_DEBUG, "\t(ERR_START)\n\t%.*s\n\t(ERR_END)\n", (int)write->bytes - 2, write->buf);
       break;
     }
     log_last_error("Failed to initialize write");
@@ -2523,13 +2519,7 @@ static bool create_instance(Instance *instance, const wchar_t *name, const wchar
   if (name == NULL || file_name == NULL) {
     return false;
   }
-  instance->ovl_context.is_write = false;
-  instance->request_id = 0;
-  Pending_Writes pending_writes = {
-      .items = malloc(sizeof(Overlapped_Write *) * WRITES_CAPACITY),
-      .count = 0,
-      .capacity = WRITES_CAPACITY};
-  instance->pending_writes = pending_writes;
+  instance->ovl_ctx.is_write = false;
   if (!create_process(instance, name, file_name)) {
     return false;
   }
@@ -2566,42 +2556,6 @@ static bool process_layout(size_t count, Instance *instances, const wchar_t *fil
   return true;
 }
 
-static Overlapped_Write *find_write(Instance *instance, int64_t request_id) {
-  // Uses binary search over sorted dynamic array.
-  // The request_id should always find a pair in this scenario
-  // as the incoming request_id was sent as a targeted response.
-  if (instance == NULL) {
-    log_message(LOG_ERROR, "Tried to find '%" PRId64 "' on NULL instance", request_id);
-    return NULL;
-  }
-  if (instance->pending_writes.count == 0) {
-    log_message(LOG_ERROR, "Tried to find '%" PRId64 "' without pending writes", request_id);
-    return NULL;
-  }
-  if (instance->pending_writes.items == NULL) {
-    log_message(LOG_ERROR, "Tried to find '%" PRId64 "' on NULL items", request_id);
-    return NULL;
-  }
-  size_t left = 0;
-  size_t right = instance->pending_writes.count - 1;
-  while (left <= right) {
-    size_t middle = left + ((right - left) >> 1);
-    int64_t mid_val = instance->pending_writes.items[middle]->request_id;
-    if (mid_val < request_id) {
-      left = middle + 1;
-    } else if (mid_val > request_id) {
-      if (middle == 0) {
-        break;
-      }
-      right = middle - 1;
-    } else {
-      return instance->pending_writes.items[middle];
-    }
-  }
-  log_message(LOG_ERROR, "Tried to find '%" PRId64 "' but could not find it", request_id);
-  return NULL;
-}
-
 static DWORD WINAPI iocp_listener(LPVOID lp_param) {
   HANDLE iocp = (HANDLE)lp_param;
   for (;;) {
@@ -2616,21 +2570,11 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
     }
     log_message(LOG_TRACE, "Processing dequeued completion packet from successful I/O operation");
     Instance *instance = (Instance *)completion_key;
-    Overlapped_Ctx *ctx = (Overlapped_Ctx *)ovl;
+    OverlappedContext *ctx = (OverlappedContext *)ovl;
     if (ctx->is_write) {
-      Overlapped_Write *write = (Overlapped_Write *)ctx;
-      Pending_Writes *pending = &instance->pending_writes;
-      if (pending->count >= pending->capacity) {
-        pending->capacity = pending->capacity * 2;
-        pending->items = realloc(pending->items, sizeof(Overlapped_Write *) * pending->capacity);
-        if (pending->items == NULL) {
-          log_message(LOG_ERROR, "Failed to reallocate memory of pending writes");
-          break;
-        }
-      }
-      pending->items[pending->count++] = write;
+      OverlappedWrite *write = (OverlappedWrite *)ctx;
       if (write->bytes != bytes) {
-        log_message(LOG_ERROR, "Expected '%ld' bytes but received '%ld'", write->bytes, bytes);
+        log_message(LOG_ERROR, "Expected '%zu' bytes but received '%zu'", write->bytes, bytes);
         // TODO: when observed, resolve instead of break
         break;
       }
@@ -2639,14 +2583,13 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
       // TODO: handle different return cases beyond request_id
       // TODO: read each line (separated by \n character) separately
       // TODO: Currently, embedded 0 bytes terminate the current line, but you should not rely on this.
-      instance->read_buffer[bytes] = '\0'; // TODO: handle buffer gracefully
-      log_message(LOG_DEBUG, "Got data from pipe (%p): %.*s", (void *)instance->pipe, strlen(instance->read_buffer) - 1, instance->read_buffer);
+      instance->buf[bytes] = '\0'; // TODO: handle buffer gracefully
+      log_message(LOG_DEBUG, "Got data from pipe (%p): %.*s", (void *)instance->pipe, strlen(instance->buf) - 1, instance->buf);
       log_message(LOG_DEBUG, "END data from pipe (%p)", (void *)instance->pipe);
       if (false) {
         // TODO: parse mpv response
-        int64_t request_id = 0;
-        Overlapped_Write *write = find_write(instance, request_id);
-        log_message(LOG_DEBUG, "Written to pipe    (%p): %.*s", (void *)instance->pipe, strlen(write->buffer) - 1, write->buffer);
+        // Overlapped_Write *write = find_write(instance, request_id);
+        // log_message(LOG_DEBUG, "Written to pipe    (%p): %.*s", (void *)instance->pipe, strlen(write->buf) - 1, write->buf);
       }
       if (!overlap_read((Instance *)completion_key)) {
         // TODO: when observed, resolve instead of break
@@ -3405,6 +3348,7 @@ int main(int argc, char **argv) {
   if (!init_config("cinema.conf")) exit(1);
   if (!init_commands()) exit(1);
   if (!init_document_listing()) exit(1);
+  if (!init_mpv()) exit(1);
   // uint8_t pattern[] = "twitch.tv";
   // document_listing(pattern, (int32_t)strlen((const char *)pattern));
   // exit(1);
@@ -3717,11 +3661,8 @@ int main(int argc, char **argv) {
     log_message(LOG_INFO, "Instance[%zu] Process ID: %lu", i, (unsigned long)pipes[i].pi.dwProcessId);
   }
 
-  // TODO: arena
-  const uint8_t command_str[] = "{async:true,request_id:9223372036854775807,command:[\"loadfile\",\"D:\\\\Test\\\\video ❗.mp4\"]}\n";
-  size_t len = sizeof(command_str) + 1;
-
-  overlap_write(&pipes[0], command_str, len);
+  const uint8_t *file = locals.text + suffix_to_doc[7];
+  overlap_write(&pipes[0], file);
   Sleep(2000);
 
   // https://mpv.io/manual/stable/#json-ipc
