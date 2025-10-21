@@ -712,6 +712,8 @@ static inline bool cin_wisnum_1based(wchar_t c) {
   return c <= L'9' && c >= L'1';
 }
 
+#define cin_strlen(str) (sizeof((str)) / sizeof(*(str)) - 1)
+
 static void log_preview(void) {
   if (!preview.count) return;
   DWORD msg_len = preview.count;
@@ -2383,9 +2385,16 @@ typedef struct OverlappedWrite {
   size_t bytes;
 } OverlappedWrite;
 
+typedef struct ReadBuffer {
+  char buf[CIN_READ_SIZE];
+  size_t bytes;
+  // TODO: chain reads until \n
+  struct ReadBuffer *next;
+} ReadBuffer;
+
 typedef struct Instance {
   OverlappedContext ovl_ctx;
-  char buf[CIN_READ_SIZE];
+  ReadBuffer *buf_list;
   STARTUPINFOW si;
   PROCESS_INFORMATION pi;
   HANDLE pipe;
@@ -2395,14 +2404,8 @@ static struct {
   Arena *arena;
   Pool writes;
   Pool instances;
+  HANDLE iocp;
 } cin_io = {0};
-
-static inline bool init_mpv(void) {
-  arena_alloc(cin_io.arena, CIN_IO_ARENA_CAP);
-  pool_assign(&cin_io.writes, OverlappedWrite, cin_io.arena);
-  pool_assign(&cin_io.instances, Instance, cin_io.arena);
-  return true;
-}
 
 static bool create_process(Instance *instance, const wchar_t *pipe_name, const wchar_t *file_name) {
   static wchar_t command[CIN_COMMAND_PROMPT_LIMIT];
@@ -2472,7 +2475,7 @@ static bool create_pipe(Instance *instance, const wchar_t *name) {
 static bool overlap_read(Instance *instance) {
   log_message(LOG_TRACE, "Initializing read on PID %lu", instance->pi.dwProcessId);
   ZeroMemory(&instance->ovl_ctx.ovl, sizeof(OVERLAPPED));
-  if (!ReadFile(instance->pipe, instance->buf, sizeof(instance->buf), NULL, &instance->ovl_ctx.ovl)) {
+  if (!ReadFile(instance->pipe, instance->buf_list->buf, sizeof(instance->buf_list->buf), NULL, &instance->ovl_ctx.ovl)) {
     if (GetLastError() != ERROR_IO_PENDING) {
       log_last_error("Failed to initialize read");
       return false;
@@ -2508,7 +2511,7 @@ static bool overlap_write(Instance *instance, const uint8_t *file) {
       break;
     }
     log_last_error("Failed to initialize write");
-    free(write);
+    pool_free(&cin_io.writes, write);
     return false;
   }
   log_message(LOG_TRACE, "Write call completed immediately.");
@@ -2548,7 +2551,6 @@ static bool process_layout(size_t count, Instance *instances, const wchar_t *fil
   for (size_t i = 0; i < count; ++i) {
     swprintf(pipe_name, PIPE_NAME_BUFFER, L"%ls%d", PIPE_PREFIXW, i);
     if (!create_instance(&instances[i], pipe_name, file_name, iocp)) {
-      free(instances);
       log_message(LOG_ERROR, "Failed to create instance");
       return false;
     }
@@ -2583,9 +2585,10 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
       // TODO: handle different return cases beyond request_id
       // TODO: read each line (separated by \n character) separately
       // TODO: Currently, embedded 0 bytes terminate the current line, but you should not rely on this.
-      instance->buf[bytes] = '\0'; // TODO: handle buffer gracefully
-      log_message(LOG_DEBUG, "Got data from pipe (%p): %.*s", (void *)instance->pipe, strlen(instance->buf) - 1, instance->buf);
+      instance->buf_list->buf[bytes] = '\0'; // TODO: handle buffer gracefully
+      log_message(LOG_DEBUG, "Got data from pipe (%p): %.*s", (void *)instance->pipe, strlen(instance->buf_list->buf) - 1, instance->buf_list->buf);
       log_message(LOG_DEBUG, "END data from pipe (%p)", (void *)instance->pipe);
+      // pool_free(&cin_io.writes, write);
       if (false) {
         // TODO: parse mpv response
         // Overlapped_Write *write = find_write(instance, request_id);
@@ -2598,6 +2601,22 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
     }
   }
   return 0;
+}
+
+static inline bool init_mpv(void) {
+  arena_alloc(cin_io.arena, CIN_IO_ARENA_CAP);
+  pool_assign(&cin_io.writes, OverlappedWrite, cin_io.arena);
+  pool_assign(&cin_io.instances, Instance, cin_io.arena);
+  cin_io.iocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
+  if (!cin_io.iocp) {
+    log_last_error("Failed to create iocp");
+    return false;
+  }
+  if (!CreateThread(NULL, 0, iocp_listener, (LPVOID)cin_io.iocp, 0, NULL)) {
+    log_last_error("Failed to create iocp listener");
+    return false;
+  };
+  return true;
 }
 
 #define CIN_NUL 0x00
@@ -3175,10 +3194,44 @@ static void cmd_quit_validator(void) {
   cmd_ctx.executor = cmd_quit_executor;
 }
 
+#define CIN_MPVCALL_START L"mpv --idle --input-ipc-server="
+#define CIN_MPVCALL_START_LEN cin_strlen(CIN_MPVCALL_START)
+#define CIN_MPVCALL_PIPE L"\\\\.\\pipe\\cinema_mpv_"
+#define CIN_MPVCALL_PIPE_LEN cin_strlen(CIN_MPVCALL_PIPE)
+#define CIN_MPVCALL CIN_MPVCALL_START CIN_MPVCALL_PIPE
+#define CIN_MPVCALL_LEN cin_strlen(CIN_MPVCALL)
+#define CIN_MPVCALL_DIGITS 19
+#define CIN_MPVCALL_BUF (CIN_MPVCALL_LEN + CIN_MPVCALL_DIGITS)
+
 static void cmd_layout_executor(void) {
   cmd_layout tmp_layout = cmd_ctx.layout;
   cmd_ctx.layout = cmd_ctx.queued_layout;
   cmd_ctx.queued_layout = tmp_layout;
+  static wchar_t mpv_command[CIN_MPVCALL_BUF] = {CIN_MPVCALL};
+  for (size_t i = 0; i < cmd_ctx.layout->count; ++i) {
+    Instance *instance = NULL;
+    pool_push(&cin_io.instances, instance);
+    instance->ovl_ctx.is_write = false;
+    swprintf(mpv_command + CIN_MPVCALL_LEN, CIN_MPVCALL_DIGITS, L"%zu", i);
+    STARTUPINFOW si = {0};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi = {0};
+    if (!CreateProcessW(NULL, mpv_command, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+      if (GetLastError() == ERROR_FILE_NOT_FOUND) {
+        // TODO: link to somewhere to get the binary
+        // TODO: check for yt-dlp binary for streams
+        log_last_error("Failed to find mpv binary");
+      } else {
+        log_last_error("Failed to start mpv even though it was found");
+      }
+    }
+    instance->si = si;
+    instance->pi = pi;
+    bool ok_pipe = create_pipe(instance, mpv_command + CIN_MPVCALL_START_LEN);
+    bool ok_iocp = CreateIoCompletionPort(instance->pipe, cin_io.iocp, (ULONG_PTR)instance, 0) == NULL;
+    arena_push(cin_io.arena, ReadBuffer, 1, instance->buf_list);
+    bool ok_read = overlap_read(instance);
+  }
 }
 
 static void cmd_layout_validator(void) {
@@ -3349,9 +3402,6 @@ int main(int argc, char **argv) {
   if (!init_commands()) exit(1);
   if (!init_document_listing()) exit(1);
   if (!init_mpv()) exit(1);
-  // uint8_t pattern[] = "twitch.tv";
-  // document_listing(pattern, (int32_t)strlen((const char *)pattern));
-  // exit(1);
   // NOTE: It seems impossible to reach outside the bounds of the viewport
   // within Windows Terminal using a custom ReadConsoleInput approach. Virtual
   // terminal sequences and related APIs are bound to the viewport. So,
@@ -3633,48 +3683,5 @@ int main(int argc, char **argv) {
     //   return 1;
     // }
   }
-  return 0;
-
-  wchar_t *name = L"D:\\Test\\0_561mb.mp4";
-  if (name == NULL) {
-    log_message(LOG_ERROR, "No valid 'path' found in config");
-    return 1;
-  }
-
-  HANDLE iocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
-  DWORD listener_id;
-  HANDLE listener = CreateThread(NULL, 0, iocp_listener, (LPVOID)iocp, 0, &listener_id);
-  if (listener == NULL) {
-    log_last_error("Failed to create listener thread");
-    return 1;
-  }
-
-  size_t count = 1;
-  Instance *pipes = malloc(count * sizeof(Instance));
-  if (pipes == NULL) {
-    log_message(LOG_ERROR, "Failed to allocate memory for count=%d", count);
-    return false;
-  }
-
-  process_layout(count, pipes, name, iocp);
-  for (size_t i = 0; i < count; ++i) {
-    log_message(LOG_INFO, "Instance[%zu] Process ID: %lu", i, (unsigned long)pipes[i].pi.dwProcessId);
-  }
-
-  const uint8_t *file = locals.text + suffix_to_doc[7];
-  overlap_write(&pipes[0], file);
-  Sleep(2000);
-
-  // https://mpv.io/manual/stable/#json-ipc
-  // mpv file.mkv --input-ipc-server=\\.\pipe\mpvsocket
-  // echo loadfile "filepath" replace >\\.\pipe\mpvsocket
-  // ipc commands:
-  // https://mpv.io/manual/stable/#list-of-input-commands
-  // https://mpv.io/manual/stable/#commands-with-named-arguments
-  // these commands can also be async
-
-  // TODO: subtitles conf
-  // TODO: urls
-  // TODO: tag lookup with circular buffer and exclusion window
   return 0;
 }
