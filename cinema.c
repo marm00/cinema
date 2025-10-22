@@ -2394,10 +2394,11 @@ typedef struct ReadBuffer {
 
 typedef struct Instance {
   OverlappedContext ovl_ctx;
-  ReadBuffer *buf_list;
+  HANDLE pipe;
+  ReadBuffer *buf_head;
+  ReadBuffer *buf_tail;
   STARTUPINFOW si;
   PROCESS_INFORMATION pi;
-  HANDLE pipe;
 } Instance;
 
 static struct {
@@ -2475,7 +2476,9 @@ static bool create_pipe(Instance *instance, const wchar_t *name) {
 static bool overlap_read(Instance *instance) {
   log_message(LOG_TRACE, "Initializing read on PID %lu", instance->pi.dwProcessId);
   ZeroMemory(&instance->ovl_ctx.ovl, sizeof(OVERLAPPED));
-  if (!ReadFile(instance->pipe, instance->buf_list->buf, sizeof(instance->buf_list->buf), NULL, &instance->ovl_ctx.ovl)) {
+  void *start = instance->buf_tail->buf + instance->buf_tail->bytes;
+  DWORD to_read = (DWORD)(sizeof(instance->buf_tail->buf) - instance->buf_tail->bytes);
+  if (!ReadFile(instance->pipe, start, to_read, NULL, &instance->ovl_ctx.ovl)) {
     if (GetLastError() != ERROR_IO_PENDING) {
       log_last_error("Failed to initialize read");
       return false;
@@ -2585,14 +2588,20 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
       // TODO: handle different return cases beyond request_id
       // TODO: read each line (separated by \n character) separately
       // TODO: Currently, embedded 0 bytes terminate the current line, but you should not rely on this.
-      instance->buf_list->buf[bytes] = '\0'; // TODO: handle buffer gracefully
-      log_message(LOG_DEBUG, "Got data from pipe (%p): %.*s", (void *)instance->pipe, strlen(instance->buf_list->buf) - 1, instance->buf_list->buf);
-      log_message(LOG_DEBUG, "END data from pipe (%p)", (void *)instance->pipe);
-      // pool_free(&cin_io.writes, write);
-      if (false) {
-        // TODO: parse mpv response
-        // Overlapped_Write *write = find_write(instance, request_id);
-        // log_message(LOG_DEBUG, "Written to pipe    (%p): %.*s", (void *)instance->pipe, strlen(write->buf) - 1, write->buf);
+      instance->buf_tail->bytes += bytes;
+      void *newline = memchr(instance->buf_tail->buf, '\n', bytes);
+      if (newline) {
+        for (ReadBuffer *p = instance->buf_head; p; p = p->next) {
+          log_message(LOG_INFO, "%.*s", p->bytes - 1, p->buf);
+        }
+        instance->buf_head->bytes = 0;
+        instance->buf_tail = instance->buf_head;
+        // TODO: can be multiple newlines in a single read
+      } else {
+        ReadBuffer *next = instance->buf_tail->next;
+        if (next) next->bytes = 0;
+        else arena_push(cin_io.arena, ReadBuffer, 1, next);
+        instance->buf_tail = instance->buf_tail->next;
       }
       if (!overlap_read((Instance *)completion_key)) {
         // TODO: when observed, resolve instead of break
@@ -3229,7 +3238,8 @@ static void cmd_layout_executor(void) {
     instance->pi = pi;
     bool ok_pipe = create_pipe(instance, mpv_command + CIN_MPVCALL_START_LEN);
     bool ok_iocp = CreateIoCompletionPort(instance->pipe, cin_io.iocp, (ULONG_PTR)instance, 0) == NULL;
-    arena_push(cin_io.arena, ReadBuffer, 1, instance->buf_list);
+    arena_push(cin_io.arena, ReadBuffer, 1, instance->buf_head);
+    instance->buf_tail = instance->buf_head;
     bool ok_read = overlap_read(instance);
   }
 }
