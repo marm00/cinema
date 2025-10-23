@@ -304,11 +304,11 @@ typedef struct Arena {
       _left = align((a)->curr->count, (alignment));           \
       _right = _left + (bytes);                               \
     }                                                         \
-    out = (void *)((a)->curr + _left);                        \
+    out = (void *)((char *)(a)->curr + _left);                \
     (a)->curr->count = _right;                                \
   } while (0)
 
-#define arena_push(a, T, n, out) arena_push_raw((a), sizeof(T) * (n), align_size(T), (out));
+#define arena_push(a, T, n, out) arena_push_raw((a), sizeof(T) * (n), align_size(T), out);
 
 typedef struct PoolSlot {
   struct PoolSlot *next;
@@ -337,14 +337,14 @@ typedef struct Pool {
     (p)->item_align = align_size(T);          \
   } while (0)
 
-#define pool_push(p, out)                                                  \
-  do {                                                                     \
-    if ((p)->free_list) {                                                  \
-      out = (void *)(p)->free_list;                                        \
-      (p)->free_list = (p)->free_list->next;                               \
-    } else {                                                               \
-      arena_push_raw((p)->arena, (p)->item_bytes, (p)->item_align, (out)); \
-    }                                                                      \
+#define pool_push(p, out)                                                \
+  do {                                                                   \
+    if ((p)->free_list) {                                                \
+      out = (void *)(p)->free_list;                                      \
+      (p)->free_list = (p)->free_list->next;                             \
+    } else {                                                             \
+      arena_push_raw((p)->arena, (p)->item_bytes, (p)->item_align, out); \
+    }                                                                    \
   } while (0)
 
 #define pool_free(p, address)               \
@@ -684,12 +684,20 @@ static int32_t lcps(const uint8_t *a, const uint8_t *b) {
   return (int32_t)(a - start);
 }
 
+static inline bool cin_isloweralpha(char *c) {
+  return *c <= 'z' && *c >= 'a';
+}
+
 static inline bool cin_lower_isalpha(char *out) {
   if (*out <= 'Z' && *out >= 'A') {
     *out += ('a' - 'A');
     return true;
   }
-  return *out <= 'z' && *out >= 'a';
+  return cin_isloweralpha(out);
+}
+
+static inline bool cin_isnum(char c) {
+  return c <= '9' && c >= '0';
 }
 
 static inline wchar_t cin_wlower(wchar_t c) {
@@ -2474,7 +2482,6 @@ static bool create_pipe(Instance *instance, const wchar_t *name) {
 }
 
 static bool overlap_read(Instance *instance) {
-  log_message(LOG_TRACE, "Initializing read on PID %lu", instance->pi.dwProcessId);
   ZeroMemory(&instance->ovl_ctx.ovl, sizeof(OVERLAPPED));
   void *start = instance->buf_tail->buf + instance->buf_tail->bytes;
   DWORD to_read = (DWORD)(sizeof(instance->buf_tail->buf) - instance->buf_tail->bytes);
@@ -2501,7 +2508,7 @@ static bool overlap_write(Instance *instance, const uint8_t *file) {
                            request_id, file);
   write->bytes = (size_t)bytes;
   log_message(LOG_TRACE, "Initializing write on PID %lu", instance->pi.dwProcessId);
-  log_message(LOG_DEBUG, "Writing message (%zu bytes): %s", write->bytes, write->buf);
+  log_message(LOG_DEBUG, "Writing message (%zu bytes): %.*s", write->bytes, write->bytes - 1, write->buf);
   if (!WriteFile(instance->pipe, write->buf, (DWORD)write->bytes, NULL, &write->ovl_ctx.ovl)) {
     switch (GetLastError()) {
     case ERROR_IO_PENDING:
@@ -2512,9 +2519,11 @@ static bool overlap_write(Instance *instance, const uint8_t *file) {
       // Code 6: The handle is invalid
       log_message(LOG_DEBUG, "\t(ERR_START)\n\t%.*s\n\t(ERR_END)\n", (int)write->bytes - 2, write->buf);
       break;
+    default:
+      break;
     }
+    assert(false);
     log_last_error("Failed to initialize write");
-    pool_free(&cin_io.writes, write);
     return false;
   }
   log_message(LOG_TRACE, "Write call completed immediately.");
@@ -2573,7 +2582,6 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
       // https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-getqueuedcompletionstatus#remarks
       break;
     }
-    log_message(LOG_TRACE, "Processing dequeued completion packet from successful I/O operation");
     Instance *instance = (Instance *)completion_key;
     OverlappedContext *ctx = (OverlappedContext *)ovl;
     if (ctx->is_write) {
@@ -2584,29 +2592,48 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
         break;
       }
     } else {
-      // TODO: free the write struct and prune pending_writes
-      // TODO: handle different return cases beyond request_id
-      // TODO: read each line (separated by \n character) separately
-      // TODO: Currently, embedded 0 bytes terminate the current line, but you should not rely on this.
-      instance->buf_tail->bytes += bytes;
-      void *newline = memchr(instance->buf_tail->buf, '\n', bytes);
-      if (newline) {
-        for (ReadBuffer *p = instance->buf_head; p; p = p->next) {
-          log_message(LOG_INFO, "%.*s", p->bytes - 1, p->buf);
+      if (bytes) {
+        char *newline = memchr(instance->buf_tail->buf + instance->buf_tail->bytes, '\n', bytes);
+        instance->buf_tail->bytes += bytes;
+        if (newline) {
+          char *buf = instance->buf_head->buf;
+          size_t buf_size = instance->buf_head->bytes;
+          if (instance->buf_tail != instance->buf_head) {
+            for (ReadBuffer *b = instance->buf_head->next; b; b = b->next) {
+              buf_size += b->bytes;
+            }
+            char *contiguous_buf = NULL;
+            // TODO: free scratch arena
+            arena_push(cin_io.arena, char, buf_size, contiguous_buf);
+            size_t offset = 0;
+            for (ReadBuffer *b = instance->buf_head; b; offset += b->bytes, b = b->next) {
+              memcpy(contiguous_buf + offset, b->buf, b->bytes);
+            }
+            buf = contiguous_buf;
+          }
+          log_message(LOG_INFO, "Message: %.*s", buf_size - 1, buf);
+          char *req_pos = strstr(buf, "request_id");
+          if (req_pos) {
+            req_pos += strlen("request_id\":");
+            if (*req_pos == ' ') ++req_pos;
+            assert(cin_isnum(*req_pos));
+            int64_t request_id = *req_pos - '0';
+            while (cin_isnum(*++req_pos)) request_id = (request_id * 10) + (*req_pos - '0');
+            OverlappedWrite *write = (OverlappedWrite *)(uintptr_t)request_id;
+            assert(write);
+            assert(write->bytes);
+            log_message(LOG_INFO, "Recovered original write: %p (%zu bytes)", write, write->bytes);
+            pool_free(&cin_io.writes, write);
+          }
+          instance->buf_head->bytes = 0;
+          instance->buf_tail = instance->buf_head;
+        } else {
+          if (instance->buf_tail->next) instance->buf_tail->next->bytes = 0;
+          else arena_push(cin_io.arena, ReadBuffer, 1, instance->buf_tail->next);
+          instance->buf_tail = instance->buf_tail->next;
         }
-        instance->buf_head->bytes = 0;
-        instance->buf_tail = instance->buf_head;
-        // TODO: can be multiple newlines in a single read
-      } else {
-        ReadBuffer *next = instance->buf_tail->next;
-        if (next) next->bytes = 0;
-        else arena_push(cin_io.arena, ReadBuffer, 1, next);
-        instance->buf_tail = instance->buf_tail->next;
       }
-      if (!overlap_read((Instance *)completion_key)) {
-        // TODO: when observed, resolve instead of break
-        break;
-      }
+      overlap_read(instance);
     }
   }
   return 0;
@@ -3237,10 +3264,14 @@ static void cmd_layout_executor(void) {
     instance->si = si;
     instance->pi = pi;
     bool ok_pipe = create_pipe(instance, mpv_command + CIN_MPVCALL_START_LEN);
-    bool ok_iocp = CreateIoCompletionPort(instance->pipe, cin_io.iocp, (ULONG_PTR)instance, 0) == NULL;
+    assert(ok_pipe);
+    bool ok_iocp = CreateIoCompletionPort(instance->pipe, cin_io.iocp, (ULONG_PTR)instance, 0) != NULL;
+    assert(ok_iocp);
     arena_push(cin_io.arena, ReadBuffer, 1, instance->buf_head);
     instance->buf_tail = instance->buf_head;
     bool ok_read = overlap_read(instance);
+    assert(ok_read);
+    overlap_write(instance, locals.text + suffix_to_doc[(0 + (int32_t)i) % locals.doc_count]);
   }
 }
 
