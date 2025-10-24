@@ -2409,7 +2409,6 @@ typedef struct OverlappedWrite {
 typedef struct ReadBuffer {
   char buf[CIN_READ_SIZE];
   size_t bytes;
-  // TODO: chain reads until \n
   struct ReadBuffer *next;
 } ReadBuffer;
 
@@ -2584,6 +2583,25 @@ static bool process_layout(size_t count, Instance *instances, const wchar_t *fil
   return true;
 }
 
+#define CIN_MPVKEY_REQUEST "request_id\":"
+#define CIN_MPVKEY_REQUEST_LEN cin_strlen(CIN_MPVKEY_REQUEST)
+
+static inline void iocp_parse(const char *buf, ptrdiff_t buf_offset) {
+  char *req_pos = strstr(buf + buf_offset, CIN_MPVKEY_REQUEST);
+  if (req_pos) {
+    req_pos += CIN_MPVKEY_REQUEST_LEN;
+    if (*req_pos == ' ') ++req_pos;
+    assert(cin_isnum(*req_pos));
+    int64_t req_id = *req_pos - '0';
+    while (cin_isnum(*++req_pos)) req_id = (req_id * 10) + (*req_pos - '0');
+    OverlappedWrite *write = (OverlappedWrite *)(uintptr_t)req_id;
+    assert(write);
+    assert(write->bytes);
+    log_message(LOG_INFO, "Recovered original write: %p (%zu bytes)", write, write->bytes);
+    pool_free(&cin_io.writes, write);
+  }
+}
+
 static DWORD WINAPI iocp_listener(LPVOID lp_param) {
   HANDLE iocp = (HANDLE)lp_param;
   for (;;) {
@@ -2607,40 +2625,47 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
       }
     } else {
       if (bytes) {
-        char *newline = memchr(instance->buf_tail->buf + instance->buf_tail->bytes, '\n', bytes);
+        assert(!memchr(instance->buf_tail->buf, '\0', instance->buf_tail->bytes));
+        char *lf = memchr(instance->buf_tail->buf + instance->buf_tail->bytes, '\n', bytes);
         instance->buf_tail->bytes += bytes;
-        // TODO: handle n newlines in buf
-        if (newline) {
-          char *buf = instance->buf_head->buf;
-          size_t buf_size = instance->buf_head->bytes;
+        // TODO: memmove remainder in tail buf
+        if (lf) {
           bool multi = instance->buf_tail != instance->buf_head;
+          ptrdiff_t tail_pos = lf - instance->buf_tail->buf;
+          char *buf = instance->buf_head->buf;
+          size_t len = instance->buf_head->bytes;
           if (multi) {
             for (ReadBuffer *b = instance->buf_head->next; b; b = b->next) {
-              buf_size += b->bytes;
+              assert(!memchr(b->buf, '\0', b->bytes));
+              len += b->bytes;
             }
             char *contiguous_buf = NULL;
-            arena_push(cin_io.iocp_arena, char, buf_size, contiguous_buf);
+            arena_push(cin_io.iocp_arena, char, len, contiguous_buf);
             size_t offset = 0;
-            for (ReadBuffer *b = instance->buf_head; b; offset += b->bytes, b = b->next) {
+            for (ReadBuffer *b = instance->buf_head; b != instance->buf_tail; b = b->next) {
+              assert(b);
               memcpy(contiguous_buf + offset, b->buf, b->bytes);
+              offset += b->bytes;
+              b->bytes = 0;
             }
+            memcpy(contiguous_buf + offset, instance->buf_tail, instance->buf_tail->bytes);
+            instance->buf_tail->bytes -= (size_t)tail_pos;
+            tail_pos += (ptrdiff_t)offset;
             buf = contiguous_buf;
           }
-          log_message(LOG_INFO, "Message: %.*s", buf_size - 1, buf);
-          char *req_pos = strstr(buf, "request_id");
-          if (req_pos) {
-            req_pos += strlen("request_id\":");
-            if (*req_pos == ' ') ++req_pos;
-            assert(cin_isnum(*req_pos));
-            int64_t request_id = *req_pos - '0';
-            while (cin_isnum(*++req_pos)) request_id = (request_id * 10) + (*req_pos - '0');
-            OverlappedWrite *write = (OverlappedWrite *)(uintptr_t)request_id;
-            assert(write);
-            assert(write->bytes);
-            log_message(LOG_INFO, "Recovered original write: %p (%zu bytes)", write, write->bytes);
-            pool_free(&cin_io.writes, write);
+          log_message(LOG_INFO, "Message: %.*s", len - 1, buf);
+          ptrdiff_t buf_offset = 0;
+          while (lf) {
+            *lf = '\0';
+            ++tail_pos;
+            iocp_parse(buf, buf_offset);
+            lf = memchr(buf + tail_pos, '\n', len - (size_t)tail_pos);
+            if (lf) {
+              buf_offset = tail_pos;
+              tail_pos += lf - buf;
+            }
           }
-          if (multi) arena_free(cin_io.iocp_arena, buf_size);
+          if (multi) arena_free(cin_io.iocp_arena, len);
           instance->buf_head->bytes = 0;
           instance->buf_tail = instance->buf_head;
         } else {
