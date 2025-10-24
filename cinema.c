@@ -310,6 +310,18 @@ typedef struct Arena {
 
 #define arena_push(a, T, n, out) arena_push_raw((a), sizeof(T) * (n), align_size(T), out);
 
+#define arena_free(a, bytes)                                  \
+  do {                                                        \
+    assert((bytes) < (a)->curr->capacity);                    \
+    assert((a)->curr->count - CIN_ARENA_BYTES >= (bytes));    \
+    (a)->curr->count -= (bytes);                              \
+    if ((a)->curr->count == CIN_ARENA_BYTES &&                \
+        (a)->curr->prev &&                                    \
+        (a)->curr->prev->count < (a)->curr->prev->capacity) { \
+      /* TODO: memory in prev could be reused */              \
+    }                                                         \
+  } while (0);
+
 typedef struct PoolSlot {
   struct PoolSlot *next;
 } PoolSlot;
@@ -2378,6 +2390,7 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len) {
 #define CIN_WRITE_SIZE (CIN_WRITE_POOL_CAP + CIN_WRITE_PREFIX_LEN +     \
                         CIN_WRITE_I64DIGITS + CIN_WRITE_CMD_START_LEN + \
                         CIN_WRITE_CMD_FILE + CIN_WRITE_CMD_END_LEN)
+// TODO: try different allocations
 #define CIN_READ_SIZE kilobytes(16)
 #define CIN_INSTANCE_POOL_CAP 4
 #define CIN_IO_ARENA_CAP megabytes(2)
@@ -2411,6 +2424,7 @@ typedef struct Instance {
 
 static struct {
   Arena *arena;
+  Arena *iocp_arena;
   Pool writes;
   Pool instances;
   HANDLE iocp;
@@ -2595,16 +2609,17 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
       if (bytes) {
         char *newline = memchr(instance->buf_tail->buf + instance->buf_tail->bytes, '\n', bytes);
         instance->buf_tail->bytes += bytes;
+        // TODO: handle n newlines in buf
         if (newline) {
           char *buf = instance->buf_head->buf;
           size_t buf_size = instance->buf_head->bytes;
-          if (instance->buf_tail != instance->buf_head) {
+          bool multi = instance->buf_tail != instance->buf_head;
+          if (multi) {
             for (ReadBuffer *b = instance->buf_head->next; b; b = b->next) {
               buf_size += b->bytes;
             }
             char *contiguous_buf = NULL;
-            // TODO: free scratch arena
-            arena_push(cin_io.arena, char, buf_size, contiguous_buf);
+            arena_push(cin_io.iocp_arena, char, buf_size, contiguous_buf);
             size_t offset = 0;
             for (ReadBuffer *b = instance->buf_head; b; offset += b->bytes, b = b->next) {
               memcpy(contiguous_buf + offset, b->buf, b->bytes);
@@ -2625,11 +2640,12 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
             log_message(LOG_INFO, "Recovered original write: %p (%zu bytes)", write, write->bytes);
             pool_free(&cin_io.writes, write);
           }
+          if (multi) arena_free(cin_io.iocp_arena, buf_size);
           instance->buf_head->bytes = 0;
           instance->buf_tail = instance->buf_head;
         } else {
           if (instance->buf_tail->next) instance->buf_tail->next->bytes = 0;
-          else arena_push(cin_io.arena, ReadBuffer, 1, instance->buf_tail->next);
+          else arena_push(cin_io.iocp_arena, ReadBuffer, 1, instance->buf_tail->next);
           instance->buf_tail = instance->buf_tail->next;
         }
       }
@@ -2641,6 +2657,7 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
 
 static inline bool init_mpv(void) {
   arena_alloc(cin_io.arena, CIN_IO_ARENA_CAP);
+  arena_alloc(cin_io.iocp_arena, CIN_IO_ARENA_CAP);
   pool_assign(&cin_io.writes, OverlappedWrite, cin_io.arena);
   pool_assign(&cin_io.instances, Instance, cin_io.arena);
   cin_io.iocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
