@@ -304,22 +304,24 @@ typedef struct Arena {
       _left = align((a)->curr->count, (alignment));           \
       _right = _left + (bytes);                               \
     }                                                         \
-    out = (void *)((char *)(a)->curr + _left);                \
+    out = (void *)((uint8_t *)(a)->curr + _left);             \
     (a)->curr->count = _right;                                \
   } while (0)
 
 #define arena_push(a, T, n, out) arena_push_raw((a), sizeof(T) * (n), align_size(T), out);
 
-#define arena_free(a, bytes)                                  \
-  do {                                                        \
-    assert((bytes) < (a)->curr->capacity);                    \
-    assert((a)->curr->count - CIN_ARENA_BYTES >= (bytes));    \
-    (a)->curr->count -= (bytes);                              \
-    if ((a)->curr->count == CIN_ARENA_BYTES &&                \
-        (a)->curr->prev &&                                    \
-        (a)->curr->prev->count < (a)->curr->prev->capacity) { \
-      /* TODO: memory in prev could be reused */              \
-    }                                                         \
+#define arena_free(a, T, n)                                               \
+  do {                                                                    \
+    assert((sizeof(T) * (n)) < (a)->curr->capacity);                      \
+    assert((a)->curr->count >= CIN_ARENA_BYTES);                          \
+    assert((a)->curr->count - CIN_ARENA_BYTES >= (sizeof(T) * (n)));      \
+    (a)->curr->count -= sizeof(T) * (n);                                  \
+    ZeroMemory((uint8_t *)(a)->curr + (a)->curr->count, sizeof(T) * (n)); \
+    if ((a)->curr->count == CIN_ARENA_BYTES &&                            \
+        (a)->curr->prev &&                                                \
+        (a)->curr->prev->count < (a)->curr->prev->capacity) {             \
+      /* TODO: memory in prev could be reused */                          \
+    }                                                                     \
   } while (0);
 
 typedef struct PoolSlot {
@@ -2384,8 +2386,8 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len) {
 #define CIN_WRITE_CMD_END "\"]}\n"
 #define CIN_WRITE_I64DIGITS 19
 #define CIN_WRITE_CMD_FILE CIN_MAX_PATH_BYTES
-#define CIN_WRITE_PREFIX_LEN sizeof(CIN_WRITE_PREFIX) - 1
-#define CIN_WRITE_CMD_START_LEN sizeof(CIN_WRITE_CMD_START) - 1
+#define CIN_WRITE_PREFIX_LEN cin_strlen(CIN_WRITE_PREFIX)
+#define CIN_WRITE_CMD_START_LEN cin_strlen(CIN_WRITE_CMD_START)
 #define CIN_WRITE_CMD_END_LEN sizeof(CIN_WRITE_CMD_END)
 #define CIN_WRITE_SIZE (CIN_WRITE_POOL_CAP + CIN_WRITE_PREFIX_LEN +     \
                         CIN_WRITE_I64DIGITS + CIN_WRITE_CMD_START_LEN + \
@@ -2419,6 +2421,7 @@ typedef struct Instance {
   ReadBuffer *buf_tail;
   STARTUPINFOW si;
   PROCESS_INFORMATION pi;
+  struct Instance *next;
 } Instance;
 
 static struct {
@@ -2426,6 +2429,7 @@ static struct {
   Arena *iocp_arena;
   Pool writes;
   Pool instances;
+  Pool *instance_head;
   HANDLE iocp;
 } cin_io = {0};
 
@@ -2496,7 +2500,7 @@ static bool create_pipe(Instance *instance, const wchar_t *name) {
 
 static bool overlap_read(Instance *instance) {
   ZeroMemory(&instance->ovl_ctx.ovl, sizeof(OVERLAPPED));
-  void *start = instance->buf_tail->buf + instance->buf_tail->bytes;
+  char *start = instance->buf_tail->buf + instance->buf_tail->bytes;
   DWORD to_read = (DWORD)(sizeof(instance->buf_tail->buf) - instance->buf_tail->bytes);
   if (!ReadFile(instance->pipe, start, to_read, NULL, &instance->ovl_ctx.ovl)) {
     if (GetLastError() != ERROR_IO_PENDING) {
@@ -2626,12 +2630,14 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
     } else {
       if (bytes) {
         assert(!memchr(instance->buf_tail->buf, '\0', instance->buf_tail->bytes));
+        assert(sizeof(instance->buf_tail->buf) - instance->buf_tail->bytes >= bytes);
         char *lf = memchr(instance->buf_tail->buf + instance->buf_tail->bytes, '\n', bytes);
         instance->buf_tail->bytes += bytes;
         // TODO: memmove remainder in tail buf
         if (lf) {
           bool multi = instance->buf_tail != instance->buf_head;
           ptrdiff_t tail_pos = lf - instance->buf_tail->buf;
+          assert(tail_pos < bytes);
           char *buf = instance->buf_head->buf;
           size_t len = instance->buf_head->bytes;
           if (multi) {
@@ -2650,22 +2656,24 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
             }
             memcpy(contiguous_buf + offset, instance->buf_tail, instance->buf_tail->bytes);
             instance->buf_tail->bytes -= (size_t)tail_pos;
+            instance->buf_tail->bytes -= 1;
             tail_pos += (ptrdiff_t)offset;
             buf = contiguous_buf;
           }
           log_message(LOG_INFO, "Message: %.*s", len - 1, buf);
           ptrdiff_t buf_offset = 0;
-          while (lf) {
+          for (;;) {
             *lf = '\0';
             ++tail_pos;
             iocp_parse(buf, buf_offset);
+            if ((size_t)tail_pos >= len) break;
             lf = memchr(buf + tail_pos, '\n', len - (size_t)tail_pos);
-            if (lf) {
-              buf_offset = tail_pos;
-              tail_pos += lf - buf;
-            }
+            if (!lf) break;
+            buf_offset = tail_pos;
+            tail_pos += lf - buf;
           }
-          if (multi) arena_free(cin_io.iocp_arena, len);
+          assert((size_t)tail_pos == len);
+          if (multi) arena_free(cin_io.iocp_arena, char, len);
           instance->buf_head->bytes = 0;
           instance->buf_tail = instance->buf_head;
         } else {
