@@ -2421,7 +2421,7 @@ typedef struct Instance {
   ReadBuffer *buf_tail;
   STARTUPINFOW si;
   PROCESS_INFORMATION pi;
-  struct Instance *next;
+  struct Instance *prev;
 } Instance;
 
 static struct {
@@ -2429,7 +2429,7 @@ static struct {
   Arena *iocp_arena;
   Pool writes;
   Pool instances;
-  Pool *instance_head;
+  Instance *instance_tail;
   HANDLE iocp;
 } cin_io = {0};
 
@@ -2544,46 +2544,6 @@ static bool overlap_write(Instance *instance, const uint8_t *file) {
     return false;
   }
   log_message(LOG_TRACE, "Write call completed immediately.");
-  return true;
-}
-
-static bool create_instance(Instance *instance, const wchar_t *name, const wchar_t *file_name, HANDLE *iocp) {
-  if (name == NULL || file_name == NULL) {
-    return false;
-  }
-  instance->ovl_ctx.is_write = false;
-  if (!create_process(instance, name, file_name)) {
-    return false;
-  }
-  if (!create_pipe(instance, name)) {
-    return false;
-  }
-  // Does not create a new iocp if pointer is invalid since Existing is provided
-  if (CreateIoCompletionPort(instance->pipe, iocp, (ULONG_PTR)instance, 0) == NULL) {
-    log_last_error("Failed to associate pipe with iocp");
-    return false;
-  }
-  if (!overlap_read(instance)) {
-    return false;
-  }
-  return true;
-}
-
-static bool process_layout(size_t count, Instance *instances, const wchar_t *file_name, HANDLE *iocp) {
-  static const wchar_t PIPE_PREFIXW[] = L"\\\\.\\pipe\\cinema_mpv_";
-  static const int PIPE_NAME_BUFFER = 32;
-  if (count <= 0) {
-    log_message(LOG_TRACE, "Count of %d, nothing to process.", count);
-    return false;
-  }
-  wchar_t pipe_name[PIPE_NAME_BUFFER];
-  for (size_t i = 0; i < count; ++i) {
-    swprintf(pipe_name, PIPE_NAME_BUFFER, L"%ls%d", PIPE_PREFIXW, i);
-    if (!create_instance(&instances[i], pipe_name, file_name, iocp)) {
-      log_message(LOG_ERROR, "Failed to create instance");
-      return false;
-    }
-  }
   return true;
 }
 
@@ -3269,7 +3229,21 @@ static void cmd_swap_validator(void) {
   set_preview(true, L"swap screen %zu with %zu", cmd_ctx.numbers.items[0], cmd_ctx.numbers.items[1]);
 }
 
+#define CIN_WRITE_QUIT ",command:[\"quit\"]}\n"
+
 static void cmd_quit_executor(void) {
+  for (Instance *instance = cin_io.instance_tail; instance; instance = instance->prev) {
+    log_message(LOG_DEBUG, "Closing PID=%lu", instance->pi.dwProcessId);
+    // TODO: can extract the write mechanism somewhere
+    OverlappedWrite *write = NULL;
+    pool_push(&cin_io.writes, write);
+    int64_t request_id = (int64_t)(uintptr_t)write;
+    ZeroMemory(write, sizeof(OverlappedWrite));
+    int32_t bytes = snprintf(write->buf, CIN_WRITE_SIZE, CIN_WRITE_PREFIX "%lld" CIN_WRITE_QUIT, request_id);
+    write->bytes = (size_t)bytes;
+    write->ovl_ctx.is_write = true;
+    WriteFile(instance->pipe, write->buf, (DWORD)write->bytes, NULL, &write->ovl_ctx.ovl);
+  }
   clear_preview(0);
   show_cursor();
   exit(1);
@@ -3294,9 +3268,11 @@ static void cmd_layout_executor(void) {
   cmd_ctx.layout = cmd_ctx.queued_layout;
   cmd_ctx.queued_layout = tmp_layout;
   static wchar_t mpv_command[CIN_MPVCALL_BUF] = {CIN_MPVCALL};
-  for (size_t i = 0; i < cmd_ctx.layout->count; ++i) {
-    Instance *instance = NULL;
+  Instance *instance = NULL;
+  Instance *prev = NULL;
+  for (size_t i = 0; i < cmd_ctx.layout->count; prev = instance, ++i) {
     pool_push(&cin_io.instances, instance);
+    instance->prev = prev;
     instance->ovl_ctx.is_write = false;
     swprintf(mpv_command + CIN_MPVCALL_LEN, CIN_MPVCALL_DIGITS, L"%zu", i);
     STARTUPINFOW si = {0};
@@ -3323,6 +3299,7 @@ static void cmd_layout_executor(void) {
     assert(ok_read);
     overlap_write(instance, locals.text + suffix_to_doc[(0 + (int32_t)i) % locals.doc_count]);
   }
+  cin_io.instance_tail = instance;
 }
 
 static void cmd_layout_validator(void) {
