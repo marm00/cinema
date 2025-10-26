@@ -356,6 +356,7 @@ typedef struct Pool {
     if ((p)->free_list) {                                                \
       out = (void *)(p)->free_list;                                      \
       (p)->free_list = (p)->free_list->next;                             \
+      ZeroMemory(out, sizeof(*out));                                     \
     } else {                                                             \
       arena_push_raw((p)->arena, (p)->item_bytes, (p)->item_align, out); \
     }                                                                    \
@@ -2515,9 +2516,8 @@ static bool overlap_read(Instance *instance) {
 static bool overlap_write(Instance *instance, const uint8_t *file) {
   OverlappedWrite *write = NULL;
   pool_push(&cin_io.writes, write);
-  int64_t request_id = (int64_t)(uintptr_t)write;
-  ZeroMemory(&write->ovl_ctx.ovl, sizeof(OVERLAPPED));
   write->ovl_ctx.is_write = true;
+  int64_t request_id = (int64_t)(uintptr_t)write;
   int32_t bytes = snprintf(write->buf, CIN_WRITE_SIZE,
                            CIN_WRITE_PREFIX
                            "%lld" CIN_WRITE_CMD_START
@@ -3238,7 +3238,6 @@ static void cmd_quit_executor(void) {
     OverlappedWrite *write = NULL;
     pool_push(&cin_io.writes, write);
     int64_t request_id = (int64_t)(uintptr_t)write;
-    ZeroMemory(write, sizeof(OverlappedWrite));
     int32_t bytes = snprintf(write->buf, CIN_WRITE_SIZE, CIN_WRITE_PREFIX "%lld" CIN_WRITE_QUIT, request_id);
     write->bytes = (size_t)bytes;
     write->ovl_ctx.is_write = true;
