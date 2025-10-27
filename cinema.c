@@ -270,8 +270,8 @@ typedef struct Arena {
 
 #define align(a, b) (((a) + (b) - 1) & (~((b) - 1)))
 #define align_size(T) max(sizeof(size_t), __alignof(T))
-#define blocks(n) ((n) * (sizeof(size_t) * 8))
-#define align_block(n) align((n), blocks(1))
+#define block_bytes(n) ((n) * (sizeof(size_t) * 8))
+#define align_block(n) align((n), block_bytes(1))
 #define kilobytes(n) ((n) << 10)
 #define megabytes(n) ((n) << 20)
 #define CIN_ARENA_CAP kilobytes(32)
@@ -863,6 +863,16 @@ static inline int32_t utf8_to_utf16_raw(const char *str) {
   assert(n_chars);
   array_resize(&utf16_buf_raw, (size_t)n_chars);
   return MultiByteToWideChar(CP_UTF8, 0, str, -1, utf16_buf_raw.items, n_chars);
+}
+
+static inline int32_t utf8_to_utf16_nraw(const char *str, int32_t len) {
+  assert(utf16_buf_raw.items);
+  assert(str);
+  // process len bytes, with n_chars not including null terminator
+  int32_t n_chars = MultiByteToWideChar(CP_UTF8, 0, str, len, NULL, 0);
+  assert(n_chars);
+  array_resize(&utf16_buf_raw, (size_t)n_chars);
+  return MultiByteToWideChar(CP_UTF8, 0, str, len, utf16_buf_raw.items, n_chars);
 }
 
 static inline int32_t utf16_norm(const wchar_t *str) {
@@ -2387,7 +2397,7 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len) {
 #define CIN_INSTANCE_POOL_CAP 4
 #define CIN_IO_ARENA_CAP megabytes(2)
 #define CIN_READ_SIZE kilobytes(16)
-#define CIN_WRITE_SIZE align_block(CIN_MAX_PATH_BYTES) + blocks(2)
+#define CIN_WRITE_SIZE align_block(CIN_MAX_PATH_BYTES) + block_bytes(2)
 
 typedef struct OverlappedContext {
   OVERLAPPED ovl;
@@ -2424,35 +2434,6 @@ static struct {
   Instance *instance_tail;
   HANDLE iocp;
 } cin_io = {0};
-
-static bool create_process(Instance *instance, const wchar_t *pipe_name, const wchar_t *file_name) {
-  static wchar_t command[CIN_COMMAND_PROMPT_LIMIT];
-  swprintf(command, CIN_COMMAND_PROMPT_LIMIT,
-           L"mpv"
-           L" \"%ls\"" // filename
-           L" --input-ipc-server=%ls",
-           file_name,
-           pipe_name);
-  log_wmessage(LOG_INFO, command);
-  STARTUPINFOW si = {0};
-  si.cb = sizeof(si);
-  PROCESS_INFORMATION pi = {0};
-  // https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessa
-  if (!CreateProcessW(NULL, command, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
-    if (GetLastError() == ERROR_FILE_NOT_FOUND) {
-      // mpv binary not found
-      // TODO: link to somewhere to get the binary
-      // TODO: check for yt-dlp binary for streams
-      log_last_error("Failed to find mpv binary");
-    } else {
-      log_last_error("Failed to start mpv even though it was found");
-    }
-    return false;
-  };
-  instance->si = si;
-  instance->pi = pi;
-  return true;
-}
 
 static bool create_pipe(Instance *instance, const wchar_t *name) {
   // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilea
@@ -2505,9 +2486,9 @@ static bool overlap_read(Instance *instance) {
 }
 
 #define CIN_WRITE_CMD_LEFT "{async:true,request_id:%lld,command:[\"%s\""
-#define CIN_WRITE_CMD_MID2 ",\"%s\""
+#define CIN_WRITE_CMD_MID ",\"%s\""
 #define CIN_WRITE_CMD_RIGHT "]}\n"
-#define CIN_WRITE_CMD (CIN_WRITE_CMD_LEFT CIN_WRITE_CMD_MID2 CIN_WRITE_CMD_RIGHT)
+#define CIN_WRITE_CMD (CIN_WRITE_CMD_LEFT CIN_WRITE_CMD_MID CIN_WRITE_CMD_RIGHT)
 #define CIN_WRITE_CMD_NARG (CIN_WRITE_CMD_LEFT CIN_WRITE_CMD_RIGHT)
 
 static bool overlap_write(Instance *instance, const char *cmd, const uint8_t *arg) {
@@ -2572,7 +2553,7 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
       log_last_error("Failed to dequeue packet");
       // TODO: when observed, resolve instead of break
       // https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-getqueuedcompletionstatus#remarks
-      break;
+      // break;
     }
     Instance *instance = (Instance *)completion_key;
     OverlappedContext *ctx = (OverlappedContext *)ovl;
@@ -3244,10 +3225,11 @@ static void cmd_quit_validator(void) {
 #define CIN_MPVCALL_START_LEN cin_strlen(CIN_MPVCALL_START)
 #define CIN_MPVCALL_PIPE L"\\\\.\\pipe\\cinema_mpv_"
 #define CIN_MPVCALL_PIPE_LEN cin_strlen(CIN_MPVCALL_PIPE)
-#define CIN_MPVCALL CIN_MPVCALL_START CIN_MPVCALL_PIPE
+#define CIN_MPVCALL (CIN_MPVCALL_START CIN_MPVCALL_PIPE)
 #define CIN_MPVCALL_LEN cin_strlen(CIN_MPVCALL)
 #define CIN_MPVCALL_DIGITS 19
-#define CIN_MPVCALL_BUF (CIN_MPVCALL_LEN + CIN_MPVCALL_DIGITS)
+#define CIN_MPVCALL_GEOMETRY_LEN block_bytes(2)
+#define CIN_MPVCALL_BUF align_block(CIN_MPVCALL_LEN + CIN_MPVCALL_GEOMETRY_LEN)
 
 static void cmd_layout_executor(void) {
   cmd_layout tmp_layout = cmd_ctx.layout;
@@ -3260,7 +3242,23 @@ static void cmd_layout_executor(void) {
     pool_push(&cin_io.instances, instance);
     instance->prev = prev;
     instance->ovl_ctx.is_write = false;
-    swprintf(mpv_command + CIN_MPVCALL_LEN, CIN_MPVCALL_DIGITS, L"%zu", i);
+    size_t right = CIN_MPVCALL_LEN + CIN_MPVCALL_DIGITS;
+    size_t left = right;
+    size_t j = i;
+    do {
+      mpv_command[left--] = L'0' + (j % 10);
+      j /= 10;
+    } while (j);
+    size_t digits = right - left++;
+    for (; j < digits; ++j) mpv_command[CIN_MPVCALL_LEN + j] = mpv_command[left + j];
+    Cin_Screen screen = cmd_ctx.layout->items[i];
+    int32_t len = utf8_to_utf16_nraw((char *)screen_arena.items + screen.offset, screen.len);
+    if (len > (int32_t)CIN_MPVCALL_GEOMETRY_LEN) {
+      // TODO: error message for user
+      assert(false);
+    }
+    swprintf(mpv_command + CIN_MPVCALL_LEN + digits, CIN_MPVCALL_GEOMETRY_LEN, L" --geometry=%.*s",
+             len, utf16_buf_raw.items);
     STARTUPINFOW si = {0};
     si.cb = sizeof(si);
     PROCESS_INFORMATION pi = {0};
@@ -3272,9 +3270,11 @@ static void cmd_layout_executor(void) {
       } else {
         log_last_error("Failed to start mpv even though it was found");
       }
+      assert(false);
     }
     instance->si = si;
     instance->pi = pi;
+    mpv_command[CIN_MPVCALL_LEN + digits] = L'\0';
     bool ok_pipe = create_pipe(instance, mpv_command + CIN_MPVCALL_START_LEN);
     assert(ok_pipe);
     bool ok_iocp = CreateIoCompletionPort(instance->pipe, cin_io.iocp, (ULONG_PTR)instance, 0) != NULL;
