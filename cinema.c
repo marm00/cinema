@@ -2570,7 +2570,6 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
         assert(sizeof(instance->buf_tail->buf) - instance->buf_tail->bytes >= bytes);
         char *lf = memchr(instance->buf_tail->buf + instance->buf_tail->bytes, '\n', bytes);
         instance->buf_tail->bytes += bytes;
-        // TODO: memmove remainder in tail buf
         if (lf) {
           bool multi = instance->buf_tail != instance->buf_head;
           ptrdiff_t tail_pos = lf - instance->buf_tail->buf;
@@ -2609,7 +2608,8 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
             buf_offset = tail_pos;
             tail_pos += lf - buf;
           }
-          assert((size_t)tail_pos == len);
+          // TODO: memmove remainder in tail buf
+          // assert((size_t)tail_pos == len);
           if (multi) arena_free(cin_io.iocp_arena, char, len);
           instance->buf_head->bytes = 0;
           instance->buf_tail = instance->buf_head;
@@ -3238,6 +3238,7 @@ static void cmd_layout_executor(void) {
   static wchar_t mpv_command[CIN_MPVCALL_BUF] = {CIN_MPVCALL};
   Instance *instance = NULL;
   Instance *prev = NULL;
+  LockSetForegroundWindow(LSFW_LOCK);
   for (size_t i = 0; i < cmd_ctx.layout->count; prev = instance, ++i) {
     pool_push(&cin_io.instances, instance);
     instance->prev = prev;
@@ -3285,6 +3286,9 @@ static void cmd_layout_executor(void) {
     assert(ok_read);
     overlap_write(instance, "loadfile", locals.text + suffix_to_doc[(0 + (int32_t)i) % locals.doc_count]);
   }
+  // TODO: Make properly async
+  Sleep(500);
+  LockSetForegroundWindow(LSFW_UNLOCK);
   cin_io.instance_tail = instance;
 }
 
