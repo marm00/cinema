@@ -269,11 +269,13 @@ typedef struct Arena {
 } Arena;
 
 #define align(a, b) (((a) + (b) - 1) & (~((b) - 1)))
-#define align_size(T) (max(sizeof(size_t), __alignof(T)))
+#define align_size(T) max(sizeof(size_t), __alignof(T))
+#define blocks(n) ((n) * (sizeof(size_t) * 8))
+#define align_block(n) align((n), blocks(1))
 #define kilobytes(n) ((n) << 10)
 #define megabytes(n) ((n) << 20)
-#define CIN_ARENA_CAP (kilobytes(32))
-#define CIN_ARENA_BYTES (align(sizeof(Arena), (size_t)64))
+#define CIN_ARENA_CAP kilobytes(32)
+#define CIN_ARENA_BYTES align(sizeof(Arena), (size_t)64)
 
 #define arena_alloc(a, bytes)                                                 \
   do {                                                                        \
@@ -356,7 +358,7 @@ typedef struct Pool {
     if ((p)->free_list) {                                                \
       out = (void *)(p)->free_list;                                      \
       (p)->free_list = (p)->free_list->next;                             \
-      ZeroMemory(out, sizeof(*out));                                     \
+      ZeroMemory((out), sizeof(*(out)));                                 \
     } else {                                                             \
       arena_push_raw((p)->arena, (p)->item_bytes, (p)->item_align, out); \
     }                                                                    \
@@ -2382,21 +2384,10 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len) {
 }
 
 #define CIN_WRITE_POOL_CAP 32
-#define CIN_WRITE_PREFIX "{async:true,request_id:"
-#define CIN_WRITE_CMD_START ",command:[\"loadfile\",\""
-#define CIN_WRITE_CMD_END "\"]}\n"
-#define CIN_WRITE_I64DIGITS 19
-#define CIN_WRITE_CMD_FILE CIN_MAX_PATH_BYTES
-#define CIN_WRITE_PREFIX_LEN cin_strlen(CIN_WRITE_PREFIX)
-#define CIN_WRITE_CMD_START_LEN cin_strlen(CIN_WRITE_CMD_START)
-#define CIN_WRITE_CMD_END_LEN sizeof(CIN_WRITE_CMD_END)
-#define CIN_WRITE_SIZE (CIN_WRITE_POOL_CAP + CIN_WRITE_PREFIX_LEN +     \
-                        CIN_WRITE_I64DIGITS + CIN_WRITE_CMD_START_LEN + \
-                        CIN_WRITE_CMD_FILE + CIN_WRITE_CMD_END_LEN)
-// TODO: try different allocations
-#define CIN_READ_SIZE kilobytes(16)
 #define CIN_INSTANCE_POOL_CAP 4
 #define CIN_IO_ARENA_CAP megabytes(2)
+#define CIN_READ_SIZE kilobytes(16)
+#define CIN_WRITE_SIZE align_block(CIN_MAX_PATH_BYTES) + blocks(2)
 
 typedef struct OverlappedContext {
   OVERLAPPED ovl;
@@ -2513,19 +2504,24 @@ static bool overlap_read(Instance *instance) {
   return true;
 }
 
-static bool overlap_write(Instance *instance, const uint8_t *file) {
+#define CIN_WRITE_CMD_LEFT "{async:true,request_id:%lld,command:[\"%s\""
+#define CIN_WRITE_CMD_MID2 ",\"%s\""
+#define CIN_WRITE_CMD_RIGHT "]}\n"
+#define CIN_WRITE_CMD (CIN_WRITE_CMD_LEFT CIN_WRITE_CMD_MID2 CIN_WRITE_CMD_RIGHT)
+#define CIN_WRITE_CMD_NARG (CIN_WRITE_CMD_LEFT CIN_WRITE_CMD_RIGHT)
+
+static bool overlap_write(Instance *instance, const char *cmd, const uint8_t *arg) {
   OverlappedWrite *write = NULL;
   pool_push(&cin_io.writes, write);
   write->ovl_ctx.is_write = true;
   int64_t request_id = (int64_t)(uintptr_t)write;
-  int32_t bytes = snprintf(write->buf, CIN_WRITE_SIZE,
-                           CIN_WRITE_PREFIX
-                           "%lld" CIN_WRITE_CMD_START
-                           "%s" CIN_WRITE_CMD_END,
-                           request_id, file);
+  int32_t bytes = arg ? snprintf(write->buf, sizeof(write->buf), CIN_WRITE_CMD, request_id, cmd, arg)
+                      : snprintf(write->buf, sizeof(write->buf), CIN_WRITE_CMD_NARG, request_id, cmd);
+  assert(bytes > 0);
+  assert((size_t)bytes < sizeof(write->buf) - 1);
   write->bytes = (size_t)bytes;
-  log_message(LOG_TRACE, "Initializing write on PID %lu", instance->pi.dwProcessId);
-  log_message(LOG_DEBUG, "Writing message (%zu bytes): %.*s", write->bytes, write->bytes - 1, write->buf);
+  log_message(LOG_DEBUG, "Writing message (PID %lu) (%zu bytes): %.*s",
+              instance->pi.dwProcessId, write->bytes, write->bytes - 1, write->buf);
   if (!WriteFile(instance->pipe, write->buf, (DWORD)write->bytes, NULL, &write->ovl_ctx.ovl)) {
     switch (GetLastError()) {
     case ERROR_IO_PENDING:
@@ -3229,19 +3225,10 @@ static void cmd_swap_validator(void) {
   set_preview(true, L"swap screen %zu with %zu", cmd_ctx.numbers.items[0], cmd_ctx.numbers.items[1]);
 }
 
-#define CIN_WRITE_QUIT ",command:[\"quit\"]}\n"
-
 static void cmd_quit_executor(void) {
   for (Instance *instance = cin_io.instance_tail; instance; instance = instance->prev) {
     log_message(LOG_DEBUG, "Closing PID=%lu", instance->pi.dwProcessId);
-    // TODO: can extract the write mechanism somewhere
-    OverlappedWrite *write = NULL;
-    pool_push(&cin_io.writes, write);
-    int64_t request_id = (int64_t)(uintptr_t)write;
-    int32_t bytes = snprintf(write->buf, CIN_WRITE_SIZE, CIN_WRITE_PREFIX "%lld" CIN_WRITE_QUIT, request_id);
-    write->bytes = (size_t)bytes;
-    write->ovl_ctx.is_write = true;
-    WriteFile(instance->pipe, write->buf, (DWORD)write->bytes, NULL, &write->ovl_ctx.ovl);
+    overlap_write(instance, "quit", NULL);
   }
   clear_preview(0);
   show_cursor();
@@ -3296,7 +3283,7 @@ static void cmd_layout_executor(void) {
     instance->buf_tail = instance->buf_head;
     bool ok_read = overlap_read(instance);
     assert(ok_read);
-    overlap_write(instance, locals.text + suffix_to_doc[(0 + (int32_t)i) % locals.doc_count]);
+    overlap_write(instance, "loadfile", locals.text + suffix_to_doc[(0 + (int32_t)i) % locals.doc_count]);
   }
   cin_io.instance_tail = instance;
 }
