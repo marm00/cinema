@@ -2529,9 +2529,9 @@ static bool overlap_write(Instance *instance, const char *cmd, const uint8_t *ar
 #define CIN_MPVKEY(str) (CIN_MPVKEY_LEFT str CIN_MPVKEY_RIGHT)
 #define CIN_MPVKEY_REQUEST CIN_MPVKEY("request_id")
 #define CIN_MPVKEY_EVENT CIN_MPVKEY("event")
-#define CIN_MPVVAL(buf, lit) (strncmp((buf), (lit), cin_strlen(lit)) == 0)
+#define CIN_MPVVAL(buf, lit) (strncmp((buf), (lit), cin_strlen((lit))) == 0)
 
-static inline void iocp_parse(Instance *instance, const char *buf_start, ptrdiff_t buf_offset) {
+static inline void iocp_parse(Instance *instance, const char *buf_start, size_t buf_offset) {
   const char *buf = buf_start + buf_offset;
   char *p = NULL;
   if ((p = strstr(buf, CIN_MPVKEY_EVENT))) {
@@ -2584,8 +2584,8 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
         instance->buf_tail->bytes += bytes;
         if (lf) {
           bool multi = instance->buf_tail != instance->buf_head;
-          ptrdiff_t tail_pos = lf - instance->buf_tail->buf;
-          assert(tail_pos < bytes);
+          assert((lf - instance->buf_tail->buf) >= 0);
+          size_t tail_pos = (size_t)(lf - instance->buf_tail->buf);
           char *buf = instance->buf_head->buf;
           size_t len = instance->buf_head->bytes;
           if (multi) {
@@ -2603,28 +2603,29 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
               b->bytes = 0;
             }
             memcpy(contiguous_buf + offset, instance->buf_tail, instance->buf_tail->bytes);
-            instance->buf_tail->bytes -= (size_t)tail_pos;
+            instance->buf_tail->bytes -= tail_pos;
             instance->buf_tail->bytes -= 1;
-            tail_pos += (ptrdiff_t)offset;
+            tail_pos += offset;
             buf = contiguous_buf;
           }
-          log_message(LOG_INFO, "Message: %.*s", len - 1, buf);
-          ptrdiff_t buf_offset = 0;
+          log_message(LOG_DEBUG, "Message (%p): %.*s", instance, tail_pos, buf);
+          size_t buf_offset = 0;
           for (;;) {
             *lf = '\0';
             ++tail_pos;
             iocp_parse(instance, buf, buf_offset);
-            if ((size_t)tail_pos >= len) break;
-            lf = memchr(buf + tail_pos, '\n', len - (size_t)tail_pos);
+            if (tail_pos >= len) break;
+            lf = memchr(buf + tail_pos, '\n', len - tail_pos);
             if (!lf) break;
             buf_offset = tail_pos;
-            tail_pos += lf - buf;
+            assert((lf - buf) >= 0);
+            tail_pos += (size_t)(lf - buf);
           }
-          // TODO: memmove remainder in tail buf
-          // assert((size_t)tail_pos == len);
-          if (multi) arena_free(cin_io.iocp_arena, char, len);
-          instance->buf_head->bytes = 0;
+          size_t remainder = tail_pos < len ? len - tail_pos : 0;
+          memcpy(instance->buf_head, buf + tail_pos, remainder);
+          instance->buf_head->bytes = remainder;
           instance->buf_tail = instance->buf_head;
+          if (multi) arena_free(cin_io.iocp_arena, char, len);
         } else {
           if (instance->buf_tail->next) instance->buf_tail->next->bytes = 0;
           else arena_push(cin_io.iocp_arena, ReadBuffer, 1, instance->buf_tail->next);
