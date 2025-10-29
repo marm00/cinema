@@ -2488,16 +2488,19 @@ static bool overlap_read(Instance *instance) {
 #define CIN_WRITE_CMD_LEFT "{async:true,request_id:%lld,command:[\"%s\""
 #define CIN_WRITE_CMD_MID ",\"%s\""
 #define CIN_WRITE_CMD_RIGHT "]}\n"
-#define CIN_WRITE_CMD (CIN_WRITE_CMD_LEFT CIN_WRITE_CMD_MID CIN_WRITE_CMD_RIGHT)
-#define CIN_WRITE_CMD_NARG (CIN_WRITE_CMD_LEFT CIN_WRITE_CMD_RIGHT)
+#define CIN_WRITE_CMD_0ARG (CIN_WRITE_CMD_LEFT CIN_WRITE_CMD_RIGHT)
+#define CIN_WRITE_CMD_1ARG (CIN_WRITE_CMD_LEFT CIN_WRITE_CMD_MID CIN_WRITE_CMD_RIGHT)
+#define CIN_WRITE_CMD_2ARG (CIN_WRITE_CMD_LEFT CIN_WRITE_CMD_MID CIN_WRITE_CMD_MID CIN_WRITE_CMD_RIGHT)
 
-static bool overlap_write(Instance *instance, const char *cmd, const uint8_t *arg) {
+static bool overlap_write(Instance *instance, const char *cmd, const uint8_t *arg1, const uint8_t *arg2) {
   OverlappedWrite *write = NULL;
   pool_push(&cin_io.writes, write);
   write->ovl_ctx.is_write = true;
   int64_t request_id = (int64_t)(uintptr_t)write;
-  int32_t bytes = arg ? snprintf(write->buf, sizeof(write->buf), CIN_WRITE_CMD, request_id, cmd, arg)
-                      : snprintf(write->buf, sizeof(write->buf), CIN_WRITE_CMD_NARG, request_id, cmd);
+  int32_t bytes = 0;
+  if (arg1 && arg2) bytes = snprintf(write->buf, sizeof(write->buf), CIN_WRITE_CMD_2ARG, request_id, cmd, arg1, arg2);
+  else if (arg1) bytes = snprintf(write->buf, sizeof(write->buf), CIN_WRITE_CMD_1ARG, request_id, cmd, arg1);
+  else bytes = snprintf(write->buf, sizeof(write->buf), CIN_WRITE_CMD_0ARG, request_id, cmd);
   assert(bytes > 0);
   assert((size_t)bytes < sizeof(write->buf) - 1);
   write->bytes = (size_t)bytes;
@@ -3222,7 +3225,7 @@ static void cmd_swap_validator(void) {
 static void cmd_quit_executor(void) {
   for (Instance *instance = cin_io.instance_tail; instance; instance = instance->prev) {
     log_message(LOG_DEBUG, "Closing PID=%lu", instance->pi.dwProcessId);
-    overlap_write(instance, "quit", NULL);
+    overlap_write(instance, "quit", NULL, NULL);
   }
   clear_preview(0);
   show_cursor();
@@ -3298,7 +3301,7 @@ static void cmd_layout_executor(void) {
     instance->buf_tail = instance->buf_head;
     bool ok_read = overlap_read(instance);
     assert(ok_read);
-    overlap_write(instance, "loadfile", locals.text + suffix_to_doc[(0 + (int32_t)i) % locals.doc_count]);
+    overlap_write(instance, "loadfile", locals.text + suffix_to_doc[(0 + (int32_t)i) % locals.doc_count], NULL);
   }
   // TODO: Make properly async
   Sleep(500);
