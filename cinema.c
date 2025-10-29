@@ -2524,17 +2524,29 @@ static bool overlap_write(Instance *instance, const char *cmd, const uint8_t *ar
   return true;
 }
 
-#define CIN_MPVKEY_REQUEST "request_id\":"
-#define CIN_MPVKEY_REQUEST_LEN cin_strlen(CIN_MPVKEY_REQUEST)
+#define CIN_MPVKEY_LEFT "\""
+#define CIN_MPVKEY_RIGHT "\":"
+#define CIN_MPVKEY(str) (CIN_MPVKEY_LEFT str CIN_MPVKEY_RIGHT)
+#define CIN_MPVKEY_REQUEST CIN_MPVKEY("request_id")
+#define CIN_MPVKEY_EVENT CIN_MPVKEY("event")
+#define CIN_MPVVAL(buf, lit) (strncmp((buf), (lit), cin_strlen(lit)) == 0)
 
-static inline void iocp_parse(const char *buf, ptrdiff_t buf_offset) {
-  char *req_pos = strstr(buf + buf_offset, CIN_MPVKEY_REQUEST);
-  if (req_pos) {
-    req_pos += CIN_MPVKEY_REQUEST_LEN;
-    if (*req_pos == ' ') ++req_pos;
-    assert(cin_isnum(*req_pos));
-    int64_t req_id = *req_pos - '0';
-    while (cin_isnum(*++req_pos)) req_id = (req_id * 10) + (*req_pos - '0');
+static inline void iocp_parse(Instance *instance, const char *buf_start, ptrdiff_t buf_offset) {
+  const char *buf = buf_start + buf_offset;
+  char *p = NULL;
+  if ((p = strstr(buf, CIN_MPVKEY_EVENT))) {
+    p += cin_strlen(CIN_MPVKEY_EVENT);
+    assert(*p == '\"');
+    ++p;
+    if (CIN_MPVVAL(p, "end-file")) {
+      (void)instance;
+      // TODO: maybe handle screen closures, but instance->pipe should be closed
+    }
+  } else if ((p = strstr(buf, CIN_MPVKEY_REQUEST))) {
+    p += cin_strlen(CIN_MPVKEY_REQUEST);
+    assert(cin_isnum(*p));
+    int64_t req_id = *p - '0';
+    while (cin_isnum(*++p)) req_id = (req_id * 10) + (*p - '0');
     OverlappedWrite *write = (OverlappedWrite *)(uintptr_t)req_id;
     assert(write);
     assert(write->bytes);
@@ -2601,7 +2613,7 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
           for (;;) {
             *lf = '\0';
             ++tail_pos;
-            iocp_parse(buf, buf_offset);
+            iocp_parse(instance, buf, buf_offset);
             if ((size_t)tail_pos >= len) break;
             lf = memchr(buf + tail_pos, '\n', len - (size_t)tail_pos);
             if (!lf) break;
@@ -3253,6 +3265,7 @@ static void cmd_layout_executor(void) {
     size_t digits = right - left++;
     for (; j < digits; ++j) mpv_command[CIN_MPVCALL_LEN + j] = mpv_command[left + j];
     Cin_Screen screen = cmd_ctx.layout->items[i];
+    // screen.len actually includes null-terminator
     int32_t len = utf8_to_utf16_nraw((char *)screen_arena.items + screen.offset, screen.len);
     if (len > (int32_t)CIN_MPVCALL_GEOMETRY_LEN) {
       // TODO: error message for user
