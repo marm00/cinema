@@ -3118,7 +3118,12 @@ static void mpv_spawn(Instance *instance, size_t index) {
   ++mpv_demand;
 }
 
-#define FOREACH_MPV(m, i) for (Instance *m = cin_io.instance_head; m; m = m->next, ++(i))
+#define FOREACH_MPV(instance, i, max)                          \
+  for (size_t i = 0, _max = (max) ? (max) : SIZE_MAX; !i; ++i) \
+    for (Instance *instance = cin_io.instance_head;            \
+         i < _max && instance;                                 \
+         instance = instance->next, ++i)                       \
+      if (instance->pipe)
 
 static void cmd_help_executor(void) {
   wwrite_safe(cmd_ctx.help.items, (DWORD)cmd_ctx.help.count);
@@ -3130,13 +3135,9 @@ static void cmd_help_validator(void) {
 }
 
 static void cmd_reroll_executor(void) {
-  size_t i = 0;
   mpv_lock();
-  FOREACH_MPV(instance, i) {
-    if (instance->pipe) {
-    } else {
-      mpv_spawn(instance, i);
-    }
+  FOREACH_MPV(instance, i, cmd_ctx.layout->count) {
+    // TODO: reroll
   }
   mpv_unlock();
 }
@@ -3353,12 +3354,9 @@ static void cmd_swap_validator(void) {
 }
 
 static void cmd_quit_executor(void) {
-  size_t i = 0;
-  FOREACH_MPV(instance, i) {
-    if (instance->pipe) {
-      log_message(LOG_DEBUG, "Closing PID=%lu", instance->pi.dwProcessId);
-      overlap_write(instance, MPV_QUIT, "quit", NULL, NULL);
-    }
+  FOREACH_MPV(instance, i, 0) {
+    log_message(LOG_DEBUG, "Closing PID=%lu", instance->pi.dwProcessId);
+    overlap_write(instance, MPV_QUIT, "quit", NULL, NULL);
   }
   clear_preview(0);
   show_cursor();
