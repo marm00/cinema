@@ -2399,9 +2399,16 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len) {
 #define CIN_READ_SIZE kilobytes(16)
 #define CIN_WRITE_SIZE align_block(CIN_MAX_PATH_BYTES) + block_bytes(2)
 
+typedef enum {
+  MPV_READ,
+  MPV_WRITE,
+  MPV_LOADFILE,
+  MPV_WINDOW_ID
+} MPV_Packet;
+
 typedef struct OverlappedContext {
   OVERLAPPED ovl;
-  bool is_write;
+  MPV_Packet type;
 } OverlappedContext;
 
 typedef struct OverlappedWrite {
@@ -2423,6 +2430,7 @@ typedef struct Instance {
   ReadBuffer *buf_tail;
   STARTUPINFOW si;
   PROCESS_INFORMATION pi;
+  HWND window;
   struct Instance *prev;
 } Instance;
 
@@ -2492,10 +2500,10 @@ static bool overlap_read(Instance *instance) {
 #define CIN_WRITE_CMD_1ARG (CIN_WRITE_CMD_LEFT CIN_WRITE_CMD_MID CIN_WRITE_CMD_RIGHT)
 #define CIN_WRITE_CMD_2ARG (CIN_WRITE_CMD_LEFT CIN_WRITE_CMD_MID CIN_WRITE_CMD_MID CIN_WRITE_CMD_RIGHT)
 
-static bool overlap_write(Instance *instance, const char *cmd, const uint8_t *arg1, const uint8_t *arg2) {
+static bool overlap_write(Instance *instance, MPV_Packet type, const char *cmd, const char *arg1, const char *arg2) {
   OverlappedWrite *write = NULL;
   pool_push(&cin_io.writes, write);
-  write->ovl_ctx.is_write = true;
+  write->ovl_ctx.type = type;
   int64_t request_id = (int64_t)(uintptr_t)write;
   int32_t bytes = 0;
   if (arg1 && arg2) bytes = snprintf(write->buf, sizeof(write->buf), CIN_WRITE_CMD_2ARG, request_id, cmd, arg1, arg2);
@@ -2530,9 +2538,10 @@ static bool overlap_write(Instance *instance, const char *cmd, const uint8_t *ar
 #define CIN_MPVKEY_LEFT "\""
 #define CIN_MPVKEY_RIGHT "\":"
 #define CIN_MPVKEY(str) (CIN_MPVKEY_LEFT str CIN_MPVKEY_RIGHT)
+#define CIN_MPVVAL(buf, lit) (strncmp((buf), (lit), cin_strlen((lit))) == 0)
 #define CIN_MPVKEY_REQUEST CIN_MPVKEY("request_id")
 #define CIN_MPVKEY_EVENT CIN_MPVKEY("event")
-#define CIN_MPVVAL(buf, lit) (strncmp((buf), (lit), cin_strlen((lit))) == 0)
+#define CIN_MPVKEY_DATA CIN_MPVKEY("data")
 
 static inline void iocp_parse(Instance *instance, const char *buf_start, size_t buf_offset) {
   const char *buf = buf_start + buf_offset;
@@ -2554,6 +2563,22 @@ static inline void iocp_parse(Instance *instance, const char *buf_start, size_t 
     assert(write);
     assert(write->bytes);
     log_message(LOG_INFO, "Recovered original write: %p (%zu bytes)", write, write->bytes);
+    switch (write->ovl_ctx.type) {
+    case MPV_LOADFILE:
+      break;
+    case MPV_WINDOW_ID:
+      char *data = strstr(buf, CIN_MPVKEY_DATA);
+      assert(data);
+      data += cin_strlen(CIN_MPVKEY_DATA);
+      assert(cin_isnum(*data));
+      intptr_t window_id = 0;
+      for (; cin_isnum(*data); ++data) window_id = (window_id * 10) + *data - '0';
+      assert(IsWindow((HWND)window_id));
+      instance->window = (HWND)window_id;
+      break;
+    default:
+      break;
+    }
     pool_free(&cin_io.writes, write);
   }
 }
@@ -2572,7 +2597,7 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
     }
     Instance *instance = (Instance *)completion_key;
     OverlappedContext *ctx = (OverlappedContext *)ovl;
-    if (ctx->is_write) {
+    if (ctx->type != MPV_READ) {
       OverlappedWrite *write = (OverlappedWrite *)ctx;
       if (write->bytes != bytes) {
         log_message(LOG_ERROR, "Expected '%zu' bytes but received '%zu'", write->bytes, bytes);
@@ -3225,7 +3250,7 @@ static void cmd_swap_validator(void) {
 static void cmd_quit_executor(void) {
   for (Instance *instance = cin_io.instance_tail; instance; instance = instance->prev) {
     log_message(LOG_DEBUG, "Closing PID=%lu", instance->pi.dwProcessId);
-    overlap_write(instance, "quit", NULL, NULL);
+    overlap_write(instance, MPV_WRITE, "quit", NULL, NULL);
   }
   clear_preview(0);
   show_cursor();
@@ -3258,7 +3283,7 @@ static void cmd_layout_executor(void) {
   for (size_t i = 0; i < cmd_ctx.layout->count; prev = instance, ++i) {
     pool_push(&cin_io.instances, instance);
     instance->prev = prev;
-    instance->ovl_ctx.is_write = false;
+    instance->ovl_ctx.type = MPV_READ;
     size_t right = CIN_MPVCALL_LEN + CIN_MPVCALL_DIGITS;
     size_t left = right;
     size_t j = i;
@@ -3301,7 +3326,8 @@ static void cmd_layout_executor(void) {
     instance->buf_tail = instance->buf_head;
     bool ok_read = overlap_read(instance);
     assert(ok_read);
-    overlap_write(instance, "loadfile", locals.text + suffix_to_doc[(0 + (int32_t)i) % locals.doc_count], NULL);
+    overlap_write(instance, MPV_LOADFILE, "loadfile", (char *)locals.text + suffix_to_doc[(0 + (int32_t)i) % locals.doc_count], NULL);
+    overlap_write(instance, MPV_WINDOW_ID, "get_property", "window-id", NULL);
   }
   // TODO: Make properly async
   Sleep(500);
