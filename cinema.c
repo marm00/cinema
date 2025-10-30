@@ -2560,6 +2560,9 @@ static inline void mpv_kill(Instance *instance) {
   assert(!instance->pipe);
 }
 
+static size_t mpv_supply = 0;
+static size_t mpv_demand = 0;
+
 static inline void iocp_parse(Instance *instance, const char *buf_start, size_t buf_offset) {
   const char *buf = buf_start + buf_offset;
   char *p = NULL;
@@ -2590,6 +2593,7 @@ static inline void iocp_parse(Instance *instance, const char *buf_start, size_t 
       assert(IsWindow((HWND)window_id));
       instance->window = (HWND)window_id;
       GetWindowRect(instance->window, &instance->rect);
+      if (++mpv_supply == mpv_demand) LockSetForegroundWindow(LSFW_UNLOCK);
     } break;
     case MPV_QUIT:
       mpv_kill(instance);
@@ -3339,12 +3343,15 @@ static void mpv_spawn(Instance *instance, size_t index) {
   overlap_write(instance, MPV_LOADFILE, "loadfile",
                 (char *)locals.text + suffix_to_doc[(0 + (int32_t)index) % locals.doc_count], NULL);
   overlap_write(instance, MPV_WINDOW_ID, "get_property", "window-id", NULL);
+  ++mpv_demand;
 }
 
 static void cmd_layout_executor(void) {
   size_t next_count = cmd_ctx.queued_layout->count;
   cmd_ctx.layout = cmd_ctx.queued_layout;
   size_t screen = 0;
+  mpv_supply = 0;
+  mpv_demand = 0;
   LockSetForegroundWindow(LSFW_LOCK);
   if (cin_io.instance_head) {
     for (Instance *old = cin_io.instance_head; old; old = old->next, ++screen) {
@@ -3371,9 +3378,7 @@ static void cmd_layout_executor(void) {
     cin_io.instance_tail->next = next;
     cin_io.instance_tail = next;
   }
-  // TODO: Make properly async
-  Sleep(500);
-  LockSetForegroundWindow(LSFW_UNLOCK);
+  if (!mpv_demand) LockSetForegroundWindow(LSFW_UNLOCK);
 }
 
 static void cmd_layout_validator(void) {
@@ -3392,7 +3397,7 @@ static void cmd_layout_validator(void) {
     set_preview(true, L"change layout to '%s'", utf16_buf_raw.items);
   } else {
     layout = cmd_ctx.layout;
-    set_preview(true, L"use current layout");
+    set_preview(true, L"reset layout");
   }
   cmd_ctx.queued_layout = (cmd_layout)layout;
   cmd_ctx.executor = cmd_layout_executor;
