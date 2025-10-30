@@ -2442,6 +2442,7 @@ static struct {
   Pool writes;
   Pool instances;
   Instance *instance_head;
+  Instance *instance_tail;
   HANDLE iocp;
 } cin_io = {0};
 
@@ -2524,7 +2525,6 @@ static bool overlap_write(Instance *instance, MPV_Packet type, const char *cmd, 
       return true;
     case ERROR_INVALID_HANDLE:
       // Code 6: The handle is invalid
-      log_message(LOG_DEBUG, "\t(ERR_START)\n\t%.*s\n\t(ERR_END)\n", (int)write->bytes - 2, write->buf);
       break;
     case ERROR_NO_DATA:
       // trying to initialize a write after quit
@@ -2548,7 +2548,7 @@ static bool overlap_write(Instance *instance, MPV_Packet type, const char *cmd, 
 #define CIN_MPVKEY_EVENT CIN_MPVKEY("event")
 #define CIN_MPVKEY_DATA CIN_MPVKEY("data")
 
-static inline void iocp_kill(Instance *instance) {
+static inline void mpv_kill(Instance *instance) {
   assert(instance->pipe);
   ReadBuffer *buf_head = instance->buf_head;
   ReadBuffer *buf_tail = instance->buf_tail;
@@ -2557,7 +2557,6 @@ static inline void iocp_kill(Instance *instance) {
   instance->buf_head = buf_head;
   instance->buf_tail = buf_tail;
   instance->next = next;
-  pool_free(&cin_io.instances, instance);
   assert(!instance->pipe);
 }
 
@@ -2568,7 +2567,7 @@ static inline void iocp_parse(Instance *instance, const char *buf_start, size_t 
     p += cin_strlen(CIN_MPVKEY_EVENT);
     assert(*p == '\"');
     ++p;
-    if (CIN_MPVVAL(p, "end-file")) iocp_kill(instance);
+    if (CIN_MPVVAL(p, "end-file")) mpv_kill(instance);
   } else if ((p = strstr(buf, CIN_MPVKEY_REQUEST))) {
     p += cin_strlen(CIN_MPVKEY_REQUEST);
     assert(cin_isnum(*p));
@@ -2593,7 +2592,7 @@ static inline void iocp_parse(Instance *instance, const char *buf_start, size_t 
       GetWindowRect(instance->window, &instance->rect);
     } break;
     case MPV_QUIT:
-      iocp_kill(instance);
+      mpv_kill(instance);
       break;
     default:
       break;
@@ -3291,78 +3290,86 @@ static void cmd_quit_validator(void) {
 #define CIN_MPVCALL_GEOMETRY_LEN block_bytes(2)
 #define CIN_MPVCALL_BUF align_block(CIN_MPVCALL_LEN + CIN_MPVCALL_DIGITS + CIN_MPVCALL_GEOMETRY_LEN)
 
-static void cmd_layout_executor(void) {
-  size_t prev_count = cmd_ctx.layout->count;
-  cmd_ctx.layout = cmd_ctx.queued_layout;
+static void mpv_spawn(Instance *instance, size_t index) {
   static wchar_t mpv_command[CIN_MPVCALL_BUF] = {CIN_MPVCALL};
-  Instance *instance = NULL;
-  Instance *prev = NULL;
-  Instance *reuse = cin_io.instance_head;
-  LockSetForegroundWindow(LSFW_LOCK);
-  for (size_t i = 0; i < cmd_ctx.layout->count; prev = instance, ++i) {
-    if (reuse) {
-      instance = reuse;
-      const char *geometry = (char *)screen_arena.items + cmd_ctx.layout->items[i].offset;
-      overlap_write(instance, MPV_WRITE, "set_property", "geometry", geometry);
-      do {
-        reuse = reuse->next;
-      } while (reuse && !reuse->pipe);
-    } else {
-      pool_push(&cin_io.instances, instance, false);
-      instance->ovl_ctx.type = MPV_READ;
-      if (!cin_io.instance_head) cin_io.instance_head = instance;
-      if (prev) prev->next = instance;
-      size_t right = CIN_MPVCALL_LEN + CIN_MPVCALL_DIGITS;
-      size_t left = right;
-      size_t j = i;
-      do {
-        mpv_command[left--] = L'0' + (j % 10);
-        j /= 10;
-      } while (j);
-      size_t digits = right - left++;
-      for (; j < digits; ++j) mpv_command[CIN_MPVCALL_LEN + j] = mpv_command[left + j];
-      Cin_Screen screen = cmd_ctx.layout->items[i];
-      // screen.len actually includes null-terminator
-      int32_t len = utf8_to_utf16_nraw((char *)screen_arena.items + screen.offset, screen.len);
-      if (len > (int32_t)CIN_MPVCALL_GEOMETRY_LEN) {
-        // TODO: error message for user
-        assert(false);
-      }
-      swprintf(mpv_command + CIN_MPVCALL_LEN + digits, CIN_MPVCALL_GEOMETRY_LEN, L" --geometry=%.*s",
-               len, utf16_buf_raw.items);
-      log_wmessage(LOG_DEBUG, L"Spawning instance: %s", mpv_command);
-      STARTUPINFOW si = {0};
-      si.cb = sizeof(si);
-      PROCESS_INFORMATION pi = {0};
-      if (!CreateProcessW(NULL, mpv_command, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
-        if (GetLastError() == ERROR_FILE_NOT_FOUND) {
-          // TODO: link to somewhere to get the binary
-          // TODO: check for yt-dlp binary for streams
-          log_last_error("Failed to find mpv binary");
-        } else {
-          log_last_error("Failed to start mpv even though it was found");
-        }
-        assert(false);
-      }
-      instance->si = si;
-      instance->pi = pi;
-      mpv_command[CIN_MPVCALL_LEN + digits] = L'\0';
-      bool ok_pipe = create_pipe(instance, mpv_command + CIN_MPVCALL_START_LEN);
-      assert(ok_pipe);
-      bool ok_iocp = CreateIoCompletionPort(instance->pipe, cin_io.iocp, (ULONG_PTR)instance, 0) != NULL;
-      assert(ok_iocp);
-      arena_push(cin_io.arena, ReadBuffer, 1, instance->buf_head);
-      instance->buf_tail = instance->buf_head;
-      bool ok_read = overlap_read(instance);
-      assert(ok_read);
-      overlap_write(instance, MPV_LOADFILE, "loadfile", (char *)locals.text + suffix_to_doc[(0 + (int32_t)i) % locals.doc_count], NULL);
-      overlap_write(instance, MPV_WINDOW_ID, "get_property", "window-id", NULL);
-    }
+  instance->ovl_ctx.type = MPV_READ;
+  size_t right = CIN_MPVCALL_LEN + CIN_MPVCALL_DIGITS;
+  size_t left = right;
+  size_t j = index;
+  do {
+    mpv_command[left--] = L'0' + (j % 10);
+    j /= 10;
+  } while (j);
+  size_t digits = right - left++;
+  for (; j < digits; ++j) mpv_command[CIN_MPVCALL_LEN + j] = mpv_command[left + j];
+  Cin_Screen screen = cmd_ctx.layout->items[index];
+  // screen.len actually includes null-terminator
+  int32_t len = utf8_to_utf16_nraw((char *)screen_arena.items + screen.offset, screen.len);
+  if (len > (int32_t)CIN_MPVCALL_GEOMETRY_LEN) {
+    // TODO: error message for user
+    assert(false);
   }
-  for (size_t i = cmd_ctx.layout->count; i < prev_count; ++i) {
-    assert(instance->next);
-    instance = instance->next;
-    overlap_write(instance, MPV_QUIT, "quit", NULL, NULL);
+  swprintf(mpv_command + CIN_MPVCALL_LEN + digits, CIN_MPVCALL_GEOMETRY_LEN, L" --geometry=%.*s",
+           len, utf16_buf_raw.items);
+  log_wmessage(LOG_DEBUG, L"Spawning instance: %s", mpv_command);
+  STARTUPINFOW si = {0};
+  si.cb = sizeof(si);
+  PROCESS_INFORMATION pi = {0};
+  if (!CreateProcessW(NULL, mpv_command, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+    if (GetLastError() == ERROR_FILE_NOT_FOUND) {
+      // TODO: link to somewhere to get the binary
+      // TODO: check for yt-dlp binary for streams
+      log_last_error("Failed to find mpv binary");
+    } else {
+      log_last_error("Failed to start mpv even though it was found");
+    }
+    assert(false);
+  }
+  instance->si = si;
+  instance->pi = pi;
+  mpv_command[CIN_MPVCALL_LEN + digits] = L'\0';
+  bool ok_pipe = create_pipe(instance, mpv_command + CIN_MPVCALL_START_LEN);
+  assert(ok_pipe);
+  bool ok_iocp = CreateIoCompletionPort(instance->pipe, cin_io.iocp, (ULONG_PTR)instance, 0) != NULL;
+  assert(ok_iocp);
+  arena_push(cin_io.arena, ReadBuffer, 1, instance->buf_head);
+  instance->buf_tail = instance->buf_head;
+  bool ok_read = overlap_read(instance);
+  assert(ok_read);
+  overlap_write(instance, MPV_LOADFILE, "loadfile",
+                (char *)locals.text + suffix_to_doc[(0 + (int32_t)index) % locals.doc_count], NULL);
+  overlap_write(instance, MPV_WINDOW_ID, "get_property", "window-id", NULL);
+}
+
+static void cmd_layout_executor(void) {
+  size_t next_count = cmd_ctx.queued_layout->count;
+  cmd_ctx.layout = cmd_ctx.queued_layout;
+  size_t screen = 0;
+  LockSetForegroundWindow(LSFW_LOCK);
+  if (cin_io.instance_head) {
+    for (Instance *old = cin_io.instance_head; old; old = old->next, ++screen) {
+      if (screen >= next_count) {
+        if (old->pipe) overlap_write(old, MPV_QUIT, "quit", NULL, NULL);
+      } else if (old->pipe) {
+        assert(IsWindow(old->window));
+        const char *geometry = (char *)screen_arena.items + cmd_ctx.layout->items[screen].offset;
+        overlap_write(old, MPV_WRITE, "set_property", "geometry", geometry);
+      } else {
+        mpv_spawn(old, screen);
+      }
+    }
+  } else {
+    pool_push(&cin_io.instances, cin_io.instance_head, false);
+    mpv_spawn(cin_io.instance_head, screen);
+    cin_io.instance_tail = cin_io.instance_head;
+    ++screen;
+  }
+  for (Instance *next = NULL; screen < next_count; ++screen) {
+    assert(&cin_io.instances);
+    pool_push(&cin_io.instances, next, false);
+    mpv_spawn(next, screen);
+    cin_io.instance_tail->next = next;
+    cin_io.instance_tail = next;
   }
   // TODO: Make properly async
   Sleep(500);
