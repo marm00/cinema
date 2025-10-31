@@ -2547,6 +2547,7 @@ static bool overlap_write(Instance *instance, MPV_Packet type, const char *cmd, 
 #define CIN_MPVKEY_REQUEST CIN_MPVKEY("request_id")
 #define CIN_MPVKEY_EVENT CIN_MPVKEY("event")
 #define CIN_MPVKEY_DATA CIN_MPVKEY("data")
+#define CIN_MPVKEY_REASON CIN_MPVKEY("reason")
 
 static inline void mpv_kill(Instance *instance) {
   assert(instance->pipe);
@@ -2580,7 +2581,12 @@ static inline void iocp_parse(Instance *instance, const char *buf_start, size_t 
     p += cin_strlen(CIN_MPVKEY_EVENT);
     assert(*p == '\"');
     ++p;
-    if (CIN_MPVVAL(p, "end-file")) mpv_kill(instance);
+    if (CIN_MPVVAL(p, "end-file") && (p = strstr(p, CIN_MPVKEY_REASON))) {
+      p += cin_strlen(CIN_MPVKEY_REASON);
+      assert(*p == '\"');
+      ++p;
+      if (CIN_MPVVAL(p, "quit")) mpv_kill(instance);
+    }
   } else if ((p = strstr(buf, CIN_MPVKEY_REQUEST))) {
     p += cin_strlen(CIN_MPVKEY_REQUEST);
     assert(cin_isnum(*p));
@@ -3031,8 +3037,11 @@ static inline bool validate_screens(void) {
     }
   }
   cmd_ctx.targets.count = 0;
-  if (!n_count || n_count == screen_count) {
+  if (!n_count) {
     array_wsextend(&cmd_ctx.targets, L"(all screens)\0");
+    for (size_t i = 0; i < cmd_ctx.layout->count; ++i) {
+      array_push(&cmd_ctx.numbers, i + 1);
+    }
   } else {
     if (n_count == 1) {
       array_wsextend(&cmd_ctx.targets, L"(screen ");
@@ -3118,12 +3127,19 @@ static void mpv_spawn(Instance *instance, size_t index) {
   ++mpv_demand;
 }
 
-#define FOREACH_MPV(instance, i, max)                          \
-  for (size_t i = 0, _max = (max) ? (max) : SIZE_MAX; !i; ++i) \
-    for (Instance *instance = cin_io.instance_head;            \
-         i < _max && instance;                                 \
-         instance = instance->next, ++i)                       \
+#define FOREACH_MPV(instance, i)                                                              \
+  for (size_t i = 0; !i; ++i)                                                                 \
+    for (Instance *instance = cin_io.instance_head; instance; instance = instance->next, ++i) \
       if (instance->pipe)
+
+#define FOREACH_MPVTARGET(instance, i)                        \
+  for (size_t i = 0, j = 0, s = cmd_ctx.numbers.items[0] - 1; \
+       i < cmd_ctx.numbers.count;                             \
+       j = 0, s = cmd_ctx.numbers.items[++i] - 1)             \
+    for (Instance *instance = cin_io.instance_head;           \
+         j <= s && instance;                                  \
+         instance = instance->next, ++j)                      \
+      if (j == s && instance->pipe)
 
 static void cmd_help_executor(void) {
   wwrite_safe(cmd_ctx.help.items, (DWORD)cmd_ctx.help.count);
@@ -3136,8 +3152,9 @@ static void cmd_help_validator(void) {
 
 static void cmd_reroll_executor(void) {
   mpv_lock();
-  FOREACH_MPV(instance, i, cmd_ctx.layout->count) {
-    // TODO: reroll
+  // TODO: shuffle
+  FOREACH_MPVTARGET(instance, i) {
+    overlap_write(instance, MPV_LOADFILE, "loadfile", "d:/test/video.mp4", NULL);
   }
   mpv_unlock();
 }
@@ -3354,7 +3371,7 @@ static void cmd_swap_validator(void) {
 }
 
 static void cmd_quit_executor(void) {
-  FOREACH_MPV(instance, i, 0) {
+  FOREACH_MPV(instance, i) {
     log_message(LOG_DEBUG, "Closing PID=%lu", instance->pi.dwProcessId);
     overlap_write(instance, MPV_QUIT, "quit", NULL, NULL);
   }
