@@ -2571,7 +2571,7 @@ static inline void mpv_lock(void) {
 }
 
 static inline void mpv_unlock(void) {
-  if (!mpv_demand) LockSetForegroundWindow(LSFW_UNLOCK);
+  LockSetForegroundWindow(LSFW_UNLOCK);
 }
 
 static inline void iocp_parse(Instance *instance, const char *buf_start, size_t buf_offset) {
@@ -2600,7 +2600,7 @@ static inline void iocp_parse(Instance *instance, const char *buf_start, size_t 
     case MPV_LOADFILE:
       break;
     case MPV_WINDOW_ID: {
-      if (++mpv_supply == mpv_demand) LockSetForegroundWindow(LSFW_UNLOCK);
+      if (++mpv_supply == mpv_demand) mpv_unlock();
       char *data = strstr(buf, CIN_MPVKEY_DATA);
       assert(data);
       data += cin_strlen(CIN_MPVKEY_DATA);
@@ -3132,14 +3132,14 @@ static void mpv_spawn(Instance *instance, size_t index) {
     for (Instance *instance = cin_io.instance_head; instance; instance = instance->next, ++i) \
       if (instance->pipe)
 
-#define FOREACH_MPVTARGET(instance, i)                        \
-  for (size_t i = 0, j = 0, s = cmd_ctx.numbers.items[0] - 1; \
-       i < cmd_ctx.numbers.count;                             \
-       j = 0, s = cmd_ctx.numbers.items[++i] - 1)             \
-    for (Instance *instance = cin_io.instance_head;           \
-         j <= s && instance;                                  \
-         instance = instance->next, ++j)                      \
-      if (j == s && instance->pipe)
+#define FOREACH_MPVTARGET(instance, i)                          \
+  for (size_t i = 0, _j = 0, _s = cmd_ctx.numbers.items[0] - 1; \
+       i < cmd_ctx.numbers.count;                               \
+       _j = 0, _s = cmd_ctx.numbers.items[++i] - 1)             \
+    for (Instance *instance = cin_io.instance_head;             \
+         _j <= _s && instance;                                  \
+         instance = instance->next, ++_j)                       \
+      if (_j == _s && instance->pipe)
 
 static void cmd_help_executor(void) {
   wwrite_safe(cmd_ctx.help.items, (DWORD)cmd_ctx.help.count);
@@ -3151,12 +3151,10 @@ static void cmd_help_validator(void) {
 }
 
 static void cmd_reroll_executor(void) {
-  mpv_lock();
   // TODO: shuffle
   FOREACH_MPVTARGET(instance, i) {
     overlap_write(instance, MPV_LOADFILE, "loadfile", "d:/test/video.mp4", NULL);
   }
-  mpv_unlock();
 }
 
 static void cmd_reroll_validator(void) {
@@ -3324,6 +3322,10 @@ static void cmd_maximize_validator(void) {
   cmd_ctx.executor = cmd_maximize_executor;
 }
 
+static void cmd_join_validator(void) {
+  // TODO: 1 2 3 join 4 (tags/search shared)
+}
+
 static void cmd_swap_executor(void) {
   size_t first = cmd_ctx.numbers.items[0];
   size_t second = cmd_ctx.numbers.items[1];
@@ -3415,7 +3417,7 @@ static void cmd_layout_executor(void) {
     cin_io.instance_tail->next = next;
     cin_io.instance_tail = next;
   }
-  mpv_unlock();
+  if (!mpv_demand) mpv_unlock();
 }
 
 static void cmd_layout_validator(void) {
