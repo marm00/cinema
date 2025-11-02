@@ -1802,6 +1802,12 @@ static void locals_append(uint8_t *utf8, int len) {
   }
 }
 
+typedef struct Documents {
+  int32_t *items;
+  size_t count;
+  size_t capacity;
+} Documents;
+
 typedef struct DirectoryNode {
   size_t k_offset;
   int32_t *items;
@@ -1985,7 +1991,7 @@ static void setup_directory(const char *path, TagDirectories *tag_dirs) {
       } else {
         wmemcpy(dir.path + dir.len, file, file_len);
         int32_t utf8_len = utf16_to_utf8(dir.path);
-        array_push(node, locals.doc_count);
+        array_push(node, locals.bytes);
         locals_append(utf8_buf.items, utf8_len);
       }
     } while (FindNextFileW(search, &data) != 0);
@@ -2058,7 +2064,7 @@ static inline void setup_pattern(const char *pattern, TagPatternItems *tag_patte
     // a big deal, it can probably be addressed without having to hash every file in
     // the directory setup, by using some pattern heuristics (e.g., directory hash)
     size_t tail_offset = (size_t)locals.bytes;
-    int32_t tail_doc = locals.doc_count;
+    int32_t tail_doc = locals.bytes;
     locals_append(utf8_buf.items, len);
     int32_t dup_doc = rh_insert(&pat_map, locals.text, tail_offset, (size_t)len, tail_doc);
     if (dup_doc >= 0) {
@@ -2084,7 +2090,7 @@ static inline void setup_url(const char *url, TagUrlItems *tag_url_items) {
   assert(len_utf16);
   int32_t len_utf8 = utf16_to_utf8(utf16_buf_norm.items);
   size_t tail_offset = (size_t)locals.bytes;
-  int32_t tail_doc = locals.doc_count;
+  int32_t tail_doc = locals.bytes;
   locals_append(utf8_buf.items, len_utf8);
   int32_t dup_doc = rh_insert(&url_map, locals.text, tail_offset, (size_t)len_utf8, tail_doc);
   if (dup_doc >= 0) {
@@ -2309,7 +2315,7 @@ static bool init_document_listing(void) {
   return true;
 }
 
-static void document_listing(const uint8_t *pattern, int32_t pattern_len) {
+static void document_listing(const uint8_t *pattern, int32_t pattern_len, Documents *out) {
   int32_t left = locals.doc_count;
   int32_t right = locals.bytes - 1;
   int32_t l_lcp = lcps(pattern, locals.text + gsa[left]);
@@ -2384,6 +2390,7 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len) {
     int32_t doc = suffix_to_doc[i];
     if (dedup_counters[doc] != dedup_counter) {
       dedup_counters[doc] = dedup_counter;
+      array_push(out, doc);
       log_message(LOG_TRACE, "gsa[%7d] = %-25.25s (%7d)| (%7d) = %-30.30s counter=%d", i, locals.text + gsa[i], gsa[i], doc, locals.text + doc, dedup_counter);
     }
   }
@@ -3284,8 +3291,13 @@ static void cmd_search_executor(void) {
     pattern = utf8_buf.items;
   }
   log_message(LOG_DEBUG, "Search with pattern: '%s', len: %d", pattern, len);
-  document_listing(pattern, len - 1);
+  Documents docs = {0};
+  document_listing(pattern, len - 1, &docs);
   // TODO:
+  FOREACH_MPVTARGET(instance, i) {
+    overlap_write(instance, MPV_LOADFILE, "loadfile",
+                  (char *)locals.text + docs.items[i], NULL);
+  }
 }
 
 static void cmd_search_validator(void) {
