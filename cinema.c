@@ -23,9 +23,11 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
+
+#define _CRT_RAND_S
+#include <stdlib.h>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -1388,6 +1390,15 @@ static inline radix_v radix_query(RadixTree *tree, const uint8_t *pattern, size_
     node = internal->child[bit];
   }
   return NULL;
+}
+
+static inline int32_t rand_int(int32_t min, int32_t max) {
+  uint32_t range = (uint32_t)max - (uint32_t)min + 1;
+  uint32_t upper = UINT_MAX - (UINT_MAX % range);
+  uint32_t random;
+  do rand_s(&random);
+  while (random >= upper);
+  return min + (int32_t)(random % range);
 }
 
 static inline uint64_t fnv1a_hash(const uint8_t *str, size_t len) {
