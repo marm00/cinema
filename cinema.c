@@ -391,42 +391,50 @@ typedef struct Arena2 {
   Arena2_Slot *free_map[32];
 } Arena2;
 
-#define exp2_floor(n) (31 - __builtin_clz((uint32_t)(n)))
-#define exp2_ceil(n) (32 - __builtin_clz(((uint32_t)(n) - 1) | 1))
-#define pow2(exp) ((1U << (exp)) - ((exp) == 31))
+static inline int32_t exp2_floor(int32_t n) {
+  return 31 - __builtin_clz((uint32_t)(n));
+}
 
-#define arena2_assign(a2, a) \
-  do {                       \
-    assert((a));             \
-    (a2)->arena = (a);       \
-  } while (0)
+static inline int32_t exp2_ceil(int32_t n) {
+  return 32 - __builtin_clz(((uint32_t)(n)-1) | 1);
+}
 
-#define arena2_free(a2, address, k)                \
-  do {                                             \
-    Arena2_Slot *_slot = (Arena2_Slot *)(address); \
-    _slot->next = (a2)->free_map[k];               \
-    (a2)->free_map[k] = _slot;                     \
-  } while (0)
+static inline int32_t pow2(int32_t exponent) {
+  assert(exponent <= 31);
+  return (1 << exponent) - (exponent == 31);
+}
 
-#define arena2_push(a2, n, out, out_k)                                                   \
-  do {                                                                                   \
-    assert((n));                                                                         \
-    *(out_k) = exp2_ceil((n));                                                           \
-    if ((a2)->free_map[*(out_k)]) {                                                      \
-      out = (int32_t *)(a2)->free_map[*(out_k)];                                         \
-      (a2)->free_map[*(out_k)] = (a2)->free_map[*(out_k)]->next;                         \
-    } else {                                                                             \
-      Arena *_ref = (a2)->arena->curr;                                                   \
-      assert(pow2(*(out_k) * sizeof(int32_t)) >= sizeof(size_t) && "no ptr space");      \
-      arena_push((a2)->arena, int32_t, pow2(*(out_k)), out);                             \
-      if ((a2)->arena->curr != _ref && _ref->capacity - _ref->count >= sizeof(size_t)) { \
-        int32_t _k2 = exp2_floor((_ref->capacity - _ref->count) / sizeof(int32_t));      \
-        arena2_free((a2), (uint8_t *)_ref + CIN_ARENA_BYTES + _ref->count, _k2);         \
-        _ref->count += pow2(_k2) * sizeof(int32_t);                                      \
-        assert(_ref->count <= _ref->capacity);                                           \
-      }                                                                                  \
-    }                                                                                    \
-  } while (0)
+static inline void arena2_assign(Arena2 *a2, Arena *a) {
+  assert(a);
+  a2->arena = a;
+}
+
+static inline void arena2_free(Arena2 *a2, void *address, int32_t k) {
+  Arena2_Slot *_slot = (Arena2_Slot *)(address);
+  _slot->next = (a2)->free_map[k];
+  (a2)->free_map[k] = _slot;
+}
+
+static inline int32_t arena2_push(Arena2 *a2, int32_t n, int32_t **out) {
+  assert((n));
+  int32_t k1 = exp2_ceil((n));
+  if (a2->free_map[k1]) {
+    *out = (int32_t *)a2->free_map[k1];
+    a2->free_map[k1] = a2->free_map[k1]->next;
+  } else {
+    Arena *_ref = a2->arena->curr;
+    assert((size_t)pow2(k1) * (int32_t)sizeof(int32_t) >= sizeof(size_t) && "no ptr space");
+    arena_push(a2->arena, int32_t, (size_t)pow2(k1), *out);
+    if (a2->arena->curr != _ref && _ref->capacity - _ref->count >= sizeof(size_t)) {
+      int32_t n2 = (int32_t)min(INT_MAX, (_ref->capacity - _ref->count) / sizeof(int32_t));
+      int32_t k2 = exp2_floor(n2);
+      arena2_free(a2, (uint8_t *)_ref + CIN_ARENA_BYTES + _ref->count, k2);
+      _ref->count += (size_t)pow2(k2) * sizeof(int32_t);
+      assert(_ref->count <= _ref->capacity);
+    }
+  }
+  return k1;
+}
 
 // https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
 // A path can have 248 "characters" (260 - 12 = 248)
@@ -2453,8 +2461,7 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len, Arena2
   int32_t n = r_bound - l_bound;
   assert(n >= 0);
   if (!n) return;
-  int32_t exponent = 0;
-  arena2_push(&docs.arena2, n, slice->items, &exponent);
+  int32_t exponent = arena2_push(&docs.arena2, n, &slice->items);
   slice->capacity = pow2(exponent);
   slice->count = 0;
   for (int32_t i = l_bound; i <= r_bound; ++i) {
@@ -3368,7 +3375,7 @@ static void cmd_search_executor(void) {
   log_message(LOG_INFO, "Slice count=%d, cap=%d", slice.count, slice.capacity);
   FOREACH_MPVTARGET(instance, i) {
     overlap_write(instance, MPV_LOADFILE, "loadfile",
-                  (char *)docs.text + slice.items[i % slice.count], NULL);
+                  (char *)docs.text + slice.items[i % (size_t)slice.count], NULL);
   }
 }
 
