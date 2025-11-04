@@ -373,6 +373,48 @@ typedef struct Pool {
     (p)->free_list = _tmp;                  \
   } while (0)
 
+typedef struct Arena2_Slot {
+  struct Arena2_Slot *next;
+} Arena2_Slot;
+
+typedef struct Arena2 {
+  Arena *arena;
+  Arena2_Slot *free_map[32];
+} Arena2;
+
+#define pow2_floor(n) (31 - __builtin_clz((uint32_t)(n)))
+#define pow2_ceil(n) (32 - __builtin_clz(((uint32_t)(n) - 1) | 1))
+#define pow2(n) ((1U << (n)) - ((n) == 31))
+
+#define arena2_assign(a2, a) \
+  do {                       \
+    assert((a));             \
+    (a2)->arena = (a);       \
+  } while (0)
+
+#define arena2_free(a2, address, k)                \
+  do {                                             \
+    Arena2_Slot *_slot = (Arena2_Slot *)(address); \
+    _slot->next = (a2)->free_map[k];               \
+    (a2)->free_map[k] = _slot;                     \
+  } while (0)
+
+#define arena2_push(a2, n, out, out_k)                                      \
+  do {                                                                      \
+    *(out_k) = max(3, pow2_ceil((n)));                                      \
+    if ((a2)->free_map[*(out_k)]) {                                         \
+      out = (int32_t *)(a2)->free_map[*(out_k)];                            \
+      (a2)->free_map[*(out_k)] = (a2)->free_map[*(out_k)]->next;            \
+    } else {                                                                \
+      Arena *_ref = (a2)->arena->curr;                                      \
+      arena_push((a2)->arena, int32_t, pow2(*(out_k)), out);                \
+      if ((a2)->arena->curr != _ref && _ref->capacity - _ref->count >= 8) { \
+        int32_t _k2 = pow2_floor(_ref->capacity - _ref->count);             \
+        arena2_free((a2), _ref + CIN_ARENA_BYTES + _ref->count, _k2);       \
+      }                                                                     \
+    }                                                                       \
+  } while (0)
+
 // https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
 // A path can have 248 "characters" (260 - 12 = 248)
 // with 12 reserved for 8.3 file name.
