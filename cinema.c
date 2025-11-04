@@ -382,9 +382,9 @@ typedef struct Arena2 {
   Arena2_Slot *free_map[32];
 } Arena2;
 
-#define pow2_floor(n) (31 - __builtin_clz((uint32_t)(n)))
-#define pow2_ceil(n) (32 - __builtin_clz(((uint32_t)(n) - 1) | 1))
-#define pow2(n) ((1U << (n)) - ((n) == 31))
+#define exp2_floor(n) (31 - __builtin_clz((uint32_t)(n)))
+#define exp2_ceil(n) (32 - __builtin_clz(((uint32_t)(n) - 1) | 1))
+#define pow2(exp) ((1U << (exp)) - ((exp) == 31))
 
 #define arena2_assign(a2, a) \
   do {                       \
@@ -399,20 +399,24 @@ typedef struct Arena2 {
     (a2)->free_map[k] = _slot;                     \
   } while (0)
 
-#define arena2_push(a2, n, out, out_k)                                      \
-  do {                                                                      \
-    *(out_k) = max(3, pow2_ceil((n)));                                      \
-    if ((a2)->free_map[*(out_k)]) {                                         \
-      out = (int32_t *)(a2)->free_map[*(out_k)];                            \
-      (a2)->free_map[*(out_k)] = (a2)->free_map[*(out_k)]->next;            \
-    } else {                                                                \
-      Arena *_ref = (a2)->arena->curr;                                      \
-      arena_push((a2)->arena, int32_t, pow2(*(out_k)), out);                \
-      if ((a2)->arena->curr != _ref && _ref->capacity - _ref->count >= 8) { \
-        int32_t _k2 = pow2_floor(_ref->capacity - _ref->count);             \
-        arena2_free((a2), _ref + CIN_ARENA_BYTES + _ref->count, _k2);       \
-      }                                                                     \
-    }                                                                       \
+#define arena2_push(a2, n, out, out_k)                                                   \
+  do {                                                                                   \
+    assert((n));                                                                         \
+    *(out_k) = exp2_ceil((n));                                                           \
+    if ((a2)->free_map[*(out_k)]) {                                                      \
+      out = (int32_t *)(a2)->free_map[*(out_k)];                                         \
+      (a2)->free_map[*(out_k)] = (a2)->free_map[*(out_k)]->next;                         \
+    } else {                                                                             \
+      Arena *_ref = (a2)->arena->curr;                                                   \
+      assert(pow2(*(out_k) * sizeof(int32_t)) >= sizeof(size_t) && "no ptr space");      \
+      arena_push((a2)->arena, int32_t, pow2(*(out_k)), out);                             \
+      if ((a2)->arena->curr != _ref && _ref->capacity - _ref->count >= sizeof(size_t)) { \
+        int32_t _k2 = exp2_floor((_ref->capacity - _ref->count) / sizeof(int32_t));      \
+        arena2_free((a2), (uint8_t *)_ref + CIN_ARENA_BYTES + _ref->count, _k2);         \
+        _ref->count += pow2(_k2) * sizeof(int32_t);                                      \
+        assert(_ref->count <= _ref->capacity);                                           \
+      }                                                                                  \
+    }                                                                                    \
   } while (0)
 
 // https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
