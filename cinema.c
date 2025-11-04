@@ -324,7 +324,10 @@ typedef struct Arena {
     if ((a)->curr->count == CIN_ARENA_BYTES &&                            \
         (a)->curr->prev &&                                                \
         (a)->curr->prev->count < (a)->curr->prev->capacity) {             \
-      /* TODO: memory in prev could be reused */                          \
+      /* TODO: memory in prev could be reused,                            \
+         same for capacity overflow in general push,                      \
+         then also update Arena2 free mechanism                           \
+       */                                                                 \
     }                                                                     \
   } while (0);
 
@@ -372,6 +375,12 @@ typedef struct Pool {
     _tmp->next = (p)->free_list;            \
     (p)->free_list = _tmp;                  \
   } while (0)
+
+typedef struct Arena2_Slice {
+  int32_t *items;
+  int32_t count;
+  int32_t capacity;
+} Arena2_Slice;
 
 typedef struct Arena2_Slot {
   struct Arena2_Slot *next;
@@ -1802,7 +1811,7 @@ end:
   return ok;
 }
 
-typedef struct Local_Collection {
+struct Document_Collection {
   // Each byte represents a UTF-8 unit
   uint8_t *text;
   // using int32_t because of libsais,
@@ -1816,54 +1825,48 @@ typedef struct Local_Collection {
   // at the top; the first doc_count entries
   // represent the start/end positions of each doc
   int32_t doc_count;
-} Local_Collection;
+  int32_t *gsa;
+  int32_t *lcp;
+  int32_t *suffix_to_doc;
+  uint16_t *dedup_counters;
+  Arena *arena;
+  Arena2 arena2;
+} docs = {0};
 
-static Local_Collection locals = {0};
-static int32_t *gsa = NULL;
-static int32_t *lcp = NULL;
-static int32_t *suffix_to_doc = NULL;
-static uint16_t *dedup_counters = NULL;
+#define DOCS_INIT (1 << 15)
+#define DOCS_CLAMP (1 << 26)
 
-static void locals_append(uint8_t *utf8, int len) {
-  // Geometric growth with clamp, based on 260 max path
-  static const int locals_init = 1 << 15;
-  static const int locals_clamp = 1 << 26;
+static void docs_append(uint8_t *utf8, int len) {
   // NOTE: When using mpv JSON ipc, backslash actually requires 2 bytes to be valid JSON.
   // Instead of appending it, we replace it with forward slash.
   for (int32_t i = 0; i < len; ++i)
     if (utf8[i] == '\\') utf8[i] = '/';
   void *dst = NULL;
-  if (locals.max_bytes - locals.bytes >= len) {
-    dst = locals.text + locals.bytes;
+  if (docs.max_bytes - docs.bytes >= len) {
+    dst = docs.text + docs.bytes;
   } else {
-    int32_t cap = locals.max_bytes;
+    int32_t cap = docs.max_bytes;
     if (cap <= 0) {
-      cap = locals_init;
+      cap = DOCS_INIT;
     }
-    while (cap - locals.bytes < len) {
-      cap = cap < locals_clamp ? cap * 2 : cap + locals_clamp;
+    while (cap - docs.bytes < len) {
+      cap = cap < DOCS_CLAMP ? cap * 2 : cap + DOCS_CLAMP;
     }
-    locals.max_bytes = cap;
-    uint8_t *units = realloc(locals.text, (size_t)locals.max_bytes);
+    docs.max_bytes = cap;
+    uint8_t *units = realloc(docs.text, (size_t)docs.max_bytes);
     if (units != NULL) {
-      locals.text = units;
-      dst = locals.text + locals.bytes;
+      docs.text = units;
+      dst = docs.text + docs.bytes;
     }
   }
   if (dst == NULL) {
     log_message(LOG_ERROR, "Failed to reallocate memory");
   } else {
     memcpy(dst, utf8, (size_t)len);
-    locals.bytes += len;
-    locals.doc_count++;
+    docs.bytes += len;
+    docs.doc_count++;
   }
 }
-
-typedef struct Documents {
-  int32_t *items;
-  size_t count;
-  size_t capacity;
-} Documents;
 
 typedef struct DirectoryNode {
   size_t k_offset;
@@ -2048,8 +2051,8 @@ static void setup_directory(const char *path, TagDirectories *tag_dirs) {
       } else {
         wmemcpy(dir.path + dir.len, file, file_len);
         int32_t utf8_len = utf16_to_utf8(dir.path);
-        array_push(node, locals.bytes);
-        locals_append(utf8_buf.items, utf8_len);
+        array_push(node, docs.bytes);
+        docs_append(utf8_buf.items, utf8_len);
       }
     } while (FindNextFileW(search, &data) != 0);
     if (GetLastError() != ERROR_NO_MORE_FILES) {
@@ -2117,16 +2120,16 @@ static inline void setup_pattern(const char *pattern, TagPatternItems *tag_patte
     int32_t len = utf16_to_utf8(abs_buf);
     // TODO: Because we sequentially parse the config, it is technically possible
     // that a directory was setup which contains files that match the current pattern.
-    // This means that the locals array can contain duplicates in that case. While not
+    // This means that the docs array can contain duplicates in that case. While not
     // a big deal, it can probably be addressed without having to hash every file in
     // the directory setup, by using some pattern heuristics (e.g., directory hash)
-    size_t tail_offset = (size_t)locals.bytes;
-    int32_t tail_doc = locals.bytes;
-    locals_append(utf8_buf.items, len);
-    int32_t dup_doc = rh_insert(&pat_map, locals.text, tail_offset, (size_t)len, tail_doc);
+    size_t tail_offset = (size_t)docs.bytes;
+    int32_t tail_doc = docs.bytes;
+    docs_append(utf8_buf.items, len);
+    int32_t dup_doc = rh_insert(&pat_map, docs.text, tail_offset, (size_t)len, tail_doc);
     if (dup_doc >= 0) {
-      locals.bytes -= len;
-      --locals.doc_count;
+      docs.bytes -= len;
+      --docs.doc_count;
       if (tag_pattern_items) {
         array_push(tag_pattern_items, dup_doc);
       }
@@ -2146,13 +2149,13 @@ static inline void setup_url(const char *url, TagUrlItems *tag_url_items) {
   int32_t len_utf16 = utf8_to_utf16_norm(url);
   assert(len_utf16);
   int32_t len_utf8 = utf16_to_utf8(utf16_buf_norm.items);
-  size_t tail_offset = (size_t)locals.bytes;
-  int32_t tail_doc = locals.bytes;
-  locals_append(utf8_buf.items, len_utf8);
-  int32_t dup_doc = rh_insert(&url_map, locals.text, tail_offset, (size_t)len_utf8, tail_doc);
+  size_t tail_offset = (size_t)docs.bytes;
+  int32_t tail_doc = docs.bytes;
+  docs_append(utf8_buf.items, len_utf8);
+  int32_t dup_doc = rh_insert(&url_map, docs.text, tail_offset, (size_t)len_utf8, tail_doc);
   if (dup_doc >= 0) {
-    locals.bytes -= len_utf8;
-    --locals.doc_count;
+    docs.bytes -= len_utf8;
+    --docs.doc_count;
     if (tag_url_items) {
       array_push(tag_url_items, dup_doc);
     }
@@ -2298,88 +2301,92 @@ static bool init_config(const char *filename) {
   array_free(dir_stack);
   array_free(conf_parser.scopes);
   array_free(conf_parser.buf);
-  if (locals.bytes < locals.max_bytes) {
-    uint8_t *tight = realloc(locals.text, (size_t)locals.bytes);
+  if (docs.bytes < docs.max_bytes) {
+    uint8_t *tight = realloc(docs.text, (size_t)docs.bytes);
     if (tight != NULL) {
-      locals.text = tight;
-      locals.max_bytes = locals.bytes;
-      locals.bytes_mul32 = (size_t)locals.bytes * sizeof(int32_t);
-      locals.doc_mul32 = (size_t)locals.doc_count * sizeof(int32_t);
+      docs.text = tight;
+      docs.max_bytes = docs.bytes;
+      docs.bytes_mul32 = (size_t)docs.bytes * sizeof(int32_t);
+      docs.doc_mul32 = (size_t)docs.doc_count * sizeof(int32_t);
     }
   }
   log_message(LOG_INFO, "Setup media library with %d items (%d bytes)",
-              locals.doc_count, locals.bytes);
+              docs.doc_count, docs.bytes);
   return true;
 }
 
-static bool init_document_listing(void) {
-  gsa = malloc(locals.bytes_mul32);
+#define CIN_DOCS_ARENA_CAP megabytes(2)
+
+static bool init_documents(void) {
+  arena_alloc(docs.arena, CIN_DOCS_ARENA_CAP);
+  arena2_assign(&docs.arena2, docs.arena);
+  docs.gsa = malloc(docs.bytes_mul32);
 #if defined(LIBSAIS_OPENMP)
-  int32_t result = libsais_gsa_omp(locals.text, gsa, locals.bytes, 0, NULL, cin_system.threads);
+  int32_t result = libsais_gsa_omp(docs.text, docs.gsa, docs.bytes, 0, NULL, cin_system.threads);
 #else
-  int32_t result = libsais_gsa(locals.text, gsa, locals.bytes, 0, NULL);
+  int32_t result = libsais_gsa(docs.text, docs.gsa, docs.bytes, 0, NULL);
 #endif
   if (result != 0) {
     log_message(LOG_ERROR, "Failed to build SA");
     return false;
   }
-  int32_t *plcp = malloc(locals.bytes_mul32);
+  int32_t *plcp = malloc(docs.bytes_mul32);
 #if defined(LIBSAIS_OPENMP)
-  result = libsais_plcp_gsa_omp(locals.text, gsa, plcp, locals.bytes, cin_system.threads);
+  result = libsais_plcp_gsa_omp(docs.text, docs.gsa, plcp, docs.bytes, cin_system.threads);
 #else
-  result = libsais_plcp_gsa(locals.text, gsa, plcp, locals.bytes);
+  result = libsais_plcp_gsa(docs.text, docs.gsa, plcp, docs.bytes);
 #endif
   if (result != 0) {
     log_message(LOG_ERROR, "Failed to build PLCP array");
     return false;
   }
-  lcp = malloc(locals.bytes_mul32);
+  docs.lcp = malloc(docs.bytes_mul32);
 #if defined(LIBSAIS_OPENMP)
-  result = libsais_lcp_omp(plcp, gsa, lcp, locals.bytes, cin_system.threads);
+  result = libsais_lcp_omp(plcp, docs.gsa, docs.lcp, docs.bytes, cin_system.threads);
 #else
-  result = libsais_lcp(plcp, gsa, lcp, locals.bytes);
+  result = libsais_lcp(plcp, docs.gsa, docs.lcp, docs.bytes);
 #endif
   if (result != 0) {
     log_message(LOG_ERROR, "Failed to build LCP array");
     return false;
   }
   free(plcp);
-  suffix_to_doc = malloc(locals.bytes_mul32);
-  dedup_counters = calloc((size_t)locals.bytes, sizeof(uint16_t));
-  suffix_to_doc[0] = 0;
-  for (int32_t i = 1; i < locals.doc_count; ++i) {
-    suffix_to_doc[i] = gsa[i - 1] + 1;
+  docs.suffix_to_doc = malloc(docs.bytes_mul32);
+  docs.dedup_counters = calloc((size_t)docs.bytes, sizeof(uint16_t));
+  docs.suffix_to_doc[0] = 0;
+  for (int32_t i = 1; i < docs.doc_count; ++i) {
+    docs.suffix_to_doc[i] = docs.gsa[i - 1] + 1;
   }
   // TODO: there is probably a faster approach than
   // binary search, but with omp it is very fast
 #if defined(CIN_OPENMP)
-#pragma omp parallel for if (locals.bytes >= (1 << 16))
+#pragma omp parallel for if (docs.bytes >= (1 << 16))
 #endif
-  for (int32_t i = locals.doc_count; i < locals.bytes; ++i) {
+  for (int32_t i = docs.doc_count; i < docs.bytes; ++i) {
     int32_t left = 0;
-    int32_t right = locals.doc_count - 1;
-    int32_t curr = gsa[i];
+    int32_t right = docs.doc_count - 1;
+    int32_t curr = docs.gsa[i];
     while (left < right) {
       int32_t mid = left + ((right - left + 1) >> 1);
-      if (suffix_to_doc[mid] <= curr) {
+      if (docs.suffix_to_doc[mid] <= curr) {
         left = mid;
       } else {
         right = mid - 1;
       }
     }
-    suffix_to_doc[i] = suffix_to_doc[left];
+    docs.suffix_to_doc[i] = docs.suffix_to_doc[left];
   }
   return true;
 }
 
-static void document_listing(const uint8_t *pattern, int32_t pattern_len, Documents *out) {
-  int32_t left = locals.doc_count;
-  int32_t right = locals.bytes - 1;
-  int32_t l_lcp = lcps(pattern, locals.text + gsa[left]);
-  int32_t r_lcp = lcps(pattern, locals.text + gsa[right]);
+static void document_listing(const uint8_t *pattern, int32_t pattern_len, Arena2_Slice *slice) {
+  int32_t left = docs.doc_count;
+  int32_t right = docs.bytes - 1;
+  int32_t l_lcp = lcps(pattern, docs.text + docs.gsa[left]);
+  int32_t r_lcp = lcps(pattern, docs.text + docs.gsa[right]);
   if (l_lcp < pattern_len &&
-      (locals.text[gsa[left] + l_lcp] == '\0' ||
-       pattern[l_lcp] < locals.text[gsa[left] + l_lcp])) {
+      (docs.text[docs.gsa[left] + l_lcp] == '\0' ||
+       pattern[l_lcp] < docs.text[docs.gsa[left] + l_lcp])) {
     // pattern = abc, left = abd
     // l_lcp = 2, pattern_len = 3, 2 < 3
     // pattern[l_lcp] = c, text[left + l_lcp] = d, c < d
@@ -2387,8 +2394,8 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len, Docume
     return;
   }
   if (r_lcp < pattern_len &&
-      locals.text[gsa[right] + r_lcp] != '\0' &&
-      pattern[r_lcp] > locals.text[gsa[right] + r_lcp]) {
+      docs.text[docs.gsa[right] + r_lcp] != '\0' &&
+      pattern[r_lcp] > docs.text[docs.gsa[right] + r_lcp]) {
     // pattern = abd, right = abc
     // r_lcp = 2, pattern_len = 3, 2 < 3
     // pattern[r_lcp] = d, text[right + r_lcp] = c, d > c
@@ -2400,15 +2407,15 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len, Docume
   bool found = false;
   while (left < right) {
     int32_t mid = left + ((right - left) >> 1);
-    int32_t t_lcp = lcps(pattern, locals.text + gsa[mid]);
+    int32_t t_lcp = lcps(pattern, docs.text + docs.gsa[mid]);
     if (t_lcp == pattern_len) {
       found = true;
       right = mid;
       r_lcp = t_lcp;
-    } else if (locals.text[gsa[mid] + t_lcp] == '\0') {
+    } else if (docs.text[docs.gsa[mid] + t_lcp] == '\0') {
       left = mid + 1;
       l_lcp = t_lcp;
-    } else if (pattern[t_lcp] < locals.text[gsa[mid] + t_lcp]) {
+    } else if (pattern[t_lcp] < docs.text[docs.gsa[mid] + t_lcp]) {
       right = mid;
       r_lcp = t_lcp;
     } else {
@@ -2416,7 +2423,7 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len, Docume
       l_lcp = t_lcp;
     }
   }
-  if (!found && lcps(pattern, locals.text + gsa[left]) < pattern_len) {
+  if (!found && lcps(pattern, docs.text + docs.gsa[left]) < pattern_len) {
     log_message(LOG_DEBUG, "No suffix has pattern as prefix");
     return;
   }
@@ -2427,11 +2434,11 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len, Docume
   r_lcp = tmp_r_lcp;
   while (left < right) {
     int32_t mid = left + ((right - left + 1) >> 1);
-    int32_t t_lcp = lcps(pattern, locals.text + gsa[mid]);
+    int32_t t_lcp = lcps(pattern, docs.text + docs.gsa[mid]);
     if (t_lcp == pattern_len) {
       left = mid;
       l_lcp = pattern_len;
-    } else if (locals.text[gsa[mid] + t_lcp] == '\0') {
+    } else if (docs.text[docs.gsa[mid] + t_lcp] == '\0') {
       right = mid - 1;
       r_lcp = t_lcp;
     } else {
@@ -2441,18 +2448,25 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len, Docume
     r_bound = left;
   }
   log_message(LOG_DEBUG, "Boundaries are [%d, %d] or [%s, %s]", l_bound, r_bound,
-              locals.text + gsa[l_bound], locals.text + gsa[r_bound]);
+              docs.text + docs.gsa[l_bound], docs.text + docs.gsa[r_bound]);
   static uint16_t dedup_counter = 1;
+  int32_t n = r_bound - l_bound;
+  assert(n >= 0);
+  if (!n) return;
+  int32_t exponent = 0;
+  arena2_push(&docs.arena2, n, slice->items, &exponent);
+  slice->capacity = pow2(exponent);
+  slice->count = 0;
   for (int32_t i = l_bound; i <= r_bound; ++i) {
-    int32_t doc = suffix_to_doc[i];
-    if (dedup_counters[doc] != dedup_counter) {
-      dedup_counters[doc] = dedup_counter;
-      array_push(out, doc);
-      log_message(LOG_TRACE, "gsa[%7d] = %-25.25s (%7d)| (%7d) = %-30.30s counter=%d", i, locals.text + gsa[i], gsa[i], doc, locals.text + doc, dedup_counter);
+    int32_t doc = docs.suffix_to_doc[i];
+    if (docs.dedup_counters[doc] != dedup_counter) {
+      docs.dedup_counters[doc] = dedup_counter;
+      slice->items[slice->count++] = doc;
+      log_message(LOG_TRACE, "docs.gsa[%7d] = %-25.25s (%7d)| (%7d) = %-30.30s counter=%d", i, docs.text + docs.gsa[i], docs.gsa[i], doc, docs.text + doc, dedup_counter);
     }
   }
   if (++dedup_counter == 0) {
-    memset(dedup_counters, 0, (size_t)locals.bytes * sizeof(uint16_t));
+    memset(docs.dedup_counters, 0, (size_t)docs.bytes * sizeof(uint16_t));
     dedup_counter = 1;
   }
 }
@@ -3186,7 +3200,7 @@ static void mpv_spawn(Instance *instance, size_t index) {
   bool ok_read = overlap_read(instance);
   assert(ok_read);
   overlap_write(instance, MPV_LOADFILE, "loadfile",
-                (char *)locals.text + suffix_to_doc[(0 + (int32_t)index) % locals.doc_count], NULL);
+                (char *)docs.text + docs.suffix_to_doc[(0 + (int32_t)index) % docs.doc_count], NULL);
   overlap_write(instance, MPV_WINDOW_ID, "get_property", "window-id", NULL);
   ++mpv_demand;
 }
@@ -3348,12 +3362,13 @@ static void cmd_search_executor(void) {
     pattern = utf8_buf.items;
   }
   log_message(LOG_DEBUG, "Search with pattern: '%s', len: %d", pattern, len);
-  Documents docs = {0};
-  document_listing(pattern, len - 1, &docs);
+  Arena2_Slice slice = {0};
+  document_listing(pattern, len - 1, &slice);
   // TODO:
+  log_message(LOG_INFO, "Slice count=%d, cap=%d", slice.count, slice.capacity);
   FOREACH_MPVTARGET(instance, i) {
     overlap_write(instance, MPV_LOADFILE, "loadfile",
-                  (char *)locals.text + docs.items[i], NULL);
+                  (char *)docs.text + slice.items[i % slice.count], NULL);
   }
 }
 
@@ -3655,7 +3670,7 @@ int main(int argc, char **argv) {
   if (!init_timers()) exit(1);
   if (!init_config("cinema.conf")) exit(1);
   if (!init_commands()) exit(1);
-  if (!init_document_listing()) exit(1);
+  if (!init_documents()) exit(1);
   if (!init_mpv()) exit(1);
   // NOTE: It seems impossible to reach outside the bounds of the viewport
   // within Windows Terminal using a custom ReadConsoleInput approach. Virtual
