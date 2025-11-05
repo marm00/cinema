@@ -392,11 +392,11 @@ typedef struct Arena2 {
 } Arena2;
 
 static inline int32_t exp2_floor(int32_t n) {
-  return 31 - __builtin_clz((uint32_t)(n));
+  return 31 - __builtin_clz((uint32_t)n);
 }
 
 static inline int32_t exp2_ceil(int32_t n) {
-  return 32 - __builtin_clz(((uint32_t)(n)-1) | 1);
+  return 32 - __builtin_clz(((uint32_t)n - 1) | 1);
 }
 
 static inline int32_t pow2(int32_t exponent) {
@@ -410,27 +410,27 @@ static inline void arena2_assign(Arena2 *a2, Arena *a) {
 }
 
 static inline void arena2_free(Arena2 *a2, void *address, int32_t k) {
-  Arena2_Slot *_slot = (Arena2_Slot *)(address);
-  _slot->next = (a2)->free_map[k];
-  (a2)->free_map[k] = _slot;
+  Arena2_Slot *_slot = (Arena2_Slot *)address;
+  _slot->next = a2->free_map[k];
+  a2->free_map[k] = _slot;
 }
 
 static inline int32_t arena2_push(Arena2 *a2, int32_t n, int32_t **out) {
-  assert((n));
-  int32_t k1 = exp2_ceil((n));
+  assert(n > 0);
+  int32_t k1 = exp2_ceil(n);
   if (a2->free_map[k1]) {
     *out = (int32_t *)a2->free_map[k1];
     a2->free_map[k1] = a2->free_map[k1]->next;
   } else {
-    Arena *_ref = a2->arena->curr;
-    assert((size_t)pow2(k1) * (int32_t)sizeof(int32_t) >= sizeof(size_t) && "no ptr space");
+    Arena *ref = a2->arena->curr;
+    assert(((size_t)pow2(k1) * sizeof(int32_t)) >= sizeof(size_t) && "no ptr space");
     arena_push(a2->arena, int32_t, (size_t)pow2(k1), *out);
-    if (a2->arena->curr != _ref && _ref->capacity - _ref->count >= sizeof(size_t)) {
-      int32_t n2 = (int32_t)min(INT_MAX, (_ref->capacity - _ref->count) / sizeof(int32_t));
+    if (a2->arena->curr != ref && (ref->capacity - ref->count) >= sizeof(size_t)) {
+      int32_t n2 = (int32_t)min(INT_MAX, (ref->capacity - ref->count) / sizeof(int32_t));
       int32_t k2 = exp2_floor(n2);
-      arena2_free(a2, (uint8_t *)_ref + CIN_ARENA_BYTES + _ref->count, k2);
-      _ref->count += (size_t)pow2(k2) * sizeof(int32_t);
-      assert(_ref->count <= _ref->capacity);
+      arena2_free(a2, (uint8_t *)ref + CIN_ARENA_BYTES + ref->count, k2);
+      ref->count += (size_t)pow2(k2) * sizeof(int32_t);
+      assert(ref->count <= ref->capacity);
     }
   }
   return k1;
