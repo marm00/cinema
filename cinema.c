@@ -230,7 +230,7 @@ static const char *LOG_LEVELS[LOG_TRACE + 1] = {"ERROR", "WARNING", "INFO", "DEB
 #define table_free(t) free((t).items)
 
 static struct Cin_System {
-  // Assumnig large pages is the default, design around always committing
+  // Assuming large pages is the default, design around always committing
   DWORD alloc_type;
   size_t page_size;
   int32_t threads;
@@ -276,6 +276,7 @@ typedef struct Arena {
 #define align_block(n) align((n), block_bytes(1))
 #define kilobytes(n) ((n) << 10)
 #define megabytes(n) ((n) << 20)
+#define gigabytes(n) ((n) << 30)
 #define CIN_ARENA_CAP kilobytes(32)
 #define CIN_ARENA_BYTES align(sizeof(Arena), (size_t)64)
 
@@ -376,65 +377,219 @@ typedef struct Pool {
     (p)->free_list = _tmp;                  \
   } while (0)
 
-typedef struct Arena2_Slice {
-  int32_t *items;
-  int32_t count;
-  int32_t capacity;
-} Arena2_Slice;
-
-typedef struct Arena2_Slot {
-  struct Arena2_Slot *next;
-} Arena2_Slot;
-
-typedef struct Arena2 {
-  Arena *arena;
-  Arena2_Slot *free_map[32];
-} Arena2;
-
-static inline int32_t exp2_floor(int32_t n) {
-  return 31 - __builtin_clz((uint32_t)n);
+static inline uint32_t log2_floor(uint32_t n) {
+  assert(n > 0U);
+  return 31U - (uint32_t)__builtin_clz(n);
 }
 
-static inline int32_t exp2_ceil(int32_t n) {
-  return 32 - __builtin_clz(((uint32_t)n - 1) | 1);
+static inline uint32_t log2_ceil(uint32_t n) {
+  assert(n > 1U);
+  return 32U - (uint32_t)__builtin_clz(n - 1U);
 }
 
-static inline int32_t pow2(int32_t exponent) {
-  assert(exponent <= 31);
-  return (1 << exponent) - (exponent == 31);
+static inline uint32_t pow2(uint32_t exponent) {
+  assert(exponent <= 31U);
+  return 1U << exponent;
 }
 
-static inline void arena2_assign(Arena2 *a2, Arena *a) {
-  assert(a);
-  a2->arena = a;
+// Power of 2 allocation, where the max is 1U << 31,
+// chosen to support max of 32-bit libsais.
+static const uint32_t CIN_SIZE_CLASSES[] = {
+    8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072,
+    262144, 524288, 1048576, 2097152, 4194304, 8388608, 16777216, 33554432, 67108864,
+    134217728, 268435456, 536870912, 1073741824, 2147483648};
+
+static const uint32_t CIN_ARENA_MIN_K = 3;
+static const uint32_t CIN_ARENA_MIN = 1U << CIN_ARENA_MIN_K;
+static const uint32_t CIN_ARENA_MAX = 1U << 31;
+
+#define CIN_NUM_CLASSES 29
+
+static inline uint32_t size_class(uint32_t k) {
+  assert(k >= CIN_ARENA_MIN_K);
+  return k - CIN_ARENA_MIN_K;
 }
 
-static inline void arena2_free(Arena2 *a2, void *address, int32_t k) {
-  Arena2_Slot *_slot = (Arena2_Slot *)address;
-  _slot->next = a2->free_map[k];
-  a2->free_map[k] = _slot;
+typedef struct ArenaBlock {
+  struct ArenaBlock *next;
+} ArenaBlock;
+
+typedef struct ArenaChunk {
+  struct ArenaChunk *prev;
+  uint32_t count;
+  uint32_t capacity;
+} ArenaChunk;
+
+typedef struct Arena3 {
+  ArenaChunk *curr;
+  ArenaBlock *free_list[CIN_NUM_CLASSES];
+} Arena3;
+
+typedef struct ArenaSlice {
+  uint8_t *items;
+  uint32_t k;
+  uint32_t size;
+} ArenaSlice;
+
+static_assert(sizeof(ArenaBlock) == sizeof(size_t), "should just hold a pointer");
+
+#define CIN_ARENA_BLOCK_HEADER CIN_ARENA_MIN
+#define CIN_ARENA_CHUNK_HEADER align(sizeof(ArenaChunk), CIN_ARENA_MIN)
+#define CIN_ARENA_SLICE_HEADER sizeof(ArenaSlice)
+#define CIN_ARENA_HEADER (max(CIN_ARENA_BLOCK_HEADER, CIN_ARENA_CHUNK_HEADER))
+
+static inline ArenaChunk *arena3_chunk_alloc(Arena3 *arena, uint32_t bytes) {
+  assert(arena);
+  assert(CIN_ARENA_HEADER % 2 == 0);
+  assert(cin_system.page_size <= CIN_ARENA_MAX);
+  size_t dwSize = align(bytes, cin_system.page_size);
+  ArenaChunk *chunk = VirtualAlloc(NULL, dwSize, cin_system.alloc_type, PAGE_READWRITE);
+  chunk->prev = arena->curr;
+  chunk->count = CIN_ARENA_HEADER;
+  chunk->capacity = (uint32_t)dwSize;
+  arena->curr = chunk;
+  return chunk;
 }
 
-static inline int32_t arena2_push(Arena2 *a2, int32_t n, int32_t **out) {
-  assert(n > 0);
-  int32_t k1 = exp2_ceil(n);
-  if (a2->free_map[k1]) {
-    *out = (int32_t *)a2->free_map[k1];
-    a2->free_map[k1] = a2->free_map[k1]->next;
-  } else {
-    Arena *ref = a2->arena->curr;
-    assert(((size_t)pow2(k1) * sizeof(int32_t)) >= sizeof(size_t) && "no ptr space");
-    arena_push(a2->arena, int32_t, (size_t)pow2(k1), *out);
-    if (a2->arena->curr != ref && (ref->capacity - ref->count) >= sizeof(size_t)) {
-      int32_t n2 = (int32_t)min(INT_MAX, (ref->capacity - ref->count) / sizeof(int32_t));
-      int32_t k2 = exp2_floor(n2);
-      arena2_free(a2, (uint8_t *)ref + CIN_ARENA_BYTES + ref->count, k2);
-      ref->count += (size_t)pow2(k2) * sizeof(int32_t);
-      assert(ref->count <= ref->capacity);
+static inline void arena3_free(Arena3 *arena, ArenaSlice *slice) {
+  ArenaBlock *block = (ArenaBlock *)slice->items;
+  uint32_t i = size_class(slice->k);
+  block->next = arena->free_list[i];
+  arena->free_list[i] = block;
+}
+
+static inline uint8_t *arena3_bump(Arena3 *arena, uint32_t bytes, uint32_t alignment) {
+  assert(arena);
+  assert(arena->curr);
+  assert(CIN_ARENA_MAX > bytes);
+  uint32_t left = align(arena->curr->count, alignment);
+  uint32_t right = left + bytes;
+  assert(right <= CIN_ARENA_MAX);
+  if (right >= arena->curr->capacity) {
+    uint32_t gap = 0;
+    while ((gap = arena->curr->capacity - arena->curr->count) >= CIN_ARENA_MIN) {
+      uint32_t k = log2_floor(gap);
+      uint8_t *pos = (uint8_t *)arena->curr + arena->curr->count;
+      uint32_t filled = pow2(k);
+      ArenaSlice slice = {pos, k, filled};
+      arena3_free(arena, &slice);
+      assert(arena->curr->capacity >= arena->curr->count + filled);
+      arena->curr->count += filled;
     }
+    uint32_t cap = arena->curr->capacity;
+    if (bytes + CIN_ARENA_HEADER > cap) {
+      cap = align(bytes + CIN_ARENA_HEADER, alignment);
+    }
+    arena3_chunk_alloc(arena, cap);
+    left = align(arena->curr->count, alignment);
+    right = left + bytes;
   }
-  return k1;
+  arena->curr->count = right;
+  return (uint8_t *)arena->curr + left;
 }
+
+static inline void arena3_slice_assign(Arena3 *arena, ArenaSlice *slice, uint32_t bytes, uint32_t alignment, bool zero) {
+  assert(arena);
+  assert(arena->curr);
+  assert(slice);
+  assert(CIN_ARENA_MAX > bytes);
+  slice->k = log2_ceil(bytes);
+  slice->size = pow2(slice->k);
+  uint32_t class = size_class(slice->k);
+  ArenaBlock *block = arena->free_list[class];
+  if (block) {
+    arena->free_list[class] = block->next;
+    slice->items = (uint8_t *)block;
+    if (zero) ZeroMemory(slice->items, slice->size);
+  } else {
+    slice->items = arena3_bump(arena, slice->size, alignment);
+  }
+  assert(slice->items);
+}
+
+static inline ArenaSlice *arena3_slice_alloc(Arena3 *arena, uint32_t bytes, uint32_t alignment, bool zero) {
+  ArenaSlice stack_slice = {0};
+  arena3_slice_assign(arena, &stack_slice, CIN_ARENA_SLICE_HEADER, align_size(ArenaSlice), false);
+  assert(stack_slice.items);
+  assert(stack_slice.k == log2_ceil(CIN_ARENA_SLICE_HEADER));
+  assert(stack_slice.size == CIN_ARENA_SLICE_HEADER);
+  // both the slice and its contents are stored in the arena (at arbitrary positions)
+  ArenaSlice *heap_slice = (ArenaSlice *)stack_slice.items;
+  arena3_slice_assign(arena, heap_slice, bytes, alignment, zero);
+  assert(heap_slice->items);
+  assert(heap_slice->k);
+  assert(heap_slice->size);
+  return heap_slice;
+}
+
+static inline void arena3_slice_free(Arena3 *arena, ArenaSlice *slice) {
+  ArenaSlice stack_slice = {.items = (uint8_t *)slice,
+                            .k = log2_floor(CIN_ARENA_SLICE_HEADER),
+                            .size = CIN_ARENA_SLICE_HEADER};
+  arena3_free(arena, &stack_slice);
+}
+
+static inline void arena3_slice_free_nested(Arena3 *arena, ArenaSlice *slice) {
+  arena3_free(arena, slice);
+  arena3_slice_free(arena, slice);
+}
+
+#define array_struct_members(T) \
+  T *items;                     \
+  uint32_t count;               \
+  uint32_t capacity;            \
+  uint32_t k_bytes;
+
+#define array_struct(T)     \
+  struct {                  \
+    array_struct_members(T) \
+  }
+
+#define array_define(name, T) \
+  typedef struct name {       \
+    array_struct_members(T)   \
+  } name
+
+#define CIN_ARRAY_SIZE sizeof(array_struct(void))
+
+#define array3_assign(arena, a, n, zero)                             \
+  do {                                                               \
+    ArenaSlice _slice = {0};                                         \
+    arena3_slice_assign((arena), &_slice, sizeof(*(a)->items) * (n), \
+                        align_size(*(a)->items), (zero));            \
+    (a)->items = (void *)_slice.items;                               \
+    (a)->capacity = _slice.size / sizeof(*(a)->items);               \
+    (a)->k_bytes = _slice.k;                                         \
+  } while (0)
+
+#define array3_alloc(arena, slice, zero) \
+  arena3_slice_assign((arena), &slice, CIN_ARRAY_SIZE, align_size(CIN_ARRAY_SIZE), (zero));
+
+#define array3_free(arena, a)                           \
+  arena3_free((arena), {.items = (uint8_t *)(a)->items, \
+                        .k = (a)->k_bytes,              \
+                        .size = (a)->capacity})
+
+#define array_3_free_nested(arena, a)                      \
+  do {                                                     \
+    array3_free((arena), (a));                             \
+    arena3_free((arena), {.items = (uint8_t *)(a),         \
+                          .k = log2_floor(CIN_ARRAY_SIZE), \
+                          .size = CIN_ARRAY_SIZE});        \
+  } while (0)
+
+#define array3_push(arena, a, item, zero)                            \
+  do {                                                               \
+    /*TODO: if ((a)->count == (a)->capacity) {                       \
+      ArenaSlice _tmp = {0};                                         \
+      array3_assign((arena), &_tmp, pow2((a)->k_bytes + 1), (zero)); \
+      memcpy(_tmp.items, (a)->items, (a)->count);                    \
+      array3_free((arena), (a));                                     \
+      (a)->capacity = _tmp.size / sizeof(*(a)->items);               \
+      (a)->k_bytes = _tmp.k;                                         \
+    }*/                                                              \
+    (a)->items[(a)->count++] = (item);                               \
+  } while (0)
 
 // https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
 // A path can have 248 "characters" (260 - 12 = 248)
@@ -1838,7 +1993,7 @@ struct Document_Collection {
   int32_t *suffix_to_doc;
   uint16_t *dedup_counters;
   Arena *arena;
-  Arena2 arena2;
+  Arena3 arena3;
 } docs = {0};
 
 #define DOCS_INIT (1 << 15)
@@ -2327,7 +2482,7 @@ static bool init_config(const char *filename) {
 
 static bool init_documents(void) {
   arena_alloc(docs.arena, CIN_DOCS_ARENA_CAP);
-  arena2_assign(&docs.arena2, docs.arena);
+  arena3_chunk_alloc(&docs.arena3, CIN_DOCS_ARENA_CAP);
   docs.gsa = malloc(docs.bytes_mul32);
 #if defined(LIBSAIS_OPENMP)
   int32_t result = libsais_gsa_omp(docs.text, docs.gsa, docs.bytes, 0, NULL, cin_system.threads);
@@ -2387,7 +2542,9 @@ static bool init_documents(void) {
   return true;
 }
 
-static void document_listing(const uint8_t *pattern, int32_t pattern_len, Arena2_Slice *slice) {
+array_define(TempDocuments, int32_t);
+
+static void document_listing(const uint8_t *pattern, int32_t pattern_len, TempDocuments *result) {
   int32_t left = docs.doc_count;
   int32_t right = docs.bytes - 1;
   int32_t l_lcp = lcps(pattern, docs.text + docs.gsa[left]);
@@ -2461,14 +2618,13 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len, Arena2
   int32_t n = r_bound - l_bound;
   assert(n >= 0);
   if (!n) return;
-  int32_t exponent = arena2_push(&docs.arena2, n, &slice->items);
-  slice->capacity = pow2(exponent);
-  slice->count = 0;
+  array3_assign(&docs.arena3, result, (uint32_t)n, true);
+  result->count = 0;
   for (int32_t i = l_bound; i <= r_bound; ++i) {
     int32_t doc = docs.suffix_to_doc[i];
     if (docs.dedup_counters[doc] != dedup_counter) {
       docs.dedup_counters[doc] = dedup_counter;
-      slice->items[slice->count++] = doc;
+      array3_push(&docs.arena3, result, doc, false);
       log_message(LOG_TRACE, "docs.gsa[%7d] = %-25.25s (%7d)| (%7d) = %-30.30s counter=%d", i, docs.text + docs.gsa[i], docs.gsa[i], doc, docs.text + doc, dedup_counter);
     }
   }
@@ -3369,7 +3525,7 @@ static void cmd_search_executor(void) {
     pattern = utf8_buf.items;
   }
   log_message(LOG_DEBUG, "Search with pattern: '%s', len: %d", pattern, len);
-  Arena2_Slice slice = {0};
+  TempDocuments slice = {0};
   document_listing(pattern, len - 1, &slice);
   // TODO:
   log_message(LOG_INFO, "Slice count=%d, cap=%d", slice.count, slice.capacity);
