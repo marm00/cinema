@@ -274,7 +274,7 @@ typedef struct Arena {
 #define unlikely(x) __builtin_expect(!!(x), 0)
 #define cin_ispow2(n) ((n) && ((n) & ((n) - 1)) == 0)
 #define align(a, b) (((a) + (b) - 1) & (~((b) - 1)))
-#define CIN_PTR ((size_t)__SIZEOF_POINTER__)
+#define CIN_PTR ((uint32_t)__SIZEOF_POINTER__)
 #define align_size(T) max(CIN_PTR, __alignof(T))
 #define align_to_size(n) align((n), CIN_PTR)
 #define block_bytes(n) ((n) * (CIN_PTR * 8))
@@ -571,7 +571,7 @@ static inline void arena3_slice_free_nested(Arena3 *arena, Arena_Slice *slice) {
   uint32_t count;               \
   uint32_t capacity;            \
   uint32_t bytes_capacity;      \
-  uint32_t k_bytes_capacity
+  uint32_t bytes_capacity_k
 
 #define array_struct(T)      \
   struct {                   \
@@ -595,7 +595,7 @@ static_assert(CIN_PTR == 8 ? (CIN_ARRAY_SIZE == 24) : true, "bytes updated (poss
     (a)->count = 0;                                                  \
     (a)->capacity = _slice.size / sizeof(*(a)->items);               \
     (a)->bytes_capacity = _slice.size;                               \
-    (a)->k_bytes_capacity = _slice.k;                                \
+    (a)->bytes_capacity_k = _slice.k;                                \
   } while (0)
 
 #define array3_alloc(arena, slice, zero) \
@@ -603,7 +603,7 @@ static_assert(CIN_PTR == 8 ? (CIN_ARRAY_SIZE == 24) : true, "bytes updated (poss
 
 #define array3_free(arena, a)                                         \
   arena3_free((arena), &(Arena_Slice){.items = (uint8_t *)(a)->items, \
-                                      .k = (a)->k_bytes_capacity,     \
+                                      .k = (a)->bytes_capacity_k,     \
                                       .size = (a)->bytes_capacity})
 
 #define array_3_free_nested(arena, a)                                  \
@@ -617,8 +617,10 @@ static_assert(CIN_PTR == 8 ? (CIN_ARRAY_SIZE == 24) : true, "bytes updated (poss
 #define array3_ensure_capacity(arena, a, total, zero)                                                 \
   do {                                                                                                \
     if ((total) > (a)->capacity) {                                                                    \
-      if (unlikely((a)->k_bytes_capacity >= CIN_ARENA_MAX_K)) {                                       \
-        assert(false && "array silently overflows");                                                  \
+      if (unlikely((a)->bytes_capacity_k >= CIN_ARENA_MAX_K)) {                                       \
+        printf("Cinema crashed trying to allocate excessive memory (%u bytes)",                       \
+               (a)->bytes_capacity << 1);                                                             \
+        exit(1);                                                                                      \
       }                                                                                               \
       Arena_Slice _tmp = {0};                                                                         \
       arena3_slice_assign((arena), &_tmp, (a)->bytes_capacity << 1, align_size(*(a)->items), (zero)); \
@@ -627,7 +629,7 @@ static_assert(CIN_PTR == 8 ? (CIN_ARRAY_SIZE == 24) : true, "bytes updated (poss
       (a)->items = (void *)_tmp.items;                                                                \
       (a)->capacity = _tmp.size / sizeof(*(a)->items);                                                \
       (a)->bytes_capacity = _tmp.size;                                                                \
-      (a)->k_bytes_capacity = _tmp.k;                                                                 \
+      (a)->bytes_capacity_k = _tmp.k;                                                                 \
     }                                                                                                 \
   } while (0)
 
@@ -746,7 +748,7 @@ static_assert(CIN_PTR == 8 ? (CIN_ARRAY_SIZE == 24) : true, "bytes updated (poss
     (a)->capacity = _nbytes / sizeof(*(a)->items);                   \
     assert((a)->capacity >= (a)->count);                             \
     (a)->bytes_capacity = _nbytes;                                   \
-    (a)->k_bytes_capacity = 0;                                       \
+    (a)->bytes_capacity_k = 0;                                       \
   } while (0)
 
 // https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
@@ -2598,6 +2600,13 @@ static bool init_config(const char *filename) {
   array_free(conf_parser.scopes);
   array_free(conf_parser.buf);
   array3_to_no_k(&docs.arena3, &docs);
+  assert(array3_bytes(&docs) <= CIN_ARENA_MAX && "overflew k = 31");
+  if (array3_bytes(&docs) == CIN_ARENA_MAX) {
+    // extremely rare case where we exceed INT_MAX by 1 byte,
+    // instead of trying to fix it we force a crash
+    wwritef(L"Cinema crashed receiving too many file paths (exceeding %d bytes)", INT_MAX);
+    exit(1);
+  }
   docs.bytes_mul32 = (size_t)array3_bytes(&docs) * sizeof(int32_t);
   docs.doc_mul32 = (size_t)docs.doc_count * sizeof(int32_t);
   log_message(LOG_INFO, "Setup media library with %d items (%u bytes)",
