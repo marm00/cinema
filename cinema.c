@@ -570,8 +570,8 @@ static inline void arena3_slice_free_nested(Arena3 *arena, Arena_Slice *slice) {
   T *items;                     \
   uint32_t count;               \
   uint32_t capacity;            \
-  uint32_t bytes;               \
-  uint32_t k_bytes
+  uint32_t bytes_capacity;      \
+  uint32_t k_bytes_capacity
 
 #define array_struct(T)      \
   struct {                   \
@@ -594,8 +594,8 @@ static_assert(CIN_PTR == 8 ? (CIN_ARRAY_SIZE == 24) : true, "bytes updated (poss
     (a)->items = (void *)_slice.items;                               \
     (a)->count = 0;                                                  \
     (a)->capacity = _slice.size / sizeof(*(a)->items);               \
-    (a)->bytes = _slice.size;                                        \
-    (a)->k_bytes = _slice.k;                                         \
+    (a)->bytes_capacity = _slice.size;                               \
+    (a)->k_bytes_capacity = _slice.k;                                \
   } while (0)
 
 #define array3_alloc(arena, slice, zero) \
@@ -603,8 +603,8 @@ static_assert(CIN_PTR == 8 ? (CIN_ARRAY_SIZE == 24) : true, "bytes updated (poss
 
 #define array3_free(arena, a)                                         \
   arena3_free((arena), &(Arena_Slice){.items = (uint8_t *)(a)->items, \
-                                      .k = (a)->k_bytes,              \
-                                      .size = (a)->bytes})
+                                      .k = (a)->k_bytes_capacity,     \
+                                      .size = (a)->bytes_capacity})
 
 #define array_3_free_nested(arena, a)                                  \
   do {                                                                 \
@@ -614,21 +614,21 @@ static_assert(CIN_PTR == 8 ? (CIN_ARRAY_SIZE == 24) : true, "bytes updated (poss
                                              .size = CIN_ARRAY_SIZE}); \
   } while (0)
 
-#define array3_ensure_capacity(arena, a, total, zero)                                        \
-  do {                                                                                       \
-    if ((total) > (a)->capacity) {                                                           \
-      if (unlikely((a)->k_bytes >= CIN_ARENA_MAX_K)) {                                       \
-        assert(false && "array silently overflows");                                         \
-      }                                                                                      \
-      Arena_Slice _tmp = {0};                                                                \
-      arena3_slice_assign((arena), &_tmp, (a)->bytes << 1, align_size(*(a)->items), (zero)); \
-      memcpy(_tmp.items, (a)->items, (a)->bytes);                                            \
-      array3_free((arena), (a));                                                             \
-      (a)->items = (void *)_tmp.items;                                                       \
-      (a)->capacity = _tmp.size / sizeof(*(a)->items);                                       \
-      (a)->bytes = _tmp.size;                                                                \
-      (a)->k_bytes = _tmp.k;                                                                 \
-    }                                                                                        \
+#define array3_ensure_capacity(arena, a, total, zero)                                                 \
+  do {                                                                                                \
+    if ((total) > (a)->capacity) {                                                                    \
+      if (unlikely((a)->k_bytes_capacity >= CIN_ARENA_MAX_K)) {                                       \
+        assert(false && "array silently overflows");                                                  \
+      }                                                                                               \
+      Arena_Slice _tmp = {0};                                                                         \
+      arena3_slice_assign((arena), &_tmp, (a)->bytes_capacity << 1, align_size(*(a)->items), (zero)); \
+      memcpy(_tmp.items, (a)->items, (a)->bytes_capacity);                                            \
+      array3_free((arena), (a));                                                                      \
+      (a)->items = (void *)_tmp.items;                                                                \
+      (a)->capacity = _tmp.size / sizeof(*(a)->items);                                                \
+      (a)->bytes_capacity = _tmp.size;                                                                \
+      (a)->k_bytes_capacity = _tmp.k;                                                                 \
+    }                                                                                                 \
   } while (0)
 
 #define array3_reserve(arena, a, n, zero) \
@@ -732,21 +732,21 @@ static_assert(CIN_PTR == 8 ? (CIN_ARRAY_SIZE == 24) : true, "bytes updated (poss
     (a)->count -= (n);         \
   } while (0)
 
-#define array3_count_bytes(a) \
+#define array3_bytes(a) \
   ((a)->count * sizeof(*(a)->items))
 
 #define array3_to_no_k(arena, a)                                     \
   do {                                                               \
-    uint32_t _nbytes = align_to_size(array3_count_bytes((a)));       \
-    assert(_nbytes <= (a)->bytes);                                   \
-    uint32_t _diff = (a)->bytes - _nbytes;                           \
+    uint32_t _nbytes = align_to_size(array3_bytes((a)));             \
+    assert(_nbytes <= (a)->bytes_capacity);                          \
+    uint32_t _diff = (a)->bytes_capacity - _nbytes;                  \
     if (_diff >= CIN_ARENA_MIN) {                                    \
       arena3_nfree((arena), (uint8_t *)(a)->items + _nbytes, _diff); \
     }                                                                \
     (a)->capacity = _nbytes / sizeof(*(a)->items);                   \
     assert((a)->capacity >= (a)->count);                             \
-    (a)->bytes = _nbytes;                                            \
-    (a)->k_bytes = 0;                                                \
+    (a)->bytes_capacity = _nbytes;                                   \
+    (a)->k_bytes_capacity = 0;                                       \
   } while (0)
 
 // https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
@@ -2345,7 +2345,7 @@ static void setup_directory(const char *path, TagDirectories *tag_dirs) {
       } else {
         wmemcpy(dir.path + dir.len, file, file_len);
         int32_t utf8_len = utf16_to_utf8(dir.path);
-        array_push(node, (int32_t)array3_count_bytes(&docs));
+        array_push(node, (int32_t)array3_bytes(&docs));
         docs_append(utf8_buf.items, utf8_len);
       }
     } while (FindNextFileW(search, &data) != 0);
@@ -2417,8 +2417,8 @@ static inline void setup_pattern(const char *pattern, TagPatternItems *tag_patte
     // This means that the docs array can contain duplicates in that case. While not
     // a big deal, it can probably be addressed without having to hash every file in
     // the directory setup, by using some pattern heuristics (e.g., directory hash)
-    size_t tail_offset = (size_t)array3_count_bytes(&docs);
-    int32_t tail_doc = (int32_t)array3_count_bytes(&docs);
+    size_t tail_offset = (size_t)array3_bytes(&docs);
+    int32_t tail_doc = (int32_t)array3_bytes(&docs);
     docs_append(utf8_buf.items, len);
     int32_t dup_doc = rh_insert(&pat_map, docs.items, tail_offset, (size_t)len, tail_doc);
     if (dup_doc >= 0) {
@@ -2443,8 +2443,8 @@ static inline void setup_url(const char *url, TagUrlItems *tag_url_items) {
   int32_t len_utf16 = utf8_to_utf16_norm(url);
   assert(len_utf16);
   int32_t len_utf8 = utf16_to_utf8(utf16_buf_norm.items);
-  size_t tail_offset = (size_t)array3_count_bytes(&docs);
-  int32_t tail_doc = (int32_t)array3_count_bytes(&docs);
+  size_t tail_offset = (size_t)array3_bytes(&docs);
+  int32_t tail_doc = (int32_t)array3_bytes(&docs);
   docs_append(utf8_buf.items, len_utf8);
   int32_t dup_doc = rh_insert(&url_map, docs.items, tail_offset, (size_t)len_utf8, tail_doc);
   if (dup_doc >= 0) {
@@ -2598,17 +2598,17 @@ static bool init_config(const char *filename) {
   array_free(conf_parser.scopes);
   array_free(conf_parser.buf);
   array3_to_no_k(&docs.arena3, &docs);
-  docs.bytes_mul32 = (size_t)array3_count_bytes(&docs) * sizeof(int32_t);
+  docs.bytes_mul32 = (size_t)array3_bytes(&docs) * sizeof(int32_t);
   docs.doc_mul32 = (size_t)docs.doc_count * sizeof(int32_t);
-  log_message(LOG_INFO, "Setup media library with %d items (%d bytes)",
-              docs.doc_count, array3_count_bytes(&docs));
+  log_message(LOG_INFO, "Setup media library with %d items (%u bytes)",
+              docs.doc_count, array3_bytes(&docs));
   return true;
 }
 
 static bool init_documents(void) {
   arena_alloc(docs.arena, CIN_DOCS_ARENA_CAP);
   docs.gsa = malloc(docs.bytes_mul32);
-  int32_t d_bytes = (int32_t)array3_count_bytes(&docs);
+  int32_t d_bytes = (int32_t)array3_bytes(&docs);
 #if defined(LIBSAIS_OPENMP)
   int32_t result = libsais_gsa_omp(docs.items, docs.gsa, d_bytes, 0, NULL, cin_system.threads);
 #else
@@ -2671,7 +2671,7 @@ array_define(TempDocuments, int32_t);
 
 static void document_listing(const uint8_t *pattern, int32_t pattern_len, TempDocuments *result) {
   int32_t left = docs.doc_count;
-  int32_t right = (int32_t)array3_count_bytes(&docs) - 1;
+  int32_t right = (int32_t)array3_bytes(&docs) - 1;
   int32_t l_lcp = lcps(pattern, docs.items + docs.gsa[left]);
   int32_t r_lcp = lcps(pattern, docs.items + docs.gsa[right]);
   if (l_lcp < pattern_len &&
@@ -2754,7 +2754,7 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len, TempDo
     }
   }
   if (++dedup_counter == 0) {
-    memset(docs.dedup_counters, 0, (size_t)array3_count_bytes(&docs) * sizeof(uint16_t));
+    memset(docs.dedup_counters, 0, (size_t)array3_bytes(&docs) * sizeof(uint16_t));
     dedup_counter = 1;
   }
 }
