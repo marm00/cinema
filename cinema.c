@@ -274,7 +274,7 @@ typedef struct Arena {
 #define unlikely(x) __builtin_expect(!!(x), 0)
 #define cin_ispow2(n) ((n) && ((n) & ((n) - 1)) == 0)
 #define align(a, b) (((a) + (b) - 1) & (~((b) - 1)))
-#define CIN_PTR __SIZEOF_POINTER__
+#define CIN_PTR ((size_t)__SIZEOF_POINTER__)
 #define align_size(T) max(CIN_PTR, __alignof(T))
 #define align_to_size(n) align((n), CIN_PTR)
 #define block_bytes(n) ((n) * (CIN_PTR * 8))
@@ -547,7 +547,7 @@ static inline Arena_Slice *arena3_slice_alloc(Arena3 *arena, uint32_t bytes, uin
 }
 
 static inline void arena3_slice_free(Arena3 *arena, Arena_Slice *slice) {
-#if CIN_PTR == 8
+#if __SIZEOF_POINTER__ == 8
   static_assert(cin_ispow2(CIN_ARENA_SLICE_SIZE), "expected slice to be pow2");
   Arena_Slice stack_slice = {.items = (uint8_t *)slice,
                              .k = log2_floor(CIN_ARENA_SLICE_SIZE),
@@ -571,16 +571,16 @@ static inline void arena3_slice_free_nested(Arena3 *arena, Arena_Slice *slice) {
   uint32_t count;               \
   uint32_t capacity;            \
   uint32_t bytes;               \
-  uint32_t k_bytes;
+  uint32_t k_bytes
 
-#define array_struct(T)     \
-  struct {                  \
-    array_struct_members(T) \
+#define array_struct(T)      \
+  struct {                   \
+    array_struct_members(T); \
   }
 
 #define array_define(name, T) \
   typedef struct name {       \
-    array_struct_members(T)   \
+    array_struct_members(T);  \
   } name
 
 #define CIN_ARRAY_SIZE sizeof(array_struct(void))
@@ -592,6 +592,7 @@ static_assert(CIN_PTR == 8 ? (CIN_ARRAY_SIZE == 24) : true, "bytes updated (poss
     arena3_slice_assign((arena), &_slice, sizeof(*(a)->items) * (n), \
                         align_size(*(a)->items), (zero));            \
     (a)->items = (void *)_slice.items;                               \
+    (a)->count = 0;                                                  \
     (a)->capacity = _slice.size / sizeof(*(a)->items);               \
     (a)->bytes = _slice.size;                                        \
     (a)->k_bytes = _slice.k;                                         \
@@ -613,40 +614,139 @@ static_assert(CIN_PTR == 8 ? (CIN_ARRAY_SIZE == 24) : true, "bytes updated (poss
                                              .size = CIN_ARRAY_SIZE}); \
   } while (0)
 
-#define array3_push(arena, a, item, zero)                                                    \
+#define array3_ensure_capacity(arena, a, total, zero)                                        \
   do {                                                                                       \
-    if ((a)->count == (a)->capacity) {                                                       \
-      if (unlikely((a)->k_bytes == CIN_ARENA_MAX_K)) {                                       \
+    if ((total) > (a)->capacity) {                                                           \
+      if (unlikely((a)->k_bytes >= CIN_ARENA_MAX_K)) {                                       \
         assert(false && "array silently overflows");                                         \
       }                                                                                      \
       Arena_Slice _tmp = {0};                                                                \
       arena3_slice_assign((arena), &_tmp, (a)->bytes << 1, align_size(*(a)->items), (zero)); \
       memcpy(_tmp.items, (a)->items, (a)->bytes);                                            \
+      array3_free((arena), (a));                                                             \
+      (a)->items = (void *)_tmp.items;                                                       \
       (a)->capacity = _tmp.size / sizeof(*(a)->items);                                       \
       (a)->bytes = _tmp.size;                                                                \
       (a)->k_bytes = _tmp.k;                                                                 \
-      array3_free((arena), (a));                                                             \
     }                                                                                        \
-    (a)->items[(a)->count++] = (item);                                                       \
   } while (0)
 
-#define array3_to_no_k(arena, a)                                        \
-  do {                                                                  \
-    uint32_t _nbytes = align_to_size((a)->count * (*(a)->items));       \
-    uint32_t _diff = _nbytes - (a)->bytes;                              \
-    if (_diff >= CIN_ARENA_MIN) {                                       \
-      arena3_nfree((arena), (uint8_t *)(a)->items + (a)->bytes, _diff); \
-    }                                                                   \
-    (a)->capacity = _nbytes / sizeof(*(a)->items);                      \
-    assert((a)->capacity >= (a)->count);                                \
-    (a)->bytes = _nbytes;                                               \
-    (a)->k_bytes = 0;                                                   \
+#define array3_reserve(arena, a, n, zero) \
+  array3_ensure_capacity((arena), (a), (a)->count + (n), (zero))
+
+#define array3_resize(arena, a, total, zero)               \
+  do {                                                     \
+    array3_ensure_capacity((arena), (a), (total), (zero)); \
+    (a)->count = (total);                                  \
   } while (0)
 
-#define array3_pop(arena, a) \
-  do {                       \
-    assert((a)->count);      \
-    --(a)->count;            \
+#define array3_grow(arena, a, n, zero)         \
+  do {                                         \
+    array3_reserve((arena), (a), (n), (zero)); \
+    (a)->count += (n);                         \
+  } while (0)
+
+#define array3_push(arena, a, item, zero)    \
+  do {                                       \
+    array3_reserve((arena), (a), 1, (zero)); \
+    (a)->items[(a)->count++] = (item);       \
+  } while (0)
+
+#define array3_set(arena, a, new_items, n, zero)                \
+  do {                                                          \
+    array3_resize((arena), (a), (n), (zero));                   \
+    memcpy((a)->items, (new_items), (n) * sizeof(*(a)->items)); \
+  } while (0)
+
+#define array3_extend(arena, a, new_items, n, zero)                          \
+  do {                                                                       \
+    array3_reserve((arena), (a), (n), (zero));                               \
+    memcpy((a)->items + (a)->count, (new_items), (n) * sizeof(*(a)->items)); \
+    (a)->count += (n);                                                       \
+  } while (0)
+
+#define array3_wextend(arena, a, new_items, n, zero)    \
+  do {                                                  \
+    array3_reserve((arena), (a), (n), (zero));          \
+    wmemcpy((a)->items + (a)->count, (new_items), (n)); \
+    (a)->count += (n);                                  \
+  } while (0)
+
+#define array3_wsextend(arena, a, new_items, zero) \
+  array3_wextend((arena), (a), (new_items),        \
+                 sizeof((new_items)) / sizeof(*((new_items))) - 1, (zero));
+
+#define array3_splice(arena, a, i, new_items, n, zero)                \
+  do {                                                                \
+    assert((i) <= (a)->count);                                        \
+    array3_reserve((arena), (a), (n), (zero));                        \
+    memmove((a)->items + (i) + (n),                                   \
+            (a)->items + (i),                                         \
+            ((a)->count - (i)) * sizeof(*(a)->items));                \
+    memcpy((a)->items + (i), (new_items), (n) * sizeof(*(a)->items)); \
+    (a)->count += (n);                                                \
+  } while (0)
+
+#define array3_wsplice(arena, a, i, new_items, n, zero)                   \
+  do {                                                                    \
+    assert((i) <= (a)->count);                                            \
+    array3_reserve((arena), (a), (n), (zero));                            \
+    wmemmove((a)->items + (i) + (n), (a)->items + (i), (a)->count - (i)); \
+    wmemcpy((a)->items + (i), (new_items), (n));                          \
+    (a)->count += (n);                                                    \
+  } while (0)
+
+#define array3_insert(arena, a, i, new_item, zero)       \
+  do {                                                   \
+    assert((i) <= (a)->count);                           \
+    array_reserve((arena), (a), 1, (zero));              \
+    if ((i) < (a)->count) {                              \
+      memmove((a)->items + (i) + 1,                      \
+              (a)->items + (i),                          \
+              ((a)->count - (i)) * sizeof(*(a)->items)); \
+    }                                                    \
+    (a)->items[(i)] = (new_item);                        \
+    (a)->count++;                                        \
+  } while (0)
+
+#define array3_winsert(arena, a, i, new_item, zero)                       \
+  do {                                                                    \
+    assert((i) <= (a)->count);                                            \
+    array_reserve((arena), (a), 1, (zero));                               \
+    if ((i) < (a)->count) {                                               \
+      wmemmove((a)->items + (i) + 1, (a)->items + (i), (a)->count - (i)); \
+    }                                                                     \
+    (a)->items[(i)] = (new_item);                                         \
+    (a)->count++;                                                         \
+  } while (0)
+
+#define array3_pop(a)   \
+  do {                  \
+    assert((a)->count); \
+    --(a)->count;       \
+  } while (0)
+
+#define array3_shrink(a, n)    \
+  do {                         \
+    assert((a)->count >= (n)); \
+    (a)->count -= (n);         \
+  } while (0)
+
+#define array3_count_bytes(a) \
+  ((a)->count * sizeof(*(a)->items))
+
+#define array3_to_no_k(arena, a)                                     \
+  do {                                                               \
+    uint32_t _nbytes = align_to_size(array3_count_bytes((a)));       \
+    assert(_nbytes <= (a)->bytes);                                   \
+    uint32_t _diff = (a)->bytes - _nbytes;                           \
+    if (_diff >= CIN_ARENA_MIN) {                                    \
+      arena3_nfree((arena), (uint8_t *)(a)->items + _nbytes, _diff); \
+    }                                                                \
+    (a)->capacity = _nbytes / sizeof(*(a)->items);                   \
+    assert((a)->capacity >= (a)->count);                             \
+    (a)->bytes = _nbytes;                                            \
+    (a)->k_bytes = 0;                                                \
   } while (0)
 
 // https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
@@ -2032,13 +2132,12 @@ end:
   return ok;
 }
 
+#define CIN_DOCS_ARENA_CAP megabytes(2)
+#define CIN_DOCS_CAP (1 << 13)
+
 struct Document_Collection {
   // Each byte represents a UTF-8 unit
-  uint8_t *text;
-  // using int32_t because of libsais,
-  // unsigned variants are pointless
-  int32_t bytes;
-  int32_t max_bytes;
+  array_struct_members(uint8_t);
   size_t bytes_mul32;
   size_t doc_mul32;
   // Document boundaries are encapsulated in the GSA
@@ -2054,39 +2153,13 @@ struct Document_Collection {
   Arena3 arena3;
 } docs = {0};
 
-#define DOCS_INIT (1 << 15)
-#define DOCS_CLAMP (1 << 26)
-
-static void docs_append(uint8_t *utf8, int len) {
+static void docs_append(uint8_t *utf8, int32_t len) {
   // NOTE: When using mpv JSON ipc, backslash actually requires 2 bytes to be valid JSON.
   // Instead of appending it, we replace it with forward slash.
   for (int32_t i = 0; i < len; ++i)
     if (utf8[i] == '\\') utf8[i] = '/';
-  void *dst = NULL;
-  if (docs.max_bytes - docs.bytes >= len) {
-    dst = docs.text + docs.bytes;
-  } else {
-    int32_t cap = docs.max_bytes;
-    if (cap <= 0) {
-      cap = DOCS_INIT;
-    }
-    while (cap - docs.bytes < len) {
-      cap = cap < DOCS_CLAMP ? cap * 2 : cap + DOCS_CLAMP;
-    }
-    docs.max_bytes = cap;
-    uint8_t *units = realloc(docs.text, (size_t)docs.max_bytes);
-    if (units != NULL) {
-      docs.text = units;
-      dst = docs.text + docs.bytes;
-    }
-  }
-  if (dst == NULL) {
-    log_message(LOG_ERROR, "Failed to reallocate memory");
-  } else {
-    memcpy(dst, utf8, (size_t)len);
-    docs.bytes += len;
-    docs.doc_count++;
-  }
+  array3_extend(&docs.arena3, &docs, utf8, (uint32_t)len, true);
+  ++docs.doc_count;
 }
 
 typedef struct DirectoryNode {
@@ -2272,7 +2345,7 @@ static void setup_directory(const char *path, TagDirectories *tag_dirs) {
       } else {
         wmemcpy(dir.path + dir.len, file, file_len);
         int32_t utf8_len = utf16_to_utf8(dir.path);
-        array_push(node, docs.bytes);
+        array_push(node, (int32_t)array3_count_bytes(&docs));
         docs_append(utf8_buf.items, utf8_len);
       }
     } while (FindNextFileW(search, &data) != 0);
@@ -2344,12 +2417,12 @@ static inline void setup_pattern(const char *pattern, TagPatternItems *tag_patte
     // This means that the docs array can contain duplicates in that case. While not
     // a big deal, it can probably be addressed without having to hash every file in
     // the directory setup, by using some pattern heuristics (e.g., directory hash)
-    size_t tail_offset = (size_t)docs.bytes;
-    int32_t tail_doc = docs.bytes;
+    size_t tail_offset = (size_t)array3_count_bytes(&docs);
+    int32_t tail_doc = (int32_t)array3_count_bytes(&docs);
     docs_append(utf8_buf.items, len);
-    int32_t dup_doc = rh_insert(&pat_map, docs.text, tail_offset, (size_t)len, tail_doc);
+    int32_t dup_doc = rh_insert(&pat_map, docs.items, tail_offset, (size_t)len, tail_doc);
     if (dup_doc >= 0) {
-      docs.bytes -= len;
+      array3_shrink(&docs, (uint32_t)len);
       --docs.doc_count;
       if (tag_pattern_items) {
         array_push(tag_pattern_items, dup_doc);
@@ -2370,12 +2443,12 @@ static inline void setup_url(const char *url, TagUrlItems *tag_url_items) {
   int32_t len_utf16 = utf8_to_utf16_norm(url);
   assert(len_utf16);
   int32_t len_utf8 = utf16_to_utf8(utf16_buf_norm.items);
-  size_t tail_offset = (size_t)docs.bytes;
-  int32_t tail_doc = docs.bytes;
+  size_t tail_offset = (size_t)array3_count_bytes(&docs);
+  int32_t tail_doc = (int32_t)array3_count_bytes(&docs);
   docs_append(utf8_buf.items, len_utf8);
-  int32_t dup_doc = rh_insert(&url_map, docs.text, tail_offset, (size_t)len_utf8, tail_doc);
+  int32_t dup_doc = rh_insert(&url_map, docs.items, tail_offset, (size_t)len_utf8, tail_doc);
   if (dup_doc >= 0) {
-    docs.bytes -= len_utf8;
+    array3_shrink(&docs, (uint32_t)len_utf8);
     --docs.doc_count;
     if (tag_url_items) {
       array_push(tag_url_items, dup_doc);
@@ -2419,6 +2492,8 @@ static inline void setup_layout(const char *name, Cin_Layout *layout) {
 
 static bool init_config(const char *filename) {
   if (!parse_config(filename)) return false;
+  arena3_chunk_alloc(&docs.arena3, CIN_DOCS_ARENA_CAP);
+  array3_assign(&docs.arena3, &docs, CIN_DOCS_CAP, true);
   array_alloc(&utf16_buf_raw, CIN_MAX_PATH);
   array_alloc(&utf16_buf_norm, CIN_MAX_PATH);
   array_alloc(&utf8_buf, CIN_MAX_PATH_BYTES);
@@ -2522,30 +2597,22 @@ static bool init_config(const char *filename) {
   array_free(dir_stack);
   array_free(conf_parser.scopes);
   array_free(conf_parser.buf);
-  if (docs.bytes < docs.max_bytes) {
-    uint8_t *tight = realloc(docs.text, (size_t)docs.bytes);
-    if (tight != NULL) {
-      docs.text = tight;
-      docs.max_bytes = docs.bytes;
-      docs.bytes_mul32 = (size_t)docs.bytes * sizeof(int32_t);
-      docs.doc_mul32 = (size_t)docs.doc_count * sizeof(int32_t);
-    }
-  }
+  array3_to_no_k(&docs.arena3, &docs);
+  docs.bytes_mul32 = (size_t)array3_count_bytes(&docs) * sizeof(int32_t);
+  docs.doc_mul32 = (size_t)docs.doc_count * sizeof(int32_t);
   log_message(LOG_INFO, "Setup media library with %d items (%d bytes)",
-              docs.doc_count, docs.bytes);
+              docs.doc_count, array3_count_bytes(&docs));
   return true;
 }
 
-#define CIN_DOCS_ARENA_CAP megabytes(2)
-
 static bool init_documents(void) {
   arena_alloc(docs.arena, CIN_DOCS_ARENA_CAP);
-  arena3_chunk_alloc(&docs.arena3, CIN_DOCS_ARENA_CAP);
   docs.gsa = malloc(docs.bytes_mul32);
+  int32_t d_bytes = (int32_t)array3_count_bytes(&docs);
 #if defined(LIBSAIS_OPENMP)
-  int32_t result = libsais_gsa_omp(docs.text, docs.gsa, docs.bytes, 0, NULL, cin_system.threads);
+  int32_t result = libsais_gsa_omp(docs.items, docs.gsa, d_bytes, 0, NULL, cin_system.threads);
 #else
-  int32_t result = libsais_gsa(docs.text, docs.gsa, docs.bytes, 0, NULL);
+  int32_t result = libsais_gsa(docs.items, docs.gsa, d_bytes, 0, NULL);
 #endif
   if (result != 0) {
     log_message(LOG_ERROR, "Failed to build SA");
@@ -2553,9 +2620,9 @@ static bool init_documents(void) {
   }
   int32_t *plcp = malloc(docs.bytes_mul32);
 #if defined(LIBSAIS_OPENMP)
-  result = libsais_plcp_gsa_omp(docs.text, docs.gsa, plcp, docs.bytes, cin_system.threads);
+  result = libsais_plcp_gsa_omp(docs.items, docs.gsa, plcp, d_bytes, cin_system.threads);
 #else
-  result = libsais_plcp_gsa(docs.text, docs.gsa, plcp, docs.bytes);
+  result = libsais_plcp_gsa(docs.items, docs.gsa, plcp, d_bytes);
 #endif
   if (result != 0) {
     log_message(LOG_ERROR, "Failed to build PLCP array");
@@ -2563,9 +2630,9 @@ static bool init_documents(void) {
   }
   docs.lcp = malloc(docs.bytes_mul32);
 #if defined(LIBSAIS_OPENMP)
-  result = libsais_lcp_omp(plcp, docs.gsa, docs.lcp, docs.bytes, cin_system.threads);
+  result = libsais_lcp_omp(plcp, docs.gsa, docs.lcp, d_bytes, cin_system.threads);
 #else
-  result = libsais_lcp(plcp, docs.gsa, docs.lcp, docs.bytes);
+  result = libsais_lcp(plcp, docs.gsa, docs.lcp, d_bytes);
 #endif
   if (result != 0) {
     log_message(LOG_ERROR, "Failed to build LCP array");
@@ -2573,7 +2640,7 @@ static bool init_documents(void) {
   }
   free(plcp);
   docs.suffix_to_doc = malloc(docs.bytes_mul32);
-  docs.dedup_counters = calloc((size_t)docs.bytes, sizeof(uint16_t));
+  docs.dedup_counters = calloc((size_t)d_bytes, sizeof(uint16_t));
   docs.suffix_to_doc[0] = 0;
   for (int32_t i = 1; i < docs.doc_count; ++i) {
     docs.suffix_to_doc[i] = docs.gsa[i - 1] + 1;
@@ -2581,9 +2648,9 @@ static bool init_documents(void) {
   // TODO: there is probably a faster approach than
   // binary search, but with omp it is very fast
 #if defined(CIN_OPENMP)
-#pragma omp parallel for if (docs.bytes >= (1 << 16))
+#pragma omp parallel for if (d_bytes >= (1 << 16))
 #endif
-  for (int32_t i = docs.doc_count; i < docs.bytes; ++i) {
+  for (int32_t i = docs.doc_count; i < d_bytes; ++i) {
     int32_t left = 0;
     int32_t right = docs.doc_count - 1;
     int32_t curr = docs.gsa[i];
@@ -2604,12 +2671,12 @@ array_define(TempDocuments, int32_t);
 
 static void document_listing(const uint8_t *pattern, int32_t pattern_len, TempDocuments *result) {
   int32_t left = docs.doc_count;
-  int32_t right = docs.bytes - 1;
-  int32_t l_lcp = lcps(pattern, docs.text + docs.gsa[left]);
-  int32_t r_lcp = lcps(pattern, docs.text + docs.gsa[right]);
+  int32_t right = (int32_t)array3_count_bytes(&docs) - 1;
+  int32_t l_lcp = lcps(pattern, docs.items + docs.gsa[left]);
+  int32_t r_lcp = lcps(pattern, docs.items + docs.gsa[right]);
   if (l_lcp < pattern_len &&
-      (docs.text[docs.gsa[left] + l_lcp] == '\0' ||
-       pattern[l_lcp] < docs.text[docs.gsa[left] + l_lcp])) {
+      (docs.items[docs.gsa[left] + l_lcp] == '\0' ||
+       pattern[l_lcp] < docs.items[docs.gsa[left] + l_lcp])) {
     // pattern = abc, left = abd
     // l_lcp = 2, pattern_len = 3, 2 < 3
     // pattern[l_lcp] = c, text[left + l_lcp] = d, c < d
@@ -2617,8 +2684,8 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len, TempDo
     return;
   }
   if (r_lcp < pattern_len &&
-      docs.text[docs.gsa[right] + r_lcp] != '\0' &&
-      pattern[r_lcp] > docs.text[docs.gsa[right] + r_lcp]) {
+      docs.items[docs.gsa[right] + r_lcp] != '\0' &&
+      pattern[r_lcp] > docs.items[docs.gsa[right] + r_lcp]) {
     // pattern = abd, right = abc
     // r_lcp = 2, pattern_len = 3, 2 < 3
     // pattern[r_lcp] = d, text[right + r_lcp] = c, d > c
@@ -2630,15 +2697,15 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len, TempDo
   bool found = false;
   while (left < right) {
     int32_t mid = left + ((right - left) >> 1);
-    int32_t t_lcp = lcps(pattern, docs.text + docs.gsa[mid]);
+    int32_t t_lcp = lcps(pattern, docs.items + docs.gsa[mid]);
     if (t_lcp == pattern_len) {
       found = true;
       right = mid;
       r_lcp = t_lcp;
-    } else if (docs.text[docs.gsa[mid] + t_lcp] == '\0') {
+    } else if (docs.items[docs.gsa[mid] + t_lcp] == '\0') {
       left = mid + 1;
       l_lcp = t_lcp;
-    } else if (pattern[t_lcp] < docs.text[docs.gsa[mid] + t_lcp]) {
+    } else if (pattern[t_lcp] < docs.items[docs.gsa[mid] + t_lcp]) {
       right = mid;
       r_lcp = t_lcp;
     } else {
@@ -2646,7 +2713,7 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len, TempDo
       l_lcp = t_lcp;
     }
   }
-  if (!found && lcps(pattern, docs.text + docs.gsa[left]) < pattern_len) {
+  if (!found && lcps(pattern, docs.items + docs.gsa[left]) < pattern_len) {
     log_message(LOG_DEBUG, "No suffix has pattern as prefix");
     return;
   }
@@ -2657,11 +2724,11 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len, TempDo
   r_lcp = tmp_r_lcp;
   while (left < right) {
     int32_t mid = left + ((right - left + 1) >> 1);
-    int32_t t_lcp = lcps(pattern, docs.text + docs.gsa[mid]);
+    int32_t t_lcp = lcps(pattern, docs.items + docs.gsa[mid]);
     if (t_lcp == pattern_len) {
       left = mid;
       l_lcp = pattern_len;
-    } else if (docs.text[docs.gsa[mid] + t_lcp] == '\0') {
+    } else if (docs.items[docs.gsa[mid] + t_lcp] == '\0') {
       right = mid - 1;
       r_lcp = t_lcp;
     } else {
@@ -2671,24 +2738,23 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len, TempDo
     r_bound = left;
   }
   log_message(LOG_DEBUG, "Boundaries are [%d, %d] or [%s, %s]", l_bound, r_bound,
-              docs.text + docs.gsa[l_bound], docs.text + docs.gsa[r_bound]);
+              docs.items + docs.gsa[l_bound], docs.items + docs.gsa[r_bound]);
   static uint16_t dedup_counter = 1;
   int32_t n = r_bound - l_bound;
   assert(n >= 0);
   if (!n) return;
   array3_assign(&docs.arena3, result, (uint32_t)n, true);
-  array3_to_no_k(&docs.arena3, result);
   result->count = 0;
   for (int32_t i = l_bound; i <= r_bound; ++i) {
     int32_t doc = docs.suffix_to_doc[i];
     if (docs.dedup_counters[doc] != dedup_counter) {
       docs.dedup_counters[doc] = dedup_counter;
       array3_push(&docs.arena3, result, doc, false);
-      log_message(LOG_TRACE, "docs.gsa[%7d] = %-25.25s (%7d)| (%7d) = %-30.30s counter=%d", i, docs.text + docs.gsa[i], docs.gsa[i], doc, docs.text + doc, dedup_counter);
+      log_message(LOG_TRACE, "docs.gsa[%7d] = %-25.25s (%7d)| (%7d) = %-30.30s counter=%d", i, docs.items + docs.gsa[i], docs.gsa[i], doc, docs.items + doc, dedup_counter);
     }
   }
   if (++dedup_counter == 0) {
-    memset(docs.dedup_counters, 0, (size_t)docs.bytes * sizeof(uint16_t));
+    memset(docs.dedup_counters, 0, (size_t)array3_count_bytes(&docs) * sizeof(uint16_t));
     dedup_counter = 1;
   }
 }
@@ -3422,7 +3488,7 @@ static void mpv_spawn(Instance *instance, size_t index) {
   bool ok_read = overlap_read(instance);
   assert(ok_read);
   overlap_write(instance, MPV_LOADFILE, "loadfile",
-                (char *)docs.text + docs.suffix_to_doc[(0 + (int32_t)index) % docs.doc_count], NULL);
+                (char *)docs.items + docs.suffix_to_doc[(0 + (int32_t)index) % docs.doc_count], NULL);
   overlap_write(instance, MPV_WINDOW_ID, "get_property", "window-id", NULL);
   ++mpv_demand;
 }
@@ -3590,7 +3656,7 @@ static void cmd_search_executor(void) {
   log_message(LOG_INFO, "Slice count=%d, cap=%d", slice.count, slice.capacity);
   FOREACH_MPVTARGET(instance, i) {
     overlap_write(instance, MPV_LOADFILE, "loadfile",
-                  (char *)docs.text + slice.items[i % (size_t)slice.count], NULL);
+                  (char *)docs.items + slice.items[i % (size_t)slice.count], NULL);
   }
 }
 
