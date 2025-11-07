@@ -155,13 +155,13 @@ static const char *LOG_LEVELS[LOG_TRACE + 1] = {"ERROR", "WARNING", "INFO", "DEB
   do {                                  \
     size_t n = sizeof((new_items)) - 1; \
     array_extend((a), (new_items), n);  \
-  } while (0);
+  } while (0)
 
 #define array_wsextend(a, new_items)                             \
   do {                                                           \
     size_t n = sizeof((new_items)) / sizeof(*((new_items))) - 1; \
     array_wextend((a), (new_items), n);                          \
-  } while (0);
+  } while (0)
 
 #define array_splice(a, i, new_items, n)                              \
   do {                                                                \
@@ -276,8 +276,9 @@ typedef struct Arena {
 #define align(a, b) (((a) + (b) - 1) & (~((b) - 1)))
 #define CIN_PTR __SIZEOF_POINTER__
 #define align_size(T) max(CIN_PTR, __alignof(T))
+#define align_to_size(n) align((n), CIN_PTR)
 #define block_bytes(n) ((n) * (CIN_PTR * 8))
-#define align_block(n) align((n), block_bytes(1))
+#define align_to_block(n) align((n), block_bytes(1))
 #define kilobytes(n) ((n) << 10)
 #define megabytes(n) ((n) << 20)
 #define gigabytes(n) ((n) << 30)
@@ -334,7 +335,7 @@ typedef struct Arena {
          then also update Arena2 free mechanism                           \
        */                                                                 \
     }                                                                     \
-  } while (0);
+  } while (0)
 
 typedef struct PoolSlot {
   struct PoolSlot *next;
@@ -627,6 +628,25 @@ static_assert(CIN_PTR == 8 ? (CIN_ARRAY_SIZE == 24) : true, "bytes updated (poss
       array3_free((arena), (a));                                                             \
     }                                                                                        \
     (a)->items[(a)->count++] = (item);                                                       \
+  } while (0)
+
+#define array3_to_no_k(arena, a)                                        \
+  do {                                                                  \
+    uint32_t _nbytes = align_to_size((a)->count * (*(a)->items));       \
+    uint32_t _diff = _nbytes - (a)->bytes;                              \
+    if (_diff >= CIN_ARENA_MIN) {                                       \
+      arena3_nfree((arena), (uint8_t *)(a)->items + (a)->bytes, _diff); \
+    }                                                                   \
+    (a)->capacity = _nbytes / sizeof(*(a)->items);                      \
+    assert((a)->capacity >= (a)->count);                                \
+    (a)->bytes = _nbytes;                                               \
+    (a)->k_bytes = 0;                                                   \
+  } while (0)
+
+#define array3_pop(arena, a) \
+  do {                       \
+    assert((a)->count);      \
+    --(a)->count;            \
   } while (0)
 
 // https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
@@ -2657,6 +2677,7 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len, TempDo
   assert(n >= 0);
   if (!n) return;
   array3_assign(&docs.arena3, result, (uint32_t)n, true);
+  array3_to_no_k(&docs.arena3, result);
   result->count = 0;
   for (int32_t i = l_bound; i <= r_bound; ++i) {
     int32_t doc = docs.suffix_to_doc[i];
@@ -2676,7 +2697,7 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len, TempDo
 #define CIN_INSTANCE_POOL_CAP 4
 #define CIN_IO_ARENA_CAP megabytes(2)
 #define CIN_READ_SIZE kilobytes(16)
-#define CIN_WRITE_SIZE align_block(CIN_MAX_PATH_BYTES) + block_bytes(2)
+#define CIN_WRITE_SIZE align_to_block(CIN_MAX_PATH_BYTES) + block_bytes(2)
 
 typedef enum {
   MPV_READ,
@@ -3352,7 +3373,7 @@ static inline bool validate_screens(void) {
 #define CIN_MPVCALL_LEN cin_strlen(CIN_MPVCALL)
 #define CIN_MPVCALL_DIGITS 19
 #define CIN_MPVCALL_GEOMETRY_LEN block_bytes(2)
-#define CIN_MPVCALL_BUF align_block(CIN_MPVCALL_LEN + CIN_MPVCALL_DIGITS + CIN_MPVCALL_GEOMETRY_LEN)
+#define CIN_MPVCALL_BUF align_to_block(CIN_MPVCALL_LEN + CIN_MPVCALL_DIGITS + CIN_MPVCALL_GEOMETRY_LEN)
 
 static void mpv_spawn(Instance *instance, size_t index) {
   static wchar_t mpv_command[CIN_MPVCALL_BUF] = {CIN_MPVCALL};
