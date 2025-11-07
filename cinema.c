@@ -270,9 +270,11 @@ typedef struct Arena {
   size_t capacity;
 } Arena;
 
-#define CIN_PTR __SIZEOF_POINTER__
+#define likely(x) __builtin_expect(!!(x), 1)
+#define unlikely(x) __builtin_expect(!!(x), 0)
 #define cin_ispow2(n) ((n) && ((n) & ((n) - 1)) == 0)
 #define align(a, b) (((a) + (b) - 1) & (~((b) - 1)))
+#define CIN_PTR __SIZEOF_POINTER__
 #define align_size(T) max(CIN_PTR, __alignof(T))
 #define block_bytes(n) ((n) * (CIN_PTR * 8))
 #define align_block(n) align((n), block_bytes(1))
@@ -595,32 +597,36 @@ static_assert(CIN_PTR == 8 ? (CIN_ARRAY_SIZE == 24) : true, "bytes updated (poss
   } while (0)
 
 #define array3_alloc(arena, slice, zero) \
-  arena3_slice_assign((arena), &slice, CIN_ARRAY_SIZE, align_size(CIN_ARRAY_SIZE), (zero));
+  arena3_slice_assign((arena), &slice, CIN_ARRAY_SIZE, align_size(CIN_ARRAY_SIZE), (zero))
 
-#define array3_free(arena, a)                           \
-  arena3_free((arena), {.items = (uint8_t *)(a)->items, \
-                        .k = (a)->k_bytes,              \
-                        .size = (a)->bytes})
+#define array3_free(arena, a)                                         \
+  arena3_free((arena), &(Arena_Slice){.items = (uint8_t *)(a)->items, \
+                                      .k = (a)->k_bytes,              \
+                                      .size = (a)->bytes})
 
-#define array_3_free_nested(arena, a)                    \
-  do {                                                   \
-    array3_free((arena), (a));                           \
-    arena3_free_no_k((arena), {.items = (uint8_t *)(a),  \
-                               .k = 0,                   \
-                               .size = CIN_ARRAY_SIZE}); \
+#define array_3_free_nested(arena, a)                                  \
+  do {                                                                 \
+    array3_free((arena), (a));                                         \
+    arena3_free_no_k((arena), &(Arena_Slice){.items = (uint8_t *)(a),  \
+                                             .k = 0,                   \
+                                             .size = CIN_ARRAY_SIZE}); \
   } while (0)
 
-#define array3_push(arena, a, item, zero)                            \
-  do {                                                               \
-    /*TODO: if ((a)->count == (a)->capacity) {                       \
-      Arena_Slice _tmp = {0};                                        \
-      array3_assign((arena), &_tmp, pow2((a)->k_bytes + 1), (zero)); \
-      memcpy(_tmp.items, (a)->items, (a)->count);                    \
-      array3_free((arena), (a));                                     \
-      (a)->capacity = _tmp.size / sizeof(*(a)->items);               \
-      (a)->k_bytes = _tmp.k;                                         \
-    }*/                                                              \
-    (a)->items[(a)->count++] = (item);                               \
+#define array3_push(arena, a, item, zero)                                                    \
+  do {                                                                                       \
+    if ((a)->count == (a)->capacity) {                                                       \
+      if (unlikely((a)->k_bytes == CIN_ARENA_MAX_K)) {                                       \
+        assert(false && "array silently overflows");                                         \
+      }                                                                                      \
+      Arena_Slice _tmp = {0};                                                                \
+      arena3_slice_assign((arena), &_tmp, (a)->bytes << 1, align_size(*(a)->items), (zero)); \
+      memcpy(_tmp.items, (a)->items, (a)->bytes);                                            \
+      (a)->capacity = _tmp.size / sizeof(*(a)->items);                                       \
+      (a)->bytes = _tmp.size;                                                                \
+      (a)->k_bytes = _tmp.k;                                                                 \
+      array3_free((arena), (a));                                                             \
+    }                                                                                        \
+    (a)->items[(a)->count++] = (item);                                                       \
   } while (0)
 
 // https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
