@@ -285,6 +285,21 @@ typedef struct Arena {
 #define CIN_ARENA_CAP kilobytes(32)
 #define CIN_ARENA_BYTES align(sizeof(Arena), 64ULL)
 
+static inline uint32_t log2_floor(uint32_t n) {
+  assert(n > 0U);
+  return 31U - (uint32_t)__builtin_clz(n);
+}
+
+static inline uint32_t log2_ceil(uint32_t n) {
+  assert(n > 1U);
+  return 32U - (uint32_t)__builtin_clz(n - 1U);
+}
+
+static inline uint32_t pow2(uint32_t exponent) {
+  assert(exponent <= 31U);
+  return 1U << exponent;
+}
+
 #define arena_alloc(a, bytes)                                                 \
   do {                                                                        \
     assert(CIN_ARENA_BYTES % 2 == 0);                                         \
@@ -431,20 +446,8 @@ typedef struct Pool {
     }                                                                                             \
   } while (0)
 
-static inline uint32_t log2_floor(uint32_t n) {
-  assert(n > 0U);
-  return 31U - (uint32_t)__builtin_clz(n);
-}
-
-static inline uint32_t log2_ceil(uint32_t n) {
-  assert(n > 1U);
-  return 32U - (uint32_t)__builtin_clz(n - 1U);
-}
-
-static inline uint32_t pow2(uint32_t exponent) {
-  assert(exponent <= 31U);
-  return 1U << exponent;
-}
+#define cache_create(arena) \
+  arena3_bump((arena), CIN_CACHE_SIZE, align_size(CIN_CACHE_SIZE))
 
 // Power of 2 allocation, where the max is 1U << 31,
 // chosen to support max of 32-bit libsais.
@@ -506,7 +509,6 @@ static inline Arena_Chunk *arena3_chunk_create(Arena3 *arena, uint32_t bytes) {
 
 static inline void arena3_free_pow2(Arena3 *arena, Arena_Slice *slice) {
   assert(slice->k && "supposed to free pow2");
-  assert(cin_ispow2(slice->size) && "size is not pow2");
   Arena_Block *block = (Arena_Block *)slice->items;
   uint32_t i = size_class(slice->k);
   block->next = arena->free_list[i];
@@ -516,19 +518,15 @@ static inline void arena3_free_pow2(Arena3 *arena, Arena_Slice *slice) {
 static inline uint32_t arena3_free_pow1(Arena3 *arena, Arena_Slice *slice) {
   assert(!slice->k && "if slice is certainly pow2, just free it directly");
   assert(slice->size && "trying to free void memory");
-  uint32_t occupied = slice->size;
-  uint32_t freed = 0;
-  while (occupied >= CIN_ARENA_MIN) {
-    uint8_t *pos = slice->items + freed;
-    uint32_t k = log2_floor(occupied);
-    uint32_t bytes = pow2(k);
-    assert(UINT_MAX - bytes >= freed && "unsigned int overflow");
-    Arena_Slice src = {pos, bytes, k};
+  uint32_t occupied = slice->size & ~7U;
+  while (occupied) {
+    uint32_t k = (uint32_t)__builtin_ctz(occupied);
+    uint8_t *pos = slice->items + pow2(k);
+    Arena_Slice src = {.items = pos, .k = k, .size = 0};
     arena3_free_pow2(arena, &src);
-    freed += bytes;
-    occupied -= bytes;
+    occupied &= occupied - 1;
   }
-  return freed;
+  return slice->size - occupied;
 }
 
 static inline uint32_t arena3_free_pos(Arena3 *arena, uint8_t *pos, uint32_t n) {
@@ -600,7 +598,7 @@ static inline void arena3_slice_free_items(Arena3 *arena, Arena_Slice *slice) {
   static_assert(cin_ispow2(CIN_ARENA_SLICE_SIZE), "expected slice to be pow2");
   Arena_Slice stack_slice = {.items = (uint8_t *)slice,
                              .k = log2_floor(CIN_ARENA_SLICE_SIZE),
-                             .size = CIN_ARENA_SLICE_SIZE};
+                             .size = 0};
   arena3_free_pow2(arena, &stack_slice);
 #else
   Arena_Slice stack_slice = {.items = (uint8_t *)slice,
@@ -653,9 +651,9 @@ static_assert(CIN_PTR == 8 ? (CIN_ARRAY_SIZE == 24) : true, "bytes updated (poss
 #define array3_free_items(arena, a)                                        \
   arena3_free_pow2((arena), &(Arena_Slice){.items = (uint8_t *)(a)->items, \
                                            .k = (a)->bytes_capacity_k,     \
-                                           .size = (a)->bytes_capacity})
+                                           .size = 0})
 
-#define array_3_free(arena, a)                                         \
+#define array3_free(arena, a)                                          \
   do {                                                                 \
     array3_free_items((arena), (a));                                   \
     arena3_free_pow1((arena), &(Arena_Slice){.items = (uint8_t *)(a),  \
@@ -786,7 +784,7 @@ static_assert(CIN_PTR == 8 ? (CIN_ARRAY_SIZE == 24) : true, "bytes updated (poss
 #define array3_bytes(a) \
   ((a)->count * sizeof(*(a)->items))
 
-#define array3_to_no_k(arena, a)                                        \
+#define array3_to_pow1(arena, a)                                        \
   do {                                                                  \
     uint32_t _nbytes = align_to_size(array3_bytes((a)));                \
     assert(_nbytes <= (a)->bytes_capacity);                             \
@@ -2648,7 +2646,7 @@ static bool init_config(const char *filename) {
   array_free(dir_stack);
   array_free(conf_parser.scopes);
   array_free(conf_parser.buf);
-  array3_to_no_k(&docs.arena3, &docs);
+  array3_to_pow1(&docs.arena3, &docs);
   assert(array3_bytes(&docs) <= CIN_ARENA_MAX && "overflew k = 31");
   if (array3_bytes(&docs) == CIN_ARENA_MAX) {
     // extremely rare case where we exceed INT_MAX by 1 byte,
@@ -3715,6 +3713,7 @@ static void cmd_search_executor(void) {
     overlap_write(instance, MPV_LOADFILE, "loadfile",
                   (char *)docs.items + slice.items[i % (size_t)slice.count], NULL);
   }
+  array3_free_items(&docs.arena3, &slice);
 }
 
 static void cmd_search_validator(void) {
