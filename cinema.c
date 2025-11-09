@@ -449,6 +449,20 @@ typedef struct Pool {
 #define cache_create(arena) \
   arena3_bump((arena), CIN_CACHE_SIZE, align_size(CIN_CACHE_SIZE))
 
+#define cache_free_items(arena, c)                                                        \
+  for ((c)->free_list = (c)->head; (c)->free_list; (c)->free_list = (c)->free_list->next) \
+  arena3_free_pow1((arena), &(Arena_Slice){.items = (uint8_t *)(c)->free_list,            \
+                                           .size = (c)->cache_node_bytes,                 \
+                                           .k = 0})
+
+#define cache_free(arena, c)                                           \
+  do {                                                                 \
+    cache_free_items((arena), (c));                                    \
+    arena3_free_pow1((arena), &(Arena_Slice){.items = (uint8_t *)(c),  \
+                                             .k = 0,                   \
+                                             .size = CIN_CACHE_SIZE}); \
+  } while (0)
+
 // Power of 2 allocation, where the max is 1U << 31,
 // chosen to support max of 32-bit libsais.
 static const uint32_t CIN_SIZE_CLASSES[] = {
@@ -518,7 +532,8 @@ static inline void arena3_free_pow2(Arena3 *arena, Arena_Slice *slice) {
 static inline uint32_t arena3_free_pow1(Arena3 *arena, Arena_Slice *slice) {
   assert(!slice->k && "if slice is certainly pow2, just free it directly");
   assert(slice->size && "trying to free void memory");
-  uint32_t occupied = slice->size & ~7U;
+  uint32_t aligned_size = slice->size & ~7U;
+  uint32_t occupied = aligned_size;
   while (occupied) {
     uint32_t k = (uint32_t)__builtin_ctz(occupied);
     uint8_t *pos = slice->items + pow2(k);
@@ -526,7 +541,7 @@ static inline uint32_t arena3_free_pow1(Arena3 *arena, Arena_Slice *slice) {
     arena3_free_pow2(arena, &src);
     occupied &= occupied - 1;
   }
-  return slice->size - occupied;
+  return aligned_size;
 }
 
 static inline uint32_t arena3_free_pos(Arena3 *arena, uint8_t *pos, uint32_t n) {
@@ -2860,6 +2875,7 @@ typedef struct Instance {
 
 static struct {
   Arena *arena;
+  Arena3 arena3;
   Arena *iocp_arena;
   Pool writes;
   Pool instances;
@@ -3130,6 +3146,8 @@ static inline bool init_mpv(void) {
   arena_alloc(cin_io.iocp_arena, CIN_IO_ARENA_CAP);
   pool_assign(&cin_io.writes, OverlappedWrite, cin_io.arena);
   pool_assign(&cin_io.instances, Instance, cin_io.arena);
+  arena3_chunk_create(&cin_io.arena3, CIN_IO_ARENA_CAP);
+  cache_init(&cin_io.arena3, &cin_io, 1);
   cin_io.iocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
   if (!cin_io.iocp) {
     log_last_error("Failed to create iocp");
