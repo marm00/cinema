@@ -352,51 +352,6 @@ static inline uint32_t pow2(uint32_t exponent) {
     }                                                                     \
   } while (0)
 
-typedef struct PoolSlot {
-  struct PoolSlot *next;
-} PoolSlot;
-
-typedef struct Pool {
-  size_t item_bytes;
-  size_t item_align;
-  Arena *arena;
-  PoolSlot *free_list;
-} Pool;
-
-#define pool_assign(p, T, a)         \
-  do {                               \
-    assert((a));                     \
-    (p)->arena = (a);                \
-    (p)->item_bytes = sizeof(T);     \
-    (p)->item_align = align_size(T); \
-  } while (0)
-
-#define pool_alloc(p, T, n)                   \
-  do {                                        \
-    assert(!(p)->arena);                      \
-    arena_alloc((p)->arena, sizeof(T) * (n)); \
-    (p)->item_bytes = sizeof(T);              \
-    (p)->item_align = align_size(T);          \
-  } while (0)
-
-#define pool_push(p, out, zero)                                          \
-  do {                                                                   \
-    if ((p)->free_list) {                                                \
-      out = (void *)(p)->free_list;                                      \
-      (p)->free_list = (p)->free_list->next;                             \
-      if ((zero)) ZeroMemory((out), sizeof(*(out)));                     \
-    } else {                                                             \
-      arena_push_raw((p)->arena, (p)->item_bytes, (p)->item_align, out); \
-    }                                                                    \
-  } while (0)
-
-#define pool_free(p, address)               \
-  do {                                      \
-    PoolSlot *_tmp = (PoolSlot *)(address); \
-    _tmp->next = (p)->free_list;            \
-    (p)->free_list = _tmp;                  \
-  } while (0)
-
 #define cache_node_struct_members(T_struct) \
   struct T_struct *next;                    \
   struct T_struct *next_free
@@ -431,20 +386,20 @@ typedef struct Pool {
 #define CIN_CACHE_NODE_SIZE sizeof(cache_node_struct(void))
 #define CIN_CACHE_SIZE sizeof(cache_struct(void))
 
-#define cache_init(arena, c, n)                                           \
+#define cache_init(arena, c, n, init_free)                                \
   do {                                                                    \
-    assert((n > 0));                                                      \
+    assert((n) > 0 && "must initialize at least 1 node");                 \
     (c)->cache_node_bytes = sizeof(*(c)->head);                           \
     (c)->cache_node_align = align_size(*(c)->head);                       \
     (c)->head = (void *)arena3_bump((arena), (c)->cache_node_bytes * (n), \
                                     (c)->cache_node_align);               \
-    (c)->free_list = (c)->head;                                           \
+    if ((init_free)) (c)->free_list = (c)->head;                          \
     (c)->tail = (c)->head;                                                \
     for (uint32_t _i = 1, _offset = (c)->cache_node_bytes;                \
          _i < (n);                                                        \
          ++_i, _offset += (c)->cache_node_bytes) {                        \
       (c)->tail->next = (void *)((uint8_t *)(c)->head + _offset);         \
-      (c)->tail->next_free = (c)->tail->next;                             \
+      if ((init_free)) (c)->tail->next_free = (c)->tail->next;            \
       (c)->tail = (c)->tail->next;                                        \
     }                                                                     \
   } while (0)
@@ -468,6 +423,7 @@ typedef struct Pool {
 
 #define cache_get(arena, c, out_node, zero)                                 \
   do {                                                                      \
+    assert((c)->head && "forgot to cache_init");                            \
     if ((c)->free_list) {                                                   \
       out_node = (c)->free_list;                                            \
       (c)->free_list = (c)->free_list->next_free;                           \
@@ -481,7 +437,7 @@ typedef struct Pool {
       (c)->tail->next = (void *)arena3_bump((arena), (c)->cache_node_bytes, \
                                             (c)->cache_node_align);         \
       out_node = (c)->tail->next;                                           \
-      (c)->tail = (c)->tail->next;                                          \
+      (c)->tail = (out_node);                                               \
     }                                                                       \
   } while (0)
 
@@ -491,8 +447,8 @@ typedef struct Pool {
     (c)->free_list = (in_node);            \
   } while (0)
 
-#define cache_foreach(c, T, i, o) \
-  for (uint32_t i = 0; !i; i = 0) \
+#define cache_foreach(c, T, i, o)     \
+  for (uint32_t i = 0; i == 0; i = 1) \
     for (T *o = (c)->head; o; o = o->next, ++i)
 
 // Power of 2 allocation, where the max is 1U << 31,
@@ -847,7 +803,7 @@ static_assert(CIN_PTR == 8 ? (CIN_ARRAY_SIZE == 24) : true, "bytes updated (poss
 
 #define array3_foreach(a, T, i, o)                          \
   for (uint32_t i = 0, _j = 0; i < (a)->count; _j = 0, ++i) \
-    for (T o = (a)->items[i]; !_j; _j = 1)
+    for (T o = (a)->items[i]; _j == 0; _j = 1)
 
 // https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
 // A path can have 248 "characters" (260 - 12 = 248)
@@ -2866,8 +2822,6 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len, TempDo
   }
 }
 
-#define CIN_WRITE_POOL_CAP 32
-#define CIN_INSTANCE_POOL_CAP 4
 #define CIN_IO_ARENA_CAP megabytes(2)
 #define CIN_READ_SIZE kilobytes(16)
 #define CIN_WRITE_SIZE align_to_block(CIN_MAX_PATH_BYTES) + block_bytes(2)
@@ -2889,6 +2843,7 @@ typedef struct OverlappedWrite {
   OverlappedContext ovl_ctx;
   char buf[CIN_WRITE_SIZE];
   size_t bytes;
+  cache_node_struct_members(OverlappedWrite);
 } OverlappedWrite;
 
 typedef struct ReadBuffer {
@@ -2909,13 +2864,15 @@ typedef struct Instance {
   cache_node_struct_members(Instance);
 } Instance;
 
+cache_define(Writes_Cache, OverlappedWrite);
+cache_define(Instance_Cache, Instance);
+
 static struct {
   Arena *arena;
   Arena3 arena3;
   Arena *iocp_arena;
-  Pool writes;
-  Pool instances;
-  cache_struct_members(Instance);
+  Writes_Cache writes;
+  Instance_Cache instances;
   HANDLE iocp;
 } cin_io = {0};
 
@@ -2978,7 +2935,7 @@ static bool overlap_read(Instance *instance) {
 
 static bool overlap_write(Instance *instance, MPV_Packet type, const char *cmd, const char *arg1, const char *arg2) {
   OverlappedWrite *write = NULL;
-  pool_push(&cin_io.writes, write, true);
+  cache_get(&cin_io.arena3, &cin_io.writes, write, true);
   write->ovl_ctx.type = type;
   int64_t request_id = (int64_t)(uintptr_t)write;
   int32_t bytes = 0;
@@ -3090,7 +3047,7 @@ static inline void iocp_parse(Instance *instance, const char *buf_start, size_t 
     default:
       break;
     }
-    pool_free(&cin_io.writes, write);
+    cache_put(&cin_io.writes, write);
   }
 }
 
@@ -3180,10 +3137,9 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
 static inline bool init_mpv(void) {
   arena_alloc(cin_io.arena, CIN_IO_ARENA_CAP);
   arena_alloc(cin_io.iocp_arena, CIN_IO_ARENA_CAP);
-  pool_assign(&cin_io.writes, OverlappedWrite, cin_io.arena);
-  pool_assign(&cin_io.instances, Instance, cin_io.arena);
   arena3_chunk_create(&cin_io.arena3, CIN_IO_ARENA_CAP);
-  cache_init(&cin_io.arena3, &cin_io, 1);
+  cache_init(&cin_io.arena3, &cin_io.writes, 1, true);
+  cache_init(&cin_io.arena3, &cin_io.instances, 1, false);
   cin_io.iocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
   if (!cin_io.iocp) {
     log_last_error("Failed to create iocp");
@@ -3602,16 +3558,11 @@ static void mpv_spawn(Instance *instance, size_t index) {
   ++mpv_demand;
 }
 
-#define FOREACH_MPV(instance, i)                                                     \
-  for (size_t i = 0; !i; ++i)                                                        \
-    for (Instance *instance = cin_io.head; instance; instance = instance->next, ++i) \
-      if (instance->pipe)
-
-#define FOREACH_MPVTARGET(instance, i)                          \
+#define FOREACH_MPVTARGET(i, instance)                          \
   for (size_t i = 0, _j = 0, _s = cmd_ctx.numbers.items[0] - 1; \
        i < cmd_ctx.numbers.count;                               \
        _j = 0, _s = cmd_ctx.numbers.items[++i] - 1)             \
-    for (Instance *instance = cin_io.head;                      \
+    for (Instance *instance = cin_io.instances.head;            \
          _j <= _s && instance;                                  \
          instance = instance->next, ++_j)                       \
       if (_j == _s && instance->pipe)
@@ -3627,7 +3578,7 @@ static void cmd_help_validator(void) {
 
 static void cmd_reroll_executor(void) {
   // TODO: shuffle
-  FOREACH_MPVTARGET(instance, i) {
+  FOREACH_MPVTARGET(i, instance) {
     overlap_write(instance, MPV_LOADFILE, "loadfile", "d:/test/video.mp4", NULL);
   }
 }
@@ -3763,7 +3714,7 @@ static void cmd_search_executor(void) {
   document_listing(pattern, len - 1, &slice);
   // TODO:
   log_message(LOG_INFO, "Slice count=%d, cap=%d", slice.count, slice.capacity);
-  FOREACH_MPVTARGET(instance, i) {
+  FOREACH_MPVTARGET(i, instance) {
     overlap_write(instance, MPV_LOADFILE, "loadfile",
                   (char *)docs.items + slice.items[i % (size_t)slice.count], NULL);
   }
@@ -3855,7 +3806,7 @@ static void cmd_swap_validator(void) {
 }
 
 static void cmd_quit_executor(void) {
-  FOREACH_MPV(instance, i) {
+  cache_foreach(&cin_io.instances, Instance, i, instance) {
     log_message(LOG_DEBUG, "Closing PID=%lu", instance->pi.dwProcessId);
     overlap_write(instance, MPV_QUIT, "quit", NULL, NULL);
   }
@@ -3874,30 +3825,22 @@ static void cmd_layout_executor(void) {
   cmd_ctx.layout = cmd_ctx.queued_layout;
   size_t screen = 0;
   mpv_lock();
-  if (cin_io.head) {
-    for (Instance *old = cin_io.head; old; old = old->next, ++screen) {
-      if (screen >= next_count) {
-        if (old->pipe) overlap_write(old, MPV_QUIT, "quit", NULL, NULL);
-      } else if (old->pipe) {
-        assert(IsWindow(old->window));
-        const char *geometry = (char *)screen_arena.items + cmd_ctx.layout->items[screen].offset;
-        overlap_write(old, MPV_WRITE, "set_property", "geometry", geometry);
-      } else {
-        mpv_spawn(old, screen);
-      }
+  cache_foreach(&cin_io.instances, Instance, i, old) {
+    if (screen >= next_count) {
+      if (old->pipe) overlap_write(old, MPV_QUIT, "quit", NULL, NULL);
+    } else if (old->pipe) {
+      log_message(LOG_INFO, "i=%u, screen=%zu", i);
+      assert(IsWindow(old->window));
+      const char *geometry = (char *)screen_arena.items + cmd_ctx.layout->items[screen].offset;
+      overlap_write(old, MPV_WRITE, "set_property", "geometry", geometry);
+    } else {
+      mpv_spawn(old, screen);
     }
-  } else {
-    pool_push(&cin_io.instances, cin_io.head, false);
-    mpv_spawn(cin_io.head, screen);
-    cin_io.tail = cin_io.head;
     ++screen;
   }
   for (Instance *next = NULL; screen < next_count; ++screen) {
-    assert(&cin_io.instances);
-    pool_push(&cin_io.instances, next, false);
+    cache_get(&cin_io.arena3, &cin_io.instances, next, false);
     mpv_spawn(next, screen);
-    cin_io.tail->next = next;
-    cin_io.tail = next;
   }
   if (!mpv_demand) mpv_unlock();
 }
