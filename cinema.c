@@ -471,7 +471,11 @@ typedef struct Pool {
     if ((c)->free_list) {                                                   \
       out_node = (c)->free_list;                                            \
       (c)->free_list = (c)->free_list->next_free;                           \
-      if ((zero)) ZeroMemory((out_node), (c)->cache_node_bytes);            \
+      if ((zero)) {                                                         \
+        void *_next = (out_node)->next;                                     \
+        ZeroMemory((out_node), (c)->cache_node_bytes);                      \
+        (out_node)->next = _next;                                           \
+      }                                                                     \
     } else {                                                                \
       assert(!(c)->tail->next);                                             \
       (c)->tail->next = (void *)arena3_bump((arena), (c)->cache_node_bytes, \
