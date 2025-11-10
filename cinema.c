@@ -263,13 +263,6 @@ static inline bool init_os(void) {
   return true;
 }
 
-typedef struct Arena {
-  struct Arena *prev;
-  struct Arena *curr;
-  size_t count;
-  size_t capacity;
-} Arena;
-
 #define likely(x) __builtin_expect(!!(x), 1)
 #define unlikely(x) __builtin_expect(!!(x), 0)
 #define cin_ispow2(n) ((n) && ((n) & ((n) - 1)) == 0)
@@ -300,57 +293,170 @@ static inline uint32_t pow2(uint32_t exponent) {
   return 1U << exponent;
 }
 
-#define arena_alloc(a, bytes)                                                 \
-  do {                                                                        \
-    assert(CIN_ARENA_BYTES % 2 == 0);                                         \
-    size_t _dwSize = align((bytes), cin_system.page_size);                    \
-    (a) = VirtualAlloc(NULL, _dwSize, cin_system.alloc_type, PAGE_READWRITE); \
-    (a)->curr = (a);                                                          \
-    (a)->prev = NULL;                                                         \
-    (a)->count = CIN_ARENA_BYTES;                                             \
-    (a)->capacity = _dwSize;                                                  \
-  } while (0)
+// Power of 2 allocation, where the max is 1U << 31,
+// chosen to support max of 32-bit libsais.
+static const uint32_t CIN_SIZE_CLASSES[] = {
+    8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072,
+    262144, 524288, 1048576, 2097152, 4194304, 8388608, 16777216, 33554432, 67108864,
+    134217728, 268435456, 536870912, 1073741824, 2147483648};
 
-#define arena_push_raw(a, bytes, alignment, out)              \
-  do {                                                        \
-    assert((a));                                              \
-    assert((a)->curr);                                        \
-    size_t _left = align((a)->curr->count, (alignment));      \
-    size_t _right = _left + (bytes);                          \
-    if (_right >= (a)->curr->capacity) {                      \
-      size_t _cap = (a)->curr->capacity;                      \
-      if ((bytes) + CIN_ARENA_BYTES > _cap) {                 \
-        _cap = align((bytes) + CIN_ARENA_BYTES, (alignment)); \
-      }                                                       \
-      Arena *_tmp = NULL;                                     \
-      arena_alloc(_tmp, _cap);                                \
-      _tmp->prev = (a)->curr;                                 \
-      (a)->curr = _tmp;                                       \
-      _left = align((a)->curr->count, (alignment));           \
-      _right = _left + (bytes);                               \
-    }                                                         \
-    out = (void *)((uint8_t *)(a)->curr + _left);             \
-    (a)->curr->count = _right;                                \
-  } while (0)
+#define CIN_ARENA_MIN_K 3U
+#define CIN_ARENA_MAX_K 31U
+#define CIN_NUM_CLASSES (1U + CIN_ARENA_MAX_K - CIN_ARENA_MIN_K)
+#define CIN_ARENA_MIN (1U << CIN_ARENA_MIN_K)
+#define CIN_ARENA_MAX (1U << CIN_ARENA_MAX_K)
+static_assert(CIN_ARENA_MIN == 8U, "min alloc should be 8 bytes");
+static_assert(CIN_ARENA_MAX == gigabytes(2U), "max alloc should be 2gb");
 
-#define arena_push(a, T, n, out) arena_push_raw((a), sizeof(T) * (n), align_size(T), out);
+static inline uint32_t size_class(uint32_t k) {
+  assert(k >= CIN_ARENA_MIN_K);
+  return k - CIN_ARENA_MIN_K;
+}
 
-#define arena_free(a, T, n)                                               \
-  do {                                                                    \
-    assert((sizeof(T) * (n)) < (a)->curr->capacity);                      \
-    assert((a)->curr->count >= CIN_ARENA_BYTES);                          \
-    assert((a)->curr->count - CIN_ARENA_BYTES >= (sizeof(T) * (n)));      \
-    (a)->curr->count -= sizeof(T) * (n);                                  \
-    ZeroMemory((uint8_t *)(a)->curr + (a)->curr->count, sizeof(T) * (n)); \
-    if ((a)->curr->count == CIN_ARENA_BYTES &&                            \
-        (a)->curr->prev &&                                                \
-        (a)->curr->prev->count < (a)->curr->prev->capacity) {             \
-      /* TODO: memory in prev could be reused,                            \
-         same for capacity overflow in general push,                      \
-         then also update Arena2 free mechanism                           \
-       */                                                                 \
-    }                                                                     \
-  } while (0)
+typedef struct Arena_Block {
+  struct Arena_Block *next;
+} Arena_Block;
+
+typedef struct Arena_Chunk {
+  struct Arena_Chunk *prev;
+  uint32_t count;
+  uint32_t capacity;
+} Arena_Chunk;
+
+typedef struct Arena {
+  Arena_Chunk *curr;
+  Arena_Block *free_list[CIN_NUM_CLASSES];
+} Arena;
+
+typedef struct Arena_Slice {
+  uint8_t *items;
+  uint32_t size;
+  // if set, assumes size = 1 << k
+  uint32_t k;
+} Arena_Slice;
+
+static_assert(sizeof(Arena_Block) == CIN_PTR, "should just hold a pointer");
+#define CIN_ARENA_SLICE_SIZE sizeof(Arena_Slice)
+#define CIN_ARENA_HEADER align(sizeof(Arena_Chunk), CIN_ARENA_MIN)
+
+static inline Arena_Chunk *arena_chunk_create(Arena *arena, uint32_t bytes) {
+  assert(arena);
+  assert(cin_system.page_size <= CIN_ARENA_MAX);
+  size_t dwSize = align(bytes, cin_system.page_size);
+  Arena_Chunk *chunk = VirtualAlloc(NULL, dwSize, cin_system.alloc_type, PAGE_READWRITE);
+  chunk->prev = arena->curr;
+  chunk->count = CIN_ARENA_HEADER;
+  chunk->capacity = (uint32_t)dwSize;
+  arena->curr = chunk;
+  return chunk;
+}
+
+static inline void arena_free_pow2(Arena *arena, Arena_Slice *slice) {
+  assert(slice->k && "supposed to free pow2");
+  Arena_Block *block = (Arena_Block *)slice->items;
+  uint32_t i = size_class(slice->k);
+  block->next = arena->free_list[i];
+  arena->free_list[i] = block;
+}
+
+static inline uint32_t arena_free_pow1(Arena *arena, Arena_Slice *slice) {
+  assert(!slice->k && "if slice is certainly pow2, just free it directly");
+  assert(slice->size && "trying to free void memory");
+  uint32_t aligned_size = slice->size & ~7U;
+  uint32_t occupied = aligned_size;
+  while (occupied) {
+    uint32_t k = (uint32_t)__builtin_ctz(occupied);
+    uint8_t *pos = slice->items + pow2(k);
+    Arena_Slice src = {.items = pos, .k = k, .size = 0};
+    arena_free_pow2(arena, &src);
+    occupied &= occupied - 1;
+  }
+  return aligned_size;
+}
+
+static inline uint32_t arena_free_pos(Arena *arena, uint8_t *pos, uint32_t n) {
+  Arena_Slice slice = {.items = pos, .k = 0, .size = n};
+  uint32_t freed = arena_free_pow1(arena, &slice);
+  return freed;
+}
+
+static inline uint8_t *arena_bump(Arena *arena, uint32_t bytes, uint32_t alignment) {
+  assert(arena);
+  assert(arena->curr);
+  assert(CIN_ARENA_MAX > bytes);
+  uint32_t left = align(arena->curr->count, alignment);
+  uint32_t right = left + bytes;
+  assert(right <= CIN_ARENA_MAX);
+  if (right >= arena->curr->capacity) {
+    uint8_t *free_pos = (uint8_t *)arena->curr + arena->curr->count;
+    uint32_t free_n = arena->curr->capacity - arena->curr->count;
+    uint32_t freed = arena_free_pos(arena, free_pos, free_n);
+    arena->curr->count += freed;
+    uint32_t cap = arena->curr->capacity;
+    if (bytes + CIN_ARENA_HEADER > cap) {
+      cap = align(bytes + CIN_ARENA_HEADER, alignment);
+    }
+    arena_chunk_create(arena, cap);
+    left = align(arena->curr->count, alignment);
+    right = left + bytes;
+  }
+  arena->curr->count = right;
+  return (uint8_t *)arena->curr + left;
+}
+
+static inline void arena_slice_reinit(Arena *arena, Arena_Slice *slice, uint32_t bytes, uint32_t alignment, bool zero) {
+  assert(arena);
+  assert(arena->curr);
+  assert(slice);
+  assert(CIN_ARENA_MAX > bytes);
+  slice->k = log2_ceil(bytes);
+  slice->size = pow2(slice->k);
+  uint32_t class = size_class(slice->k);
+  Arena_Block *block = arena->free_list[class];
+  if (block) {
+    arena->free_list[class] = block->next;
+    slice->items = (uint8_t *)block;
+    if (zero) ZeroMemory(slice->items, slice->size);
+  } else {
+    slice->items = arena_bump(arena, slice->size, alignment);
+  }
+  assert(slice->items);
+}
+
+static inline Arena_Slice *arena_slice_create(Arena *arena, uint32_t bytes, uint32_t alignment, bool zero) {
+  Arena_Slice stack_slice = {0};
+  arena_slice_reinit(arena, &stack_slice, CIN_ARENA_SLICE_SIZE, __alignof(Arena_Slice), false);
+  assert(stack_slice.items);
+  assert(stack_slice.k == log2_ceil(CIN_ARENA_SLICE_SIZE));
+  assert(stack_slice.size == CIN_ARENA_SLICE_SIZE);
+  // both the slice and its contents are stored in the arena (at arbitrary positions)
+  Arena_Slice *heap_slice = (Arena_Slice *)stack_slice.items;
+  arena_slice_reinit(arena, heap_slice, bytes, alignment, zero);
+  assert(heap_slice->items);
+  assert(heap_slice->k);
+  assert(heap_slice->size);
+  return heap_slice;
+}
+
+static inline void arena_slice_free_items(Arena *arena, Arena_Slice *slice) {
+#if __SIZEOF_POINTER__ == 8
+  static_assert(cin_ispow2(CIN_ARENA_SLICE_SIZE), "expected slice to be pow2");
+  Arena_Slice stack_slice = {.items = (uint8_t *)slice,
+                             .k = log2_floor(CIN_ARENA_SLICE_SIZE),
+                             .size = 0};
+  arena_free_pow2(arena, &stack_slice);
+#else
+  Arena_Slice stack_slice = {.items = (uint8_t *)slice,
+                             .k = 0,
+                             .size = CIN_ARENA_SLICE_SIZE};
+  arena_free_pow1(arena, &stack_slice);
+#endif
+}
+
+static inline void arena_slice_free(Arena *arena, Arena_Slice *slice) {
+  arena_free_pow2(arena, slice);
+  arena_slice_free_items(arena, slice);
+}
 
 #define cache_node_struct_members(T_struct) \
   struct T_struct *next;                    \
@@ -386,59 +492,59 @@ static inline uint32_t pow2(uint32_t exponent) {
 #define CIN_CACHE_NODE_SIZE sizeof(cache_node_struct(void))
 #define CIN_CACHE_SIZE sizeof(cache_struct(void))
 
-#define cache_init(arena, c, n, init_free)                                \
-  do {                                                                    \
-    assert((n) > 0 && "must initialize at least 1 node");                 \
-    (c)->cache_node_bytes = sizeof(*(c)->head);                           \
-    (c)->cache_node_align = align_size(*(c)->head);                       \
-    (c)->head = (void *)arena3_bump((arena), (c)->cache_node_bytes * (n), \
-                                    (c)->cache_node_align);               \
-    if ((init_free)) (c)->free_list = (c)->head;                          \
-    (c)->tail = (c)->head;                                                \
-    for (uint32_t _i = 1, _offset = (c)->cache_node_bytes;                \
-         _i < (n);                                                        \
-         ++_i, _offset += (c)->cache_node_bytes) {                        \
-      (c)->tail->next = (void *)((uint8_t *)(c)->head + _offset);         \
-      if ((init_free)) (c)->tail->next_free = (c)->tail->next;            \
-      (c)->tail = (c)->tail->next;                                        \
-    }                                                                     \
+#define cache_init(arena, c, n, init_free)                               \
+  do {                                                                   \
+    assert((n) > 0 && "must initialize at least 1 node");                \
+    (c)->cache_node_bytes = sizeof(*(c)->head);                          \
+    (c)->cache_node_align = align_size(*(c)->head);                      \
+    (c)->head = (void *)arena_bump((arena), (c)->cache_node_bytes * (n), \
+                                   (c)->cache_node_align);               \
+    if ((init_free)) (c)->free_list = (c)->head;                         \
+    (c)->tail = (c)->head;                                               \
+    for (uint32_t _i = 1, _offset = (c)->cache_node_bytes;               \
+         _i < (n);                                                       \
+         ++_i, _offset += (c)->cache_node_bytes) {                       \
+      (c)->tail->next = (void *)((uint8_t *)(c)->head + _offset);        \
+      if ((init_free)) (c)->tail->next_free = (c)->tail->next;           \
+      (c)->tail = (c)->tail->next;                                       \
+    }                                                                    \
   } while (0)
 
 #define cache_create(arena) \
-  arena3_bump((arena), CIN_CACHE_SIZE, align_size(CIN_CACHE_SIZE))
+  arena_bump((arena), CIN_CACHE_SIZE, align_size(CIN_CACHE_SIZE))
 
 #define cache_free_items(arena, c)                                                        \
   for ((c)->free_list = (c)->head; (c)->free_list; (c)->free_list = (c)->free_list->next) \
-  arena3_free_pow1((arena), &(Arena_Slice){.items = (uint8_t *)(c)->free_list,            \
-                                           .size = (c)->cache_node_bytes,                 \
-                                           .k = 0})
+  arena_free_pow1((arena), &(Arena_Slice){.items = (uint8_t *)(c)->free_list,             \
+                                          .size = (c)->cache_node_bytes,                  \
+                                          .k = 0})
 
-#define cache_free(arena, c)                                           \
-  do {                                                                 \
-    cache_free_items((arena), (c));                                    \
-    arena3_free_pow1((arena), &(Arena_Slice){.items = (uint8_t *)(c),  \
-                                             .k = 0,                   \
-                                             .size = CIN_CACHE_SIZE}); \
+#define cache_free(arena, c)                                          \
+  do {                                                                \
+    cache_free_items((arena), (c));                                   \
+    arena_free_pow1((arena), &(Arena_Slice){.items = (uint8_t *)(c),  \
+                                            .k = 0,                   \
+                                            .size = CIN_CACHE_SIZE}); \
   } while (0)
 
-#define cache_get(arena, c, out_node, zero)                                 \
-  do {                                                                      \
-    assert((c)->head && "forgot to cache_init");                            \
-    if ((c)->free_list) {                                                   \
-      out_node = (c)->free_list;                                            \
-      (c)->free_list = (c)->free_list->next_free;                           \
-      if ((zero)) {                                                         \
-        void *_next = (out_node)->next;                                     \
-        ZeroMemory((out_node), (c)->cache_node_bytes);                      \
-        (out_node)->next = _next;                                           \
-      }                                                                     \
-    } else {                                                                \
-      assert(!(c)->tail->next);                                             \
-      (c)->tail->next = (void *)arena3_bump((arena), (c)->cache_node_bytes, \
-                                            (c)->cache_node_align);         \
-      out_node = (c)->tail->next;                                           \
-      (c)->tail = (out_node);                                               \
-    }                                                                       \
+#define cache_get(arena, c, out_node, zero)                                \
+  do {                                                                     \
+    assert((c)->head && "forgot to cache_init");                           \
+    if ((c)->free_list) {                                                  \
+      out_node = (c)->free_list;                                           \
+      (c)->free_list = (c)->free_list->next_free;                          \
+      if ((zero)) {                                                        \
+        void *_next = (out_node)->next;                                    \
+        ZeroMemory((out_node), (c)->cache_node_bytes);                     \
+        (out_node)->next = _next;                                          \
+      }                                                                    \
+    } else {                                                               \
+      assert(!(c)->tail->next);                                            \
+      (c)->tail->next = (void *)arena_bump((arena), (c)->cache_node_bytes, \
+                                           (c)->cache_node_align);         \
+      out_node = (c)->tail->next;                                          \
+      (c)->tail = (out_node);                                              \
+    }                                                                      \
   } while (0)
 
 #define cache_put(c, in_node)              \
@@ -450,171 +556,6 @@ static inline uint32_t pow2(uint32_t exponent) {
 #define cache_foreach(c, T, i, o)     \
   for (uint32_t i = 0; i == 0; i = 1) \
     for (T *o = (c)->head; o; o = o->next, ++i)
-
-// Power of 2 allocation, where the max is 1U << 31,
-// chosen to support max of 32-bit libsais.
-static const uint32_t CIN_SIZE_CLASSES[] = {
-    8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072,
-    262144, 524288, 1048576, 2097152, 4194304, 8388608, 16777216, 33554432, 67108864,
-    134217728, 268435456, 536870912, 1073741824, 2147483648};
-
-#define CIN_ARENA_MIN_K 3U
-#define CIN_ARENA_MAX_K 31U
-#define CIN_NUM_CLASSES (1U + CIN_ARENA_MAX_K - CIN_ARENA_MIN_K)
-#define CIN_ARENA_MIN (1U << CIN_ARENA_MIN_K)
-#define CIN_ARENA_MAX (1U << CIN_ARENA_MAX_K)
-static_assert(CIN_ARENA_MIN == 8U, "min alloc should be 8 bytes");
-static_assert(CIN_ARENA_MAX == gigabytes(2U), "max alloc should be 2gb");
-
-static inline uint32_t size_class(uint32_t k) {
-  assert(k >= CIN_ARENA_MIN_K);
-  return k - CIN_ARENA_MIN_K;
-}
-
-typedef struct Arena_Block {
-  struct Arena_Block *next;
-} Arena_Block;
-
-typedef struct Arena_Chunk {
-  struct Arena_Chunk *prev;
-  uint32_t count;
-  uint32_t capacity;
-} Arena_Chunk;
-
-typedef struct Arena3 {
-  Arena_Chunk *curr;
-  Arena_Block *free_list[CIN_NUM_CLASSES];
-} Arena3;
-
-typedef struct Arena_Slice {
-  uint8_t *items;
-  uint32_t size;
-  // if set, assumes size = 1 << k
-  uint32_t k;
-} Arena_Slice;
-
-static_assert(sizeof(Arena_Block) == CIN_PTR, "should just hold a pointer");
-#define CIN_ARENA_SLICE_SIZE sizeof(Arena_Slice)
-#define CIN_ARENA_HEADER align(sizeof(Arena_Chunk), CIN_ARENA_MIN)
-
-static inline Arena_Chunk *arena3_chunk_create(Arena3 *arena, uint32_t bytes) {
-  assert(arena);
-  assert(cin_system.page_size <= CIN_ARENA_MAX);
-  size_t dwSize = align(bytes, cin_system.page_size);
-  Arena_Chunk *chunk = VirtualAlloc(NULL, dwSize, cin_system.alloc_type, PAGE_READWRITE);
-  chunk->prev = arena->curr;
-  chunk->count = CIN_ARENA_HEADER;
-  chunk->capacity = (uint32_t)dwSize;
-  arena->curr = chunk;
-  return chunk;
-}
-
-static inline void arena3_free_pow2(Arena3 *arena, Arena_Slice *slice) {
-  assert(slice->k && "supposed to free pow2");
-  Arena_Block *block = (Arena_Block *)slice->items;
-  uint32_t i = size_class(slice->k);
-  block->next = arena->free_list[i];
-  arena->free_list[i] = block;
-}
-
-static inline uint32_t arena3_free_pow1(Arena3 *arena, Arena_Slice *slice) {
-  assert(!slice->k && "if slice is certainly pow2, just free it directly");
-  assert(slice->size && "trying to free void memory");
-  uint32_t aligned_size = slice->size & ~7U;
-  uint32_t occupied = aligned_size;
-  while (occupied) {
-    uint32_t k = (uint32_t)__builtin_ctz(occupied);
-    uint8_t *pos = slice->items + pow2(k);
-    Arena_Slice src = {.items = pos, .k = k, .size = 0};
-    arena3_free_pow2(arena, &src);
-    occupied &= occupied - 1;
-  }
-  return aligned_size;
-}
-
-static inline uint32_t arena3_free_pos(Arena3 *arena, uint8_t *pos, uint32_t n) {
-  Arena_Slice slice = {.items = pos, .k = 0, .size = n};
-  uint32_t freed = arena3_free_pow1(arena, &slice);
-  return freed;
-}
-
-static inline uint8_t *arena3_bump(Arena3 *arena, uint32_t bytes, uint32_t alignment) {
-  assert(arena);
-  assert(arena->curr);
-  assert(CIN_ARENA_MAX > bytes);
-  uint32_t left = align(arena->curr->count, alignment);
-  uint32_t right = left + bytes;
-  assert(right <= CIN_ARENA_MAX);
-  if (right >= arena->curr->capacity) {
-    uint8_t *free_pos = (uint8_t *)arena->curr + arena->curr->count;
-    uint32_t free_n = arena->curr->capacity - arena->curr->count;
-    uint32_t freed = arena3_free_pos(arena, free_pos, free_n);
-    arena->curr->count += freed;
-    uint32_t cap = arena->curr->capacity;
-    if (bytes + CIN_ARENA_HEADER > cap) {
-      cap = align(bytes + CIN_ARENA_HEADER, alignment);
-    }
-    arena3_chunk_create(arena, cap);
-    left = align(arena->curr->count, alignment);
-    right = left + bytes;
-  }
-  arena->curr->count = right;
-  return (uint8_t *)arena->curr + left;
-}
-
-static inline void arena3_slice_reinit(Arena3 *arena, Arena_Slice *slice, uint32_t bytes, uint32_t alignment, bool zero) {
-  assert(arena);
-  assert(arena->curr);
-  assert(slice);
-  assert(CIN_ARENA_MAX > bytes);
-  slice->k = log2_ceil(bytes);
-  slice->size = pow2(slice->k);
-  uint32_t class = size_class(slice->k);
-  Arena_Block *block = arena->free_list[class];
-  if (block) {
-    arena->free_list[class] = block->next;
-    slice->items = (uint8_t *)block;
-    if (zero) ZeroMemory(slice->items, slice->size);
-  } else {
-    slice->items = arena3_bump(arena, slice->size, alignment);
-  }
-  assert(slice->items);
-}
-
-static inline Arena_Slice *arena3_slice_create(Arena3 *arena, uint32_t bytes, uint32_t alignment, bool zero) {
-  Arena_Slice stack_slice = {0};
-  arena3_slice_reinit(arena, &stack_slice, CIN_ARENA_SLICE_SIZE, __alignof(Arena_Slice), false);
-  assert(stack_slice.items);
-  assert(stack_slice.k == log2_ceil(CIN_ARENA_SLICE_SIZE));
-  assert(stack_slice.size == CIN_ARENA_SLICE_SIZE);
-  // both the slice and its contents are stored in the arena (at arbitrary positions)
-  Arena_Slice *heap_slice = (Arena_Slice *)stack_slice.items;
-  arena3_slice_reinit(arena, heap_slice, bytes, alignment, zero);
-  assert(heap_slice->items);
-  assert(heap_slice->k);
-  assert(heap_slice->size);
-  return heap_slice;
-}
-
-static inline void arena3_slice_free_items(Arena3 *arena, Arena_Slice *slice) {
-#if __SIZEOF_POINTER__ == 8
-  static_assert(cin_ispow2(CIN_ARENA_SLICE_SIZE), "expected slice to be pow2");
-  Arena_Slice stack_slice = {.items = (uint8_t *)slice,
-                             .k = log2_floor(CIN_ARENA_SLICE_SIZE),
-                             .size = 0};
-  arena3_free_pow2(arena, &stack_slice);
-#else
-  Arena_Slice stack_slice = {.items = (uint8_t *)slice,
-                             .k = 0,
-                             .size = CIN_ARENA_SLICE_SIZE};
-  arena3_free_pow1(arena, &stack_slice);
-#endif
-}
-
-static inline void arena3_slice_free(Arena3 *arena, Arena_Slice *slice) {
-  arena3_free_pow2(arena, slice);
-  arena3_slice_free_items(arena, slice);
-}
 
 #define array_struct_members(T) \
   T *items;                     \
@@ -636,51 +577,51 @@ static inline void arena3_slice_free(Arena3 *arena, Arena_Slice *slice) {
 #define CIN_ARRAY_SIZE sizeof(array_struct(void))
 static_assert(CIN_PTR == 8 ? (CIN_ARRAY_SIZE == 24) : true, "bytes updated (possibly pow2)");
 
-#define array3_init(arena, a, n, zero)                               \
-  do {                                                               \
-    Arena_Slice _slice = {0};                                        \
-    arena3_slice_reinit((arena), &_slice, sizeof(*(a)->items) * (n), \
-                        align_size(*(a)->items), (zero));            \
-    (a)->items = (void *)_slice.items;                               \
-    (a)->count = 0;                                                  \
-    (a)->capacity = _slice.size / sizeof(*(a)->items);               \
-    (a)->bytes_capacity = _slice.size;                               \
-    (a)->bytes_capacity_k = _slice.k;                                \
+#define array3_init(arena, a, n, zero)                              \
+  do {                                                              \
+    Arena_Slice _slice = {0};                                       \
+    arena_slice_reinit((arena), &_slice, sizeof(*(a)->items) * (n), \
+                       align_size(*(a)->items), (zero));            \
+    (a)->items = (void *)_slice.items;                              \
+    (a)->count = 0;                                                 \
+    (a)->capacity = _slice.size / sizeof(*(a)->items);              \
+    (a)->bytes_capacity = _slice.size;                              \
+    (a)->bytes_capacity_k = _slice.k;                               \
   } while (0)
 
 #define array3_create(arena, slice, zero) \
-  arena3_slice_reinit((arena), &slice, CIN_ARRAY_SIZE, align_size(CIN_ARRAY_SIZE), (zero))
+  arena_slice_reinit((arena), &slice, CIN_ARRAY_SIZE, align_size(CIN_ARRAY_SIZE), (zero))
 
-#define array3_free_items(arena, a)                                        \
-  arena3_free_pow2((arena), &(Arena_Slice){.items = (uint8_t *)(a)->items, \
-                                           .k = (a)->bytes_capacity_k,     \
-                                           .size = 0})
+#define array3_free_items(arena, a)                                       \
+  arena_free_pow2((arena), &(Arena_Slice){.items = (uint8_t *)(a)->items, \
+                                          .k = (a)->bytes_capacity_k,     \
+                                          .size = 0})
 
-#define array3_free(arena, a)                                          \
-  do {                                                                 \
-    array3_free_items((arena), (a));                                   \
-    arena3_free_pow1((arena), &(Arena_Slice){.items = (uint8_t *)(a),  \
-                                             .k = 0,                   \
-                                             .size = CIN_ARRAY_SIZE}); \
+#define array3_free(arena, a)                                         \
+  do {                                                                \
+    array3_free_items((arena), (a));                                  \
+    arena_free_pow1((arena), &(Arena_Slice){.items = (uint8_t *)(a),  \
+                                            .k = 0,                   \
+                                            .size = CIN_ARRAY_SIZE}); \
   } while (0)
 
-#define array3_ensure_capacity(arena, a, total, zero)                                                 \
-  do {                                                                                                \
-    if ((total) > (a)->capacity) {                                                                    \
-      if (unlikely((a)->bytes_capacity_k >= CIN_ARENA_MAX_K)) {                                       \
-        printf("Cinema crashed trying to allocate excessive memory (%u bytes)",                       \
-               (a)->bytes_capacity << 1);                                                             \
-        exit(1);                                                                                      \
-      }                                                                                               \
-      Arena_Slice _tmp = {0};                                                                         \
-      arena3_slice_reinit((arena), &_tmp, (a)->bytes_capacity << 1, align_size(*(a)->items), (zero)); \
-      memcpy(_tmp.items, (a)->items, (a)->bytes_capacity);                                            \
-      array3_free_items((arena), (a));                                                                \
-      (a)->items = (void *)_tmp.items;                                                                \
-      (a)->capacity = _tmp.size / sizeof(*(a)->items);                                                \
-      (a)->bytes_capacity = _tmp.size;                                                                \
-      (a)->bytes_capacity_k = _tmp.k;                                                                 \
-    }                                                                                                 \
+#define array3_ensure_capacity(arena, a, total, zero)                                                \
+  do {                                                                                               \
+    if ((total) > (a)->capacity) {                                                                   \
+      if (unlikely((a)->bytes_capacity_k >= CIN_ARENA_MAX_K)) {                                      \
+        printf("Cinema crashed trying to allocate excessive memory (%u bytes)",                      \
+               (a)->bytes_capacity << 1);                                                            \
+        exit(1);                                                                                     \
+      }                                                                                              \
+      Arena_Slice _tmp = {0};                                                                        \
+      arena_slice_reinit((arena), &_tmp, (a)->bytes_capacity << 1, align_size(*(a)->items), (zero)); \
+      memcpy(_tmp.items, (a)->items, (a)->bytes_capacity);                                           \
+      array3_free_items((arena), (a));                                                               \
+      (a)->items = (void *)_tmp.items;                                                               \
+      (a)->capacity = _tmp.size / sizeof(*(a)->items);                                               \
+      (a)->bytes_capacity = _tmp.size;                                                               \
+      (a)->bytes_capacity_k = _tmp.k;                                                                \
+    }                                                                                                \
   } while (0)
 
 #define array3_reserve(arena, a, n, zero) \
@@ -787,18 +728,18 @@ static_assert(CIN_PTR == 8 ? (CIN_ARRAY_SIZE == 24) : true, "bytes updated (poss
 #define array3_bytes(a) \
   ((a)->count * sizeof(*(a)->items))
 
-#define array3_to_pow1(arena, a)                                        \
-  do {                                                                  \
-    uint32_t _nbytes = align_to_size(array3_bytes((a)));                \
-    assert(_nbytes <= (a)->bytes_capacity);                             \
-    uint32_t _diff = (a)->bytes_capacity - _nbytes;                     \
-    if (_diff >= CIN_ARENA_MIN) {                                       \
-      arena3_free_pos((arena), (uint8_t *)(a)->items + _nbytes, _diff); \
-    }                                                                   \
-    (a)->capacity = _nbytes / sizeof(*(a)->items);                      \
-    assert((a)->capacity >= (a)->count);                                \
-    (a)->bytes_capacity = _nbytes;                                      \
-    (a)->bytes_capacity_k = 0;                                          \
+#define array3_to_pow1(arena, a)                                       \
+  do {                                                                 \
+    uint32_t _nbytes = align_to_size(array3_bytes((a)));               \
+    assert(_nbytes <= (a)->bytes_capacity);                            \
+    uint32_t _diff = (a)->bytes_capacity - _nbytes;                    \
+    if (_diff >= CIN_ARENA_MIN) {                                      \
+      arena_free_pos((arena), (uint8_t *)(a)->items + _nbytes, _diff); \
+    }                                                                  \
+    (a)->capacity = _nbytes / sizeof(*(a)->items);                     \
+    assert((a)->capacity >= (a)->count);                               \
+    (a)->bytes_capacity = _nbytes;                                     \
+    (a)->bytes_capacity_k = 0;                                         \
   } while (0)
 
 #define array3_foreach(a, T, i, o)                          \
@@ -2205,8 +2146,7 @@ struct Document_Collection {
   int32_t *lcp;
   int32_t *suffix_to_doc;
   uint16_t *dedup_counters;
-  Arena *arena;
-  Arena3 arena3;
+  Arena arena;
 } docs = {0};
 
 static void docs_append(uint8_t *utf8, int32_t len) {
@@ -2214,7 +2154,7 @@ static void docs_append(uint8_t *utf8, int32_t len) {
   // Instead of appending it, we replace it with forward slash.
   for (int32_t i = 0; i < len; ++i)
     if (utf8[i] == '\\') utf8[i] = '/';
-  array3_extend(&docs.arena3, &docs, utf8, (uint32_t)len, true);
+  array3_extend(&docs.arena, &docs, utf8, (uint32_t)len, true);
   ++docs.doc_count;
 }
 
@@ -2548,8 +2488,8 @@ static inline void setup_layout(const char *name, Cin_Layout *layout) {
 
 static bool init_config(const char *filename) {
   if (!parse_config(filename)) return false;
-  arena3_chunk_create(&docs.arena3, CIN_DOCS_ARENA_CAP);
-  array3_init(&docs.arena3, &docs, CIN_DOCS_CAP, true);
+  arena_chunk_create(&docs.arena, CIN_DOCS_ARENA_CAP);
+  array3_init(&docs.arena, &docs, CIN_DOCS_CAP, true);
   array_alloc(&utf16_buf_raw, CIN_MAX_PATH);
   array_alloc(&utf16_buf_norm, CIN_MAX_PATH);
   array_alloc(&utf8_buf, CIN_MAX_PATH_BYTES);
@@ -2653,7 +2593,7 @@ static bool init_config(const char *filename) {
   array_free(dir_stack);
   array_free(conf_parser.scopes);
   array_free(conf_parser.buf);
-  array3_to_pow1(&docs.arena3, &docs);
+  array3_to_pow1(&docs.arena, &docs);
   assert(array3_bytes(&docs) <= CIN_ARENA_MAX && "overflew k = 31");
   if (array3_bytes(&docs) == CIN_ARENA_MAX) {
     // extremely rare case where we exceed INT_MAX by 1 byte,
@@ -2669,7 +2609,6 @@ static bool init_config(const char *filename) {
 }
 
 static bool init_documents(void) {
-  arena_alloc(docs.arena, CIN_DOCS_ARENA_CAP);
   docs.gsa = malloc(docs.bytes_mul32);
   int32_t d_bytes = (int32_t)array3_bytes(&docs);
 #if defined(LIBSAIS_OPENMP)
@@ -2806,13 +2745,13 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len, TempDo
   int32_t n = r_bound - l_bound;
   assert(n >= 0);
   if (!n) return;
-  array3_init(&docs.arena3, result, (uint32_t)n, true);
+  array3_init(&docs.arena, result, (uint32_t)n, true);
   result->count = 0;
   for (int32_t i = l_bound; i <= r_bound; ++i) {
     int32_t doc = docs.suffix_to_doc[i];
     if (docs.dedup_counters[doc] != dedup_counter) {
       docs.dedup_counters[doc] = dedup_counter;
-      array3_push(&docs.arena3, result, doc, false);
+      array3_push(&docs.arena, result, doc, false);
       log_message(LOG_TRACE, "docs.gsa[%7d] = %-25.25s (%7d)| (%7d) = %-30.30s counter=%d", i, docs.items + docs.gsa[i], docs.gsa[i], doc, docs.items + doc, dedup_counter);
     }
   }
@@ -2868,9 +2807,8 @@ cache_define(Writes_Cache, OverlappedWrite);
 cache_define(Instance_Cache, Instance);
 
 static struct {
-  Arena *arena;
-  Arena3 arena3;
-  Arena *iocp_arena;
+  Arena arena;
+  Arena iocp_arena;
   Writes_Cache writes;
   Instance_Cache instances;
   HANDLE iocp;
@@ -2935,7 +2873,7 @@ static bool overlap_read(Instance *instance) {
 
 static bool overlap_write(Instance *instance, MPV_Packet type, const char *cmd, const char *arg1, const char *arg2) {
   OverlappedWrite *write = NULL;
-  cache_get(&cin_io.arena3, &cin_io.writes, write, true);
+  cache_get(&cin_io.arena, &cin_io.writes, write, true);
   write->ovl_ctx.type = type;
   int64_t request_id = (int64_t)(uintptr_t)write;
   int32_t bytes = 0;
@@ -3089,8 +3027,7 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
               assert(!memchr(b->buf, '\0', b->bytes));
               len += b->bytes;
             }
-            char *contiguous_buf = NULL;
-            arena_push(cin_io.iocp_arena, char, len, contiguous_buf);
+            char *contiguous_buf = (char *)arena_bump(&cin_io.iocp_arena, (uint32_t)len, align_size(char));
             size_t offset = 0;
             for (ReadBuffer *b = instance->buf_head; b != instance->buf_tail; b = b->next) {
               assert(b);
@@ -3121,10 +3058,11 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
           memcpy(instance->buf_head, buf + tail_pos, remainder);
           instance->buf_head->bytes = remainder;
           instance->buf_tail = instance->buf_head;
-          if (multi) arena_free(cin_io.iocp_arena, char, len);
+          if (multi) arena_free_pos(&cin_io.iocp_arena, (uint8_t *)buf, (uint32_t)len);
         } else {
           if (instance->buf_tail->next) instance->buf_tail->next->bytes = 0;
-          else arena_push(cin_io.iocp_arena, ReadBuffer, 1, instance->buf_tail->next);
+          else instance->buf_tail->next = (ReadBuffer *)arena_bump(
+                   &cin_io.iocp_arena, sizeof(ReadBuffer), align_size(ReadBuffer));
           instance->buf_tail = instance->buf_tail->next;
         }
       }
@@ -3135,11 +3073,10 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
 }
 
 static inline bool init_mpv(void) {
-  arena_alloc(cin_io.arena, CIN_IO_ARENA_CAP);
-  arena_alloc(cin_io.iocp_arena, CIN_IO_ARENA_CAP);
-  arena3_chunk_create(&cin_io.arena3, CIN_IO_ARENA_CAP);
-  cache_init(&cin_io.arena3, &cin_io.writes, 1, true);
-  cache_init(&cin_io.arena3, &cin_io.instances, 1, false);
+  arena_chunk_create(&cin_io.arena, CIN_IO_ARENA_CAP);
+  arena_chunk_create(&cin_io.iocp_arena, CIN_IO_ARENA_CAP);
+  cache_init(&cin_io.arena, &cin_io.writes, 1, true);
+  cache_init(&cin_io.arena, &cin_io.instances, 1, false);
   cin_io.iocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
   if (!cin_io.iocp) {
     log_last_error("Failed to create iocp");
@@ -3548,7 +3485,8 @@ static void mpv_spawn(Instance *instance, size_t index) {
   assert(ok_pipe);
   bool ok_iocp = CreateIoCompletionPort(instance->pipe, cin_io.iocp, (ULONG_PTR)instance, 0) != NULL;
   assert(ok_iocp);
-  arena_push(cin_io.arena, ReadBuffer, 1, instance->buf_head);
+  instance->buf_head = (ReadBuffer *)arena_bump(
+      &cin_io.arena, sizeof(ReadBuffer), align_size(ReadBuffer));
   instance->buf_tail = instance->buf_head;
   bool ok_read = overlap_read(instance);
   assert(ok_read);
@@ -3718,7 +3656,7 @@ static void cmd_search_executor(void) {
     overlap_write(instance, MPV_LOADFILE, "loadfile",
                   (char *)docs.items + slice.items[i % (size_t)slice.count], NULL);
   }
-  array3_free_items(&docs.arena3, &slice);
+  array3_free_items(&docs.arena, &slice);
 }
 
 static void cmd_search_validator(void) {
@@ -3839,7 +3777,7 @@ static void cmd_layout_executor(void) {
     ++screen;
   }
   for (Instance *next = NULL; screen < next_count; ++screen) {
-    cache_get(&cin_io.arena3, &cin_io.instances, next, false);
+    cache_get(&cin_io.arena, &cin_io.instances, next, false);
     mpv_spawn(next, screen);
   }
   if (!mpv_demand) mpv_unlock();
