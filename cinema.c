@@ -380,7 +380,7 @@ static inline uint32_t arena_free_pos(Arena *arena, uint8_t *pos, uint32_t n) {
   return freed;
 }
 
-static inline uint8_t *arena_bump(Arena *arena, uint32_t bytes, uint32_t alignment) {
+static inline void *arena_bump(Arena *arena, uint32_t bytes, uint32_t alignment) {
   assert(arena);
   assert(arena->curr);
   assert(CIN_ARENA_MAX > bytes);
@@ -493,22 +493,22 @@ static inline void arena_slice_free(Arena *arena, Arena_Slice *slice) {
 #define CIN_CACHE_NODE_SIZE sizeof(cache_node_struct(void))
 #define CIN_CACHE_SIZE sizeof(cache_struct(void))
 
-#define cache_init(arena, c, n, init_free)                               \
-  do {                                                                   \
-    assert((n) > 0 && "must initialize at least 1 node");                \
-    (c)->cache_node_bytes = sizeof(*(c)->head);                          \
-    (c)->cache_node_align = align_size(*(c)->head);                      \
-    (c)->head = (void *)arena_bump((arena), (c)->cache_node_bytes * (n), \
-                                   (c)->cache_node_align);               \
-    if ((init_free)) (c)->free_list = (c)->head;                         \
-    (c)->tail = (c)->head;                                               \
-    for (uint32_t _i = 1, _offset = (c)->cache_node_bytes;               \
-         _i < (n);                                                       \
-         ++_i, _offset += (c)->cache_node_bytes) {                       \
-      (c)->tail->next = (void *)((uint8_t *)(c)->head + _offset);        \
-      if ((init_free)) (c)->tail->next_free = (c)->tail->next;           \
-      (c)->tail = (c)->tail->next;                                       \
-    }                                                                    \
+#define cache_init(arena, c, n, init_free)                        \
+  do {                                                            \
+    assert((n) > 0 && "must initialize at least 1 node");         \
+    (c)->cache_node_bytes = sizeof(*(c)->head);                   \
+    (c)->cache_node_align = align_size(*(c)->head);               \
+    (c)->head = arena_bump((arena), (c)->cache_node_bytes * (n),  \
+                           (c)->cache_node_align);                \
+    if ((init_free)) (c)->free_list = (c)->head;                  \
+    (c)->tail = (c)->head;                                        \
+    for (uint32_t _i = 1, _offset = (c)->cache_node_bytes;        \
+         _i < (n);                                                \
+         ++_i, _offset += (c)->cache_node_bytes) {                \
+      (c)->tail->next = (void *)((uint8_t *)(c)->head + _offset); \
+      if ((init_free)) (c)->tail->next_free = (c)->tail->next;    \
+      (c)->tail = (c)->tail->next;                                \
+    }                                                             \
   } while (0)
 
 #define cache_create(arena) \
@@ -528,24 +528,24 @@ static inline void arena_slice_free(Arena *arena, Arena_Slice *slice) {
                                             .size = CIN_CACHE_SIZE}); \
   } while (0)
 
-#define cache_get(arena, c, out_node, zero)                                \
-  do {                                                                     \
-    assert((c)->head && "forgot to cache_init");                           \
-    if ((c)->free_list) {                                                  \
-      out_node = (c)->free_list;                                           \
-      (c)->free_list = (c)->free_list->next_free;                          \
-      if ((zero)) {                                                        \
-        void *_next = (out_node)->next;                                    \
-        ZeroMemory((out_node), (c)->cache_node_bytes);                     \
-        (out_node)->next = _next;                                          \
-      }                                                                    \
-    } else {                                                               \
-      assert(!(c)->tail->next);                                            \
-      (c)->tail->next = (void *)arena_bump((arena), (c)->cache_node_bytes, \
-                                           (c)->cache_node_align);         \
-      out_node = (c)->tail->next;                                          \
-      (c)->tail = (out_node);                                              \
-    }                                                                      \
+#define cache_get(arena, c, out_node, zero)                        \
+  do {                                                             \
+    assert((c)->head && "forgot to cache_init");                   \
+    if ((c)->free_list) {                                          \
+      out_node = (c)->free_list;                                   \
+      (c)->free_list = (c)->free_list->next_free;                  \
+      if ((zero)) {                                                \
+        void *_next = (out_node)->next;                            \
+        ZeroMemory((out_node), (c)->cache_node_bytes);             \
+        (out_node)->next = _next;                                  \
+      }                                                            \
+    } else {                                                       \
+      assert(!(c)->tail->next);                                    \
+      (c)->tail->next = arena_bump((arena), (c)->cache_node_bytes, \
+                                   (c)->cache_node_align);         \
+      out_node = (c)->tail->next;                                  \
+      (c)->tail = (out_node);                                      \
+    }                                                              \
   } while (0)
 
 #define cache_put(c, in_node)              \
@@ -3025,7 +3025,7 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
               assert(!memchr(b->buf, '\0', b->bytes));
               len += b->bytes;
             }
-            char *contiguous_buf = (char *)arena_bump(&cin_io.iocp_arena, (uint32_t)len, align_size(char));
+            char *contiguous_buf = arena_bump(&cin_io.iocp_arena, (uint32_t)len, align_size(char));
             size_t offset = 0;
             for (ReadBuffer *b = instance->buf_head; b != instance->buf_tail; b = b->next) {
               assert(b);
@@ -3059,8 +3059,9 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
           if (multi) arena_free_pos(&cin_io.iocp_arena, (uint8_t *)buf, (uint32_t)len);
         } else {
           if (instance->buf_tail->next) instance->buf_tail->next->bytes = 0;
-          else instance->buf_tail->next = (ReadBuffer *)arena_bump(
-                   &cin_io.iocp_arena, sizeof(ReadBuffer), align_size(ReadBuffer));
+          else instance->buf_tail->next = arena_bump(&cin_io.iocp_arena,
+                                                     sizeof(ReadBuffer),
+                                                     align_size(ReadBuffer));
           instance->buf_tail = instance->buf_tail->next;
         }
       }
@@ -3483,8 +3484,7 @@ static void mpv_spawn(Instance *instance, size_t index) {
   assert(ok_pipe);
   bool ok_iocp = CreateIoCompletionPort(instance->pipe, cin_io.iocp, (ULONG_PTR)instance, 0) != NULL;
   assert(ok_iocp);
-  instance->buf_head = (ReadBuffer *)arena_bump(
-      &cin_io.arena, sizeof(ReadBuffer), align_size(ReadBuffer));
+  instance->buf_head = arena_bump(&cin_io.arena, sizeof(ReadBuffer), align_size(ReadBuffer));
   instance->buf_tail = instance->buf_head;
   bool ok_read = overlap_read(instance);
   assert(ok_read);
