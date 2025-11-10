@@ -279,12 +279,12 @@ static inline bool init_os(void) {
 #define CIN_ARENA_BYTES align(sizeof(Arena), 64ULL)
 
 static inline uint32_t log2_floor(uint32_t n) {
-  assert(n > 0U);
+  assert(n > 0U && "0 is undefined behavior");
   return 31U - (uint32_t)__builtin_clz(n);
 }
 
 static inline uint32_t log2_ceil(uint32_t n) {
-  assert(n > 1U);
+  assert(n > 1U && "1 is not divisible by 2");
   return 32U - (uint32_t)__builtin_clz(n - 1U);
 }
 
@@ -409,6 +409,7 @@ static inline void arena_slice_reinit(Arena *arena, Arena_Slice *slice, uint32_t
   assert(arena->curr);
   assert(slice);
   assert(CIN_ARENA_MAX > bytes);
+  bytes = max(bytes, CIN_ARENA_MIN);
   slice->k = log2_ceil(bytes);
   slice->size = pow2(slice->k);
   uint32_t class = size_class(slice->k);
@@ -2742,11 +2743,8 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len, TempDo
   log_message(LOG_DEBUG, "Boundaries are [%d, %d] or [%s, %s]", l_bound, r_bound,
               docs.items + docs.gsa[l_bound], docs.items + docs.gsa[r_bound]);
   static uint16_t dedup_counter = 1;
-  int32_t n = r_bound - l_bound;
-  assert(n >= 0);
-  if (!n) return;
+  int32_t n = (r_bound - l_bound) + 1;
   array3_init(&docs.arena, result, (uint32_t)n, true);
-  result->count = 0;
   for (int32_t i = l_bound; i <= r_bound; ++i) {
     int32_t doc = docs.suffix_to_doc[i];
     if (docs.dedup_counters[doc] != dedup_counter) {
@@ -3648,15 +3646,15 @@ static void cmd_search_executor(void) {
     pattern = utf8_buf.items;
   }
   log_message(LOG_DEBUG, "Search with pattern: '%s', len: %d", pattern, len);
-  TempDocuments slice = {0};
-  document_listing(pattern, len - 1, &slice);
   // TODO:
-  log_message(LOG_INFO, "Slice count=%d, cap=%d", slice.count, slice.capacity);
+  TempDocuments array = {0};
+  document_listing(pattern, len - 1, &array);
+  log_message(LOG_INFO, "Search array count=%d, cap=%d", array.count, array.capacity);
   FOREACH_MPVTARGET(i, instance) {
     overlap_write(instance, MPV_LOADFILE, "loadfile",
-                  (char *)docs.items + slice.items[i % (size_t)slice.count], NULL);
+                  (char *)docs.items + array.items[i % (size_t)array.count], NULL);
   }
-  array3_free_items(&docs.arena, &slice);
+  array3_free_items(&docs.arena, &array);
 }
 
 static void cmd_search_validator(void) {
