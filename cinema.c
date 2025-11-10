@@ -398,7 +398,8 @@ typedef struct Pool {
   } while (0)
 
 #define cache_node_struct_members(T_struct) \
-  struct T_struct *next
+  struct T_struct *next;                    \
+  struct T_struct *next_free
 
 #define cache_node_struct(T_struct)      \
   struct {                               \
@@ -430,20 +431,22 @@ typedef struct Pool {
 #define CIN_CACHE_NODE_SIZE sizeof(cache_node_struct(void))
 #define CIN_CACHE_SIZE sizeof(cache_struct(void))
 
-#define cache_init(arena, c, n)                                                                   \
-  do {                                                                                            \
-    assert((n > 0));                                                                              \
-    (c)->cache_node_bytes = sizeof(*(c)->head);                                                   \
-    (c)->cache_node_align = align_size(*(c)->head);                                               \
-    (c)->head = (void *)arena3_bump((arena), (c)->cache_node_bytes * (n), (c)->cache_node_align); \
-    (c)->free_list = (c)->head;                                                                   \
-    (c)->tail = (c)->head;                                                                        \
-    for (uint32_t _i = 1, _offset = (c)->cache_node_bytes;                                        \
-         _i < (n);                                                                                \
-         ++_i, _offset += (c)->cache_node_bytes) {                                                \
-      (c)->tail->next = (void *)((uint8_t *)(c)->head + _offset);                                 \
-      (c)->tail = (c)->tail->next;                                                                \
-    }                                                                                             \
+#define cache_init(arena, c, n)                                           \
+  do {                                                                    \
+    assert((n > 0));                                                      \
+    (c)->cache_node_bytes = sizeof(*(c)->head);                           \
+    (c)->cache_node_align = align_size(*(c)->head);                       \
+    (c)->head = (void *)arena3_bump((arena), (c)->cache_node_bytes * (n), \
+                                    (c)->cache_node_align);               \
+    (c)->free_list = (c)->head;                                           \
+    (c)->tail = (c)->head;                                                \
+    for (uint32_t _i = 1, _offset = (c)->cache_node_bytes;                \
+         _i < (n);                                                        \
+         ++_i, _offset += (c)->cache_node_bytes) {                        \
+      (c)->tail->next = (void *)((uint8_t *)(c)->head + _offset);         \
+      (c)->tail->next_free = (c)->tail->next;                             \
+      (c)->tail = (c)->tail->next;                                        \
+    }                                                                     \
   } while (0)
 
 #define cache_create(arena) \
@@ -462,6 +465,31 @@ typedef struct Pool {
                                              .k = 0,                   \
                                              .size = CIN_CACHE_SIZE}); \
   } while (0)
+
+#define cache_get(arena, c, out_node, zero)                                 \
+  do {                                                                      \
+    if ((c)->free_list) {                                                   \
+      out_node = (c)->free_list;                                            \
+      (c)->free_list = (c)->free_list->next_free;                           \
+      if ((zero)) ZeroMemory((out_node), (c)->cache_node_bytes);            \
+    } else {                                                                \
+      assert(!(c)->tail->next);                                             \
+      (c)->tail->next = (void *)arena3_bump((arena), (c)->cache_node_bytes, \
+                                            (c)->cache_node_align);         \
+      out_node = (c)->tail->next;                                           \
+      (c)->tail = (c)->tail->next;                                          \
+    }                                                                       \
+  } while (0)
+
+#define cache_put(c, in_node)              \
+  do {                                     \
+    (in_node)->next_free = (c)->free_list; \
+    (c)->free_list = (in_node);            \
+  } while (0)
+
+#define cache_foreach(c, T, i, o) \
+  for (uint32_t i = 0; !i; i = 0) \
+    for (T *o = (c)->head; o; o = o->next, ++i)
 
 // Power of 2 allocation, where the max is 1U << 31,
 // chosen to support max of 32-bit libsais.
@@ -812,6 +840,10 @@ static_assert(CIN_PTR == 8 ? (CIN_ARRAY_SIZE == 24) : true, "bytes updated (poss
     (a)->bytes_capacity = _nbytes;                                      \
     (a)->bytes_capacity_k = 0;                                          \
   } while (0)
+
+#define array3_foreach(a, T, i, o)                          \
+  for (uint32_t i = 0, _j = 0; i < (a)->count; _j = 0, ++i) \
+    for (T o = (a)->items[i]; !_j; _j = 1)
 
 // https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
 // A path can have 248 "characters" (260 - 12 = 248)
