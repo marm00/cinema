@@ -2503,9 +2503,7 @@ static bool init_documents(void) {
   return true;
 }
 
-array_define(TempDocuments, int32_t);
-
-static void document_listing(const uint8_t *pattern, int32_t pattern_len, TempDocuments *result) {
+static void document_listing(const uint8_t *pattern, int32_t pattern_len, Playlist *result) {
   int32_t left = docs.doc_count;
   int32_t right = (int32_t)array_bytes(&docs) - 1;
   int32_t l_lcp = lcps(pattern, docs.items + docs.gsa[left]);
@@ -2749,9 +2747,21 @@ static inline void playlist_set(Instance *instance, Playlist *next) {
         break;
       }
     }
-    if (!playlist_in_use) cache_put(&cin_io.playlists, prev);
+    if (!playlist_in_use) {
+      // TODO: cannot put back in cache in case of tag,
+      // because that would mean deduplicating again
+      // cache_put(&cin_io.playlists, prev);
+    }
   }
   instance->playlist = next;
+}
+
+static inline void playlist_play_next(Instance *instance) {
+  assert(instance->playlist);
+  Playlist *playlist = instance->playlist;
+  uint32_t random = rand_between(0, playlist->count);
+  overlap_write(instance, MPV_LOADFILE, "loadfile",
+                (char *)docs.items + playlist->items[random], NULL);
 }
 
 #define CIN_MPVKEY_LEFT "\""
@@ -3369,9 +3379,7 @@ static void cmd_tag_executor(void) {
     // TODO:
     FOREACH_MPVTARGET(i, instance) {
       playlist_set(instance, cmd_ctx.tag->playlist);
-    }
-    array_foreach(cmd_ctx.tag->playlist, int32_t, i, o) {
-      log_message(LOG_INFO, "Tag doc %u=%i", i, o);
+      playlist_play_next(instance);
     }
     return;
   }
@@ -3495,14 +3503,14 @@ static void cmd_search_executor(void) {
   }
   log_message(LOG_DEBUG, "Search with pattern: '%s', len: %d", pattern, len);
   // TODO:
-  TempDocuments array = {0};
-  document_listing(pattern, len - 1, &array);
-  log_message(LOG_INFO, "Search array count=%d, cap=%d", array.count, array.capacity);
+  Playlist *playlist = NULL;
+  cache_get(&io_arena, &cin_io.playlists, playlist);
+  document_listing(pattern, len - 1, playlist);
+  log_message(LOG_INFO, "Search playlist count=%d, cap=%d", playlist->count, playlist->capacity);
   FOREACH_MPVTARGET(i, instance) {
-    overlap_write(instance, MPV_LOADFILE, "loadfile",
-                  (char *)docs.items + array.items[i % (size_t)array.count], NULL);
+    playlist_set(instance, playlist);
+    playlist_play_next(instance);
   }
-  array_free_items(&docs_arena, &array);
 }
 
 static void cmd_search_validator(void) {
