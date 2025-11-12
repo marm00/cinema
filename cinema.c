@@ -328,7 +328,7 @@ static inline void arena_slice_free(Arena *arena, Arena_Slice *slice) {
 #define CIN_CACHE_NODE_SIZE sizeof(cache_node_struct(void))
 #define CIN_CACHE_SIZE sizeof(cache_struct(void))
 
-#define cache_init(arena, c, n, init_free)                        \
+#define cache_init_core(arena, c, n, init_free)                   \
   do {                                                            \
     assert((n) > 0 && "must initialize at least 1 node");         \
     (c)->cache_node_bytes = sizeof(*(c)->head);                   \
@@ -365,7 +365,7 @@ static inline void arena_slice_free(Arena *arena, Arena_Slice *slice) {
 
 #define cache_get_core(arena, c, out_node, zero)                   \
   do {                                                             \
-    assert((c)->head && "forgot to cache_init");                   \
+    assert((c)->head && "forgot to cache_init_core");              \
     if ((c)->free_list) {                                          \
       out_node = (c)->free_list;                                   \
       (c)->free_list = (c)->free_list->next_free;                  \
@@ -2042,10 +2042,16 @@ typedef struct DirectoryPath {
 array_define(TagDirectories, int32_t);
 array_define(TagPatternItems, int32_t);
 array_define(TagUrlItems, int32_t);
-array_define(TagCollected, int32_t);
+
+typedef struct Playlist {
+  array_struct_members(int32_t);
+  cache_node_struct_members(Playlist);
+} Playlist;
+
+cache_define(Playlist_Cache, Playlist);
 
 typedef struct TagItems {
-  TagCollected *collected;
+  Playlist *playlist;
   TagDirectories *directories;
   TagPatternItems *pattern_items;
   TagUrlItems *url_items;
@@ -2625,15 +2631,17 @@ typedef struct Instance {
   PROCESS_INFORMATION pi;
   HWND window;
   RECT rect;
+  Playlist *playlist;
   cache_node_struct_members(Instance);
 } Instance;
 
-cache_define(Writes_Cache, OverlappedWrite);
+cache_define(Write_Cache, OverlappedWrite);
 cache_define(Instance_Cache, Instance);
 
 static struct {
-  Writes_Cache writes;
+  Write_Cache writes;
   Instance_Cache instances;
+  Playlist_Cache playlists;
   HANDLE iocp;
 } cin_io = {0};
 
@@ -2731,6 +2739,21 @@ static bool overlap_write(Instance *instance, MPV_Packet type, const char *cmd, 
   return true;
 }
 
+static inline void playlist_set(Instance *instance, Playlist *next) {
+  Playlist *prev = instance->playlist;
+  if (prev) {
+    bool playlist_in_use = false;
+    cache_foreach(&cin_io.instances, Instance, i, o) {
+      if (o->playlist == prev) {
+        playlist_in_use = true;
+        break;
+      }
+    }
+    if (!playlist_in_use) cache_put(&cin_io.playlists, prev);
+  }
+  instance->playlist = next;
+}
+
 #define CIN_MPVKEY_LEFT "\""
 #define CIN_MPVKEY_RIGHT "\":"
 #define CIN_MPVKEY(str) (CIN_MPVKEY_LEFT str CIN_MPVKEY_RIGHT)
@@ -2742,6 +2765,7 @@ static bool overlap_write(Instance *instance, MPV_Packet type, const char *cmd, 
 
 static inline void mpv_kill(Instance *instance) {
   assert(instance->pipe);
+  playlist_set(instance, NULL);
   ReadBuffer *buf_head = instance->buf_head;
   ReadBuffer *buf_tail = instance->buf_tail;
   Instance *next = instance->next;
@@ -2897,8 +2921,9 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
 static inline bool init_mpv(void) {
   arena_chunk_init(&io_arena, CIN_IO_ARENA_CAP);
   arena_chunk_init(&iocp_thread_arena, CIN_IO_ARENA_CAP);
-  cache_init(&io_arena, &cin_io.writes, 1, true);
-  cache_init(&io_arena, &cin_io.instances, 1, false);
+  cache_init_core(&io_arena, &cin_io.writes, 1, true);
+  cache_init_core(&io_arena, &cin_io.instances, 1, false);
+  cache_init_core(&io_arena, &cin_io.playlists, 1, true);
   cin_io.iocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
   if (!cin_io.iocp) {
     log_last_error("Failed to create iocp");
@@ -3340,15 +3365,18 @@ static void cmd_reroll_validator(void) {
 }
 
 static void cmd_tag_executor(void) {
-  if (cmd_ctx.tag->collected) {
+  if (cmd_ctx.tag->playlist) {
     // TODO:
-    array_foreach(cmd_ctx.tag->collected, int32_t, i, o) {
+    FOREACH_MPVTARGET(i, instance) {
+      playlist_set(instance, cmd_ctx.tag->playlist);
+    }
+    array_foreach(cmd_ctx.tag->playlist, int32_t, i, o) {
       log_message(LOG_INFO, "Tag doc %u=%i", i, o);
     }
     return;
   }
-  cmd_ctx.tag->collected = arena_bump_T1(&console_arena, TagCollected);
-  TagCollected *collected = cmd_ctx.tag->collected;
+  cache_get(&io_arena, &cin_io.playlists, cmd_ctx.tag->playlist);
+  Playlist *playlist = cmd_ctx.tag->playlist;
   size_t directory_k = 0;
   size_t pattern_k = 0;
   size_t url_k = 0;
@@ -3378,7 +3406,7 @@ static void cmd_tag_executor(void) {
           int32_t dup = table_insert(arena1, &duplicates, strings, start->str_offset, start_len + 1, 0);
           if (dup >= 0) continue;
           log_message(LOG_TRACE, "Tag directory: %s (%zu)", start_str, start_len);
-          array_extend(arena1, collected, start->items, start->count);
+          array_extend(arena1, playlist, start->items, start->count);
           for (size_t j = ++node_index; j < directory_nodes.count; ++j) {
             DirectoryNode *node = &directory_nodes.items[j];
             if (!node->count) continue;
@@ -3388,7 +3416,7 @@ static void cmd_tag_executor(void) {
             dup = table_insert(arena1, &duplicates, strings, node->str_offset, len + 1, 0);
             if (dup >= 0) continue;
             log_message(LOG_TRACE, "Tag directory: %s", str);
-            array_extend(arena1, collected, node->items, node->count);
+            array_extend(arena1, playlist, node->items, node->count);
           }
         }
         table_free_items(arena1, &duplicates);
@@ -3418,14 +3446,17 @@ static void cmd_tag_executor(void) {
   }
   if (directory_k) {
     array_free(&console_arena, cmd_ctx.tag->directories);
+    cmd_ctx.tag->directories = NULL;
   }
   if (pattern_k) {
-    array_extend(&console_arena, collected, cmd_ctx.tag->pattern_items->items, (uint32_t)pattern_k);
+    array_extend(&console_arena, playlist, cmd_ctx.tag->pattern_items->items, (uint32_t)pattern_k);
     array_free(&console_arena, cmd_ctx.tag->pattern_items);
+    cmd_ctx.tag->pattern_items = NULL;
   }
   if (url_k) {
-    array_extend(&console_arena, collected, cmd_ctx.tag->url_items->items, (uint32_t)url_k);
+    array_extend(&console_arena, playlist, cmd_ctx.tag->url_items->items, (uint32_t)url_k);
     array_free(&console_arena, cmd_ctx.tag->url_items);
+    cmd_ctx.tag->url_items = NULL;
   }
 }
 
