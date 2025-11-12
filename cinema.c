@@ -2575,7 +2575,7 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len, Playli
               docs.items + docs.gsa[l_bound], docs.items + docs.gsa[r_bound]);
   static uint16_t dedup_counter = 1;
   int32_t n = (r_bound - l_bound) + 1;
-  array_init_zero(&docs_arena, result, (uint32_t)n);
+  array_ensure_capacity_core(&docs_arena, result, (uint32_t)n, false);
   for (int32_t i = l_bound; i <= r_bound; ++i) {
     int32_t doc = docs.suffix_to_doc[i];
     if (docs.dedup_counters[doc] != dedup_counter) {
@@ -2759,7 +2759,7 @@ static inline void playlist_set(Instance *instance, Playlist *next) {
 static inline void playlist_play_next(Instance *instance) {
   assert(instance->playlist);
   Playlist *playlist = instance->playlist;
-  uint32_t random = rand_between(0, playlist->count);
+  uint32_t random = rand_between(0, playlist->count - 1);
   overlap_write(instance, MPV_LOADFILE, "loadfile",
                 (char *)docs.items + playlist->items[random], NULL);
 }
@@ -2775,11 +2775,12 @@ static inline void playlist_play_next(Instance *instance) {
 
 static inline void mpv_kill(Instance *instance) {
   assert(instance->pipe);
-  playlist_set(instance, NULL);
   ReadBuffer *buf_head = instance->buf_head;
   ReadBuffer *buf_tail = instance->buf_tail;
   Instance *next = instance->next;
+  playlist_set(instance, NULL);
   ZeroMemory(instance, sizeof(Instance));
+  playlist_set(instance, cin_io.playlists.head);
   instance->buf_head = buf_head;
   instance->buf_tail = buf_tail;
   instance->next = next;
@@ -2933,7 +2934,13 @@ static inline bool init_mpv(void) {
   arena_chunk_init(&iocp_thread_arena, CIN_IO_ARENA_CAP);
   cache_init_core(&io_arena, &cin_io.writes, 1, true);
   cache_init_core(&io_arena, &cin_io.instances, 1, false);
-  cache_init_core(&io_arena, &cin_io.playlists, 1, true);
+  cache_init_core(&io_arena, &cin_io.playlists, 1, false);
+  Playlist *global = cin_io.playlists.head;
+  array_init_core(&io_arena, global, (uint32_t)docs.doc_count, false);
+  for (int32_t i = 0; i < docs.doc_count; ++i) {
+    array_push(&io_arena, global, docs.suffix_to_doc[i]);
+  }
+  cin_io.instances.head->playlist = global;
   cin_io.iocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
   if (!cin_io.iocp) {
     log_last_error("Failed to create iocp");
@@ -3364,7 +3371,7 @@ static void cmd_help_validator(void) {
 static void cmd_reroll_executor(void) {
   // TODO: shuffle
   FOREACH_MPVTARGET(i, instance) {
-    overlap_write(instance, MPV_LOADFILE, "loadfile", "d:/test/video.mp4", NULL);
+    playlist_play_next(instance);
   }
 }
 
@@ -3496,17 +3503,18 @@ static void cmd_tag_validator(void) {
 
 static void cmd_search_executor(void) {
   uint8_t *pattern = (uint8_t *)"";
-  int32_t len = 1;
+  int32_t len = 0;
+  Playlist *playlist = cin_io.playlists.head;
   if (cmd_ctx.unicode) {
     len = utf16_to_utf8(cmd_ctx.unicode);
     pattern = utf8_buf.items;
+    if (len) {
+      log_message(LOG_DEBUG, "Search with pattern: '%s', len: %d", pattern, len);
+      cache_get(&io_arena, &cin_io.playlists, playlist);
+      document_listing(pattern, len - 1, playlist);
+      log_message(LOG_INFO, "Search playlist count=%d, cap=%d", playlist->count, playlist->capacity);
+    }
   }
-  log_message(LOG_DEBUG, "Search with pattern: '%s', len: %d", pattern, len);
-  // TODO:
-  Playlist *playlist = NULL;
-  cache_get(&io_arena, &cin_io.playlists, playlist);
-  document_listing(pattern, len - 1, playlist);
-  log_message(LOG_INFO, "Search playlist count=%d, cap=%d", playlist->count, playlist->capacity);
   FOREACH_MPVTARGET(i, instance) {
     playlist_set(instance, playlist);
     playlist_play_next(instance);
@@ -3632,6 +3640,7 @@ static void cmd_layout_executor(void) {
   }
   for (Instance *next = NULL; screen < next_count; ++screen) {
     cache_get(&io_arena, &cin_io.instances, next);
+    next->playlist = cin_io.playlists.head;
     mpv_spawn(next, screen);
   }
   if (!mpv_demand) mpv_unlock();
