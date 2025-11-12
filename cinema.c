@@ -383,7 +383,7 @@ static inline void arena_slice_free(Arena *arena, Arena_Slice *slice) {
                                             .size = CIN_CACHE_SIZE}); \
   } while (0)
 
-#define cache_get(arena, c, out_node, zero)                        \
+#define cache_get_core(arena, c, out_node, zero)                   \
   do {                                                             \
     assert((c)->head && "forgot to cache_init");                   \
     if ((c)->free_list) {                                          \
@@ -403,6 +403,12 @@ static inline void arena_slice_free(Arena *arena, Arena_Slice *slice) {
     }                                                              \
   } while (0)
 
+#define cache_get(arena, c, out_node) \
+  cache_get_core((arena), (c), (out_node), false)
+
+#define cache_get_zero(arena, c, out_node) \
+  cache_get_core((arena), (c), (out_node), true)
+
 #define cache_put(c, in_node)              \
   do {                                     \
     (in_node)->next_free = (c)->free_list; \
@@ -411,7 +417,7 @@ static inline void arena_slice_free(Arena *arena, Arena_Slice *slice) {
 
 #define cache_foreach(c, T, i, o)     \
   for (uint32_t i = 0; i == 0; i = 1) \
-    for (T *o = (c)->head; o; o = o->next, ++i)
+    for (T *o = (T *)(c)->head; o; o = (T *)o->next, ++i)
 
 #define array_struct_members(T) \
   T *items;                     \
@@ -634,7 +640,7 @@ static_assert(CIN_PTR == 8 ? (CIN_ARRAY_SIZE == 24) : true, "bytes updated (poss
 
 #define array_foreach(a, T, i, o)                           \
   for (uint32_t i = 0, _j = 0; i < (a)->count; _j = 0, ++i) \
-    for (T o = (a)->items[i]; _j == 0; _j = 1)
+    for (T o = (T)(a)->items[i]; _j == 0; _j = 1)
 
 // https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
 // A path can have 248 "characters" (260 - 12 = 248)
@@ -2677,7 +2683,7 @@ static bool overlap_read(Instance *instance) {
 
 static bool overlap_write(Instance *instance, MPV_Packet type, const char *cmd, const char *arg1, const char *arg2) {
   OverlappedWrite *write = NULL;
-  cache_get(&cin_io.arena, &cin_io.writes, write, true);
+  cache_get_zero(&cin_io.arena, &cin_io.writes, write);
   write->ovl_ctx.type = type;
   int64_t request_id = (int64_t)(uintptr_t)write;
   int32_t bytes = 0;
@@ -3572,7 +3578,7 @@ static void cmd_layout_executor(void) {
     ++screen;
   }
   for (Instance *next = NULL; screen < next_count; ++screen) {
-    cache_get(&cin_io.arena, &cin_io.instances, next, false);
+    cache_get(&cin_io.arena, &cin_io.instances, next);
     mpv_spawn(next, screen);
   }
   if (!mpv_demand) mpv_unlock();
