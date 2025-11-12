@@ -438,7 +438,7 @@ static inline void arena_slice_free(Arena *arena, Arena_Slice *slice) {
 #define CIN_ARRAY_SIZE sizeof(array_struct(void))
 static_assert(CIN_PTR == 8 ? (CIN_ARRAY_SIZE == 24) : true, "bytes updated (possibly pow2)");
 
-#define array_init(arena, a, n, zero)                               \
+#define array_init_core(arena, a, n, zero)                          \
   do {                                                              \
     Arena_Slice _slice = {0};                                       \
     arena_slice_reinit((arena), &_slice, sizeof(*(a)->items) * (n), \
@@ -450,8 +450,14 @@ static_assert(CIN_PTR == 8 ? (CIN_ARRAY_SIZE == 24) : true, "bytes updated (poss
     (a)->bytes_capacity_k = _slice.k;                               \
   } while (0)
 
-#define array_create(arena, slice, zero) \
-  arena_slice_reinit((arena), &slice, CIN_ARRAY_SIZE, align_size(CIN_ARRAY_SIZE), (zero))
+#define array_init(arena, a, n) \
+  array_init_core((arena), (a), (n), false)
+
+#define array_init_zero(arena, a, n) \
+  array_init_core((arena), (a), (n), true)
+
+#define array_create(arena, slice) \
+  arena_slice_reinit((arena), &slice, CIN_ARRAY_SIZE, align_size(CIN_ARRAY_SIZE), false)
 
 #define array_free_items(arena, a)                                                        \
   if ((a)->items) arena_free_pow2((arena), &(Arena_Slice){.items = (uint8_t *)(a)->items, \
@@ -466,11 +472,11 @@ static_assert(CIN_PTR == 8 ? (CIN_ARRAY_SIZE == 24) : true, "bytes updated (poss
                                             .size = CIN_ARRAY_SIZE}); \
   } while (0)
 
-#define array_ensure_capacity(arena, a, total, zero)                              \
+#define array_ensure_capacity_core(arena, a, total, zero)                         \
   do {                                                                            \
     if ((total) > (a)->capacity) {                                                \
       if (!(a)->capacity) {                                                       \
-        array_init((arena), (a), (total), (zero));                                \
+        array_init_core((arena), (a), (total), (zero));                           \
       } else {                                                                    \
         if (unlikely((a)->bytes_capacity_k >= CIN_ARENA_MAX_K)) {                 \
           printf("Cinema crashed trying to allocate excessive memory (%u bytes)", \
@@ -490,55 +496,73 @@ static_assert(CIN_PTR == 8 ? (CIN_ARRAY_SIZE == 24) : true, "bytes updated (poss
     }                                                                             \
   } while (0)
 
-#define array_reserve(arena, a, n, zero) \
-  array_ensure_capacity((arena), (a), (a)->count + (n), (zero))
+#define array_reserve_core(arena, a, n, zero) \
+  array_ensure_capacity_core((arena), (a), (a)->count + (n), (zero))
 
-#define array_resize(arena, a, total, zero)               \
-  do {                                                    \
-    array_ensure_capacity((arena), (a), (total), (zero)); \
-    (a)->count = (total);                                 \
+#define array_reserve(arena, a, n) \
+  array_reserve_core((arena), (a), (n), false)
+
+#define array_reserve_zero(arena, a, n) \
+  array_reserve_core((arena), (a), (n), true)
+
+#define array_resize(arena, a, total)                         \
+  do {                                                        \
+    array_ensure_capacity_core((arena), (a), (total), false); \
+    (a)->count = (total);                                     \
   } while (0)
 
-#define array_grow(arena, a, n, zero)         \
-  do {                                        \
-    array_reserve((arena), (a), (n), (zero)); \
-    (a)->count += (n);                        \
+#define array_grow(arena, a, n)       \
+  do {                                \
+    array_reserve((arena), (a), (n)); \
+    (a)->count += (n);                \
   } while (0)
 
-#define array_push(arena, a, item, zero)    \
-  do {                                      \
-    array_reserve((arena), (a), 1, (zero)); \
-    (a)->items[(a)->count++] = (item);      \
+#define array_push_core(arena, a, item, zero)    \
+  do {                                           \
+    array_reserve_core((arena), (a), 1, (zero)); \
+    (a)->items[(a)->count++] = (item);           \
   } while (0)
 
-#define array_set(arena, a, new_items, n, zero)                 \
+#define array_push(arena, a, item) \
+  array_push_core((arena), (a), (item), false)
+
+#define array_push_zero(arena, a, item) \
+  array_push_core((arena), (a), (item), true)
+
+#define array_set(arena, a, new_items, n)                       \
   do {                                                          \
-    array_resize((arena), (a), (n), (zero));                    \
+    array_resize((arena), (a), (n));                            \
     memcpy((a)->items, (new_items), (n) * sizeof(*(a)->items)); \
   } while (0)
 
-#define array_extend(arena, a, new_items, n, zero)                           \
+#define array_extend_core(arena, a, new_items, n, zero)                      \
   do {                                                                       \
-    array_reserve((arena), (a), (n), (zero));                                \
+    array_reserve_core((arena), (a), (n), (zero));                           \
     memcpy((a)->items + (a)->count, (new_items), (n) * sizeof(*(a)->items)); \
     (a)->count += (n);                                                       \
   } while (0)
 
-#define array_wextend(arena, a, new_items, n, zero)     \
+#define array_extend(arena, a, new_items, n) \
+  array_extend_core((arena), (a), (new_items), (n), false)
+
+#define array_extend_zero(arena, a, new_items, n) \
+  array_extend_core((arena), (a), (new_items), (n), true)
+
+#define array_wextend(arena, a, new_items, n)           \
   do {                                                  \
-    array_reserve((arena), (a), (n), (zero));           \
+    array_reserve((arena), (a), (n));                   \
     wmemcpy((a)->items + (a)->count, (new_items), (n)); \
     (a)->count += (n);                                  \
   } while (0)
 
-#define array_wsextend(arena, a, new_items, zero) \
-  array_wextend((arena), (a), (new_items),        \
-                sizeof((new_items)) / sizeof(*((new_items))) - 1, (zero));
+#define array_wsextend(arena, a, new_items) \
+  array_wextend((arena), (a), (new_items),  \
+                sizeof((new_items)) / sizeof(*((new_items))) - 1);
 
-#define array_splice(arena, a, i, new_items, n, zero)                 \
+#define array_splice(arena, a, i, new_items, n)                       \
   do {                                                                \
     assert((i) <= (a)->count);                                        \
-    array_reserve((arena), (a), (n), (zero));                         \
+    array_reserve((arena), (a), (n));                                 \
     memmove((a)->items + (i) + (n),                                   \
             (a)->items + (i),                                         \
             ((a)->count - (i)) * sizeof(*(a)->items));                \
@@ -546,19 +570,19 @@ static_assert(CIN_PTR == 8 ? (CIN_ARRAY_SIZE == 24) : true, "bytes updated (poss
     (a)->count += (n);                                                \
   } while (0)
 
-#define array_wsplice(arena, a, i, new_items, n, zero)                    \
+#define array_wsplice(arena, a, i, new_items, n)                          \
   do {                                                                    \
     assert((i) <= (a)->count);                                            \
-    array_reserve((arena), (a), (n), (zero));                             \
+    array_reserve((arena), (a), (n));                                     \
     wmemmove((a)->items + (i) + (n), (a)->items + (i), (a)->count - (i)); \
     wmemcpy((a)->items + (i), (new_items), (n));                          \
     (a)->count += (n);                                                    \
   } while (0)
 
-#define array_insert(arena, a, i, new_item, zero)        \
+#define array_insert(arena, a, i, new_item)              \
   do {                                                   \
     assert((i) <= (a)->count);                           \
-    array_reserve((arena), (a), 1, (zero));              \
+    array_reserve((arena), (a), 1);                      \
     if ((i) < (a)->count) {                              \
       memmove((a)->items + (i) + 1,                      \
               (a)->items + (i),                          \
@@ -568,10 +592,10 @@ static_assert(CIN_PTR == 8 ? (CIN_ARRAY_SIZE == 24) : true, "bytes updated (poss
     (a)->count++;                                        \
   } while (0)
 
-#define array_winsert(arena, a, i, new_item, zero)                        \
+#define array_winsert(arena, a, i, new_item)                              \
   do {                                                                    \
     assert((i) <= (a)->count);                                            \
-    array_reserve((arena), (a), 1, (zero));                               \
+    array_reserve((arena), (a), 1);                                       \
     if ((i) < (a)->count) {                                               \
       wmemmove((a)->items + (i) + 1, (a)->items + (i), (a)->count - (i)); \
     }                                                                     \
@@ -645,11 +669,10 @@ static Console_Message *create_console_message(void) {
   Console_Message *msg = arena_bump_T1(&console_arena, Console_Message);
   assert(msg);
 #if defined(NDEBUG)
-  bool zero = false;
+  array_init(&console_arena, msg, CIN_CM_CAP);
 #else
-  bool zero = true;
+  array_init_zero(&console_arena, msg, CIN_CM_CAP);
 #endif
-  array_init(&console_arena, msg, CIN_CM_CAP, zero);
   msg->next = NULL;
   msg->prev = NULL;
   return msg;
@@ -696,7 +719,7 @@ static void wwritef(const wchar_t *format, ...) {
   assert(len_i32 >= 0);
   uint32_t len = (uint32_t)len_i32;
   va_end(args);
-  array_resize(&console_arena, &wwrite_buf, len + 1, false);
+  array_resize(&console_arena, &wwrite_buf, len + 1);
   _vsnwprintf_s(wwrite_buf.items, len + 1, len, format, args_dup);
   va_end(args_dup);
   WriteConsoleW(repl.out, wwrite_buf.items, len, NULL, NULL);
@@ -709,7 +732,7 @@ static void wvwritef(const wchar_t *format, va_list args) {
   assert(len_i32 >= 0);
   uint32_t len = (uint32_t)len_i32;
   va_end(args_dup);
-  array_resize(&console_arena, &wwrite_buf, len + 1, false);
+  array_resize(&console_arena, &wwrite_buf, len + 1);
   _vsnwprintf_s(wwrite_buf.items, len + 1, len, format, args);
   WriteConsoleW(repl.out, wwrite_buf.items, len, NULL, NULL);
 }
@@ -732,7 +755,7 @@ static void writef(const char *format, ...) {
   assert(len_i32 >= 0);
   uint32_t len = (uint32_t)len_i32;
   va_end(args);
-  array_resize(&console_arena, &write_buf, len + 1, false);
+  array_resize(&console_arena, &write_buf, len + 1);
   _vsnprintf_s(write_buf.items, len + 1, len, format, args_dup);
   va_end(args_dup);
   WriteConsoleA(repl.out, write_buf.items, len, NULL, NULL);
@@ -745,7 +768,7 @@ static void vwritef(const char *format, va_list args) {
   assert(len_i32 >= 0);
   uint32_t len = (uint32_t)len_i32;
   va_end(args_dup);
-  array_resize(&console_arena, &write_buf, len + 1, false);
+  array_resize(&console_arena, &write_buf, len + 1);
   _vsnprintf_s(write_buf.items, len + 1, len, format, args);
   WriteConsoleA(repl.out, write_buf.items, len, NULL, NULL);
 }
@@ -1064,7 +1087,7 @@ static inline int32_t utf16_to_utf8(const wchar_t *wstr) {
   // n_bytes represents the char count needed
   int32_t n_bytes = WideCharToMultiByte(CP_UTF8, 0, wstr, -1, NULL, 0, NULL, NULL);
   assert(n_bytes);
-  array_resize(&console_arena, &utf8_buf, (uint32_t)n_bytes, false);
+  array_resize(&console_arena, &utf8_buf, (uint32_t)n_bytes);
   return WideCharToMultiByte(CP_UTF8, 0, wstr, -1, (char *)utf8_buf.items, n_bytes, NULL, NULL);
 }
 
@@ -1076,7 +1099,7 @@ static inline int32_t utf8_to_utf16_raw(const char *str) {
   // n_chars represents the wchar_t count needed
   int32_t n_chars = MultiByteToWideChar(CP_UTF8, 0, str, -1, NULL, 0);
   assert(n_chars);
-  array_resize(&console_arena, &utf16_buf_raw, (uint32_t)n_chars, false);
+  array_resize(&console_arena, &utf16_buf_raw, (uint32_t)n_chars);
   return MultiByteToWideChar(CP_UTF8, 0, str, -1, utf16_buf_raw.items, n_chars);
 }
 
@@ -1086,7 +1109,7 @@ static inline int32_t utf8_to_utf16_nraw(const char *str, int32_t len) {
   // process len bytes, with n_chars not including null terminator
   int32_t n_chars = MultiByteToWideChar(CP_UTF8, 0, str, len, NULL, 0);
   assert(n_chars);
-  array_resize(&console_arena, &utf16_buf_raw, (uint32_t)n_chars, false);
+  array_resize(&console_arena, &utf16_buf_raw, (uint32_t)n_chars);
   return MultiByteToWideChar(CP_UTF8, 0, str, len, utf16_buf_raw.items, n_chars);
 }
 
@@ -1095,7 +1118,7 @@ static inline int32_t utf16_norm(const wchar_t *str) {
   int32_t n_chars = LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE,
                                   str, -1, NULL, 0, NULL, NULL, 0);
   assert(n_chars);
-  array_resize(&console_arena, &utf16_buf_norm, (uint32_t)n_chars, false);
+  array_resize(&console_arena, &utf16_buf_norm, (uint32_t)n_chars);
   return LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE, str,
                        -1, utf16_buf_norm.items, n_chars, NULL, NULL, 0);
 }
@@ -1757,7 +1780,7 @@ static inline Conf_Scope *conf_scope(void) {
 static inline void conf_enter_scope(Conf_Scope_Type type) {
   Conf_Scope scope = {0};
   scope.type = type;
-  array_push(&console_arena, &conf_parser.scopes, scope, false);
+  array_push(&console_arena, &conf_parser.scopes, scope);
 }
 
 static inline void conf_error_log(size_t row, size_t col, const char *allowed) {
@@ -1794,14 +1817,14 @@ static inline bool conf_kcmp(char *k, Conf_Scope_Type type, Conf_Key *out, bool 
       log_message(LOG_WARNING, "Overwriting existing value on line %zu for key '%s': %s => %s",
                   conf_parser.line, k, out->items, conf_parser.v);
     }
-    array_set(&console_arena, out, conf_parser.v, v_len, false);
+    array_set(&console_arena, out, conf_parser.v, v_len);
   } else {
     if (out->count > 0) {
       assert(out->items[out->count - 1] == '\0');
       out->items[out->count - 1] = ',';
-      array_push(&console_arena, out, ' ', false);
+      array_push(&console_arena, out, ' ');
     }
-    array_extend(&console_arena, out, conf_parser.v, v_len, false);
+    array_extend(&console_arena, out, conf_parser.v, v_len);
   }
   return true;
 }
@@ -1858,8 +1881,8 @@ static bool parse_config(const char *filename) {
     log_message(LOG_ERROR, "Failed to open config file '%s': %s", filename, err_buf);
     goto end;
   }
-  array_init(&console_arena, &conf_parser.buf, CONF_LINE_CAP, false);
-  array_init(&console_arena, &conf_parser.scopes, CONF_SCOPES_CAP, false);
+  array_init(&console_arena, &conf_parser.buf, CONF_LINE_CAP);
+  array_init(&console_arena, &conf_parser.scopes, CONF_SCOPES_CAP);
   conf_enter_scope(CONF_SCOPE_ROOT);
   conf_parser.line = 1;
   while (fgets(conf_parser.buf.items, (int32_t)conf_parser.buf.capacity, file)) {
@@ -1878,9 +1901,9 @@ static bool parse_config(const char *filename) {
       conf_parser.buf.count = (uint32_t)conf_parser.len;
       int32_t c;
       while ((c = fgetc(file)) != '\n' && c != EOF) {
-        array_push(&console_arena, &conf_parser.buf, (char)c, false);
+        array_push(&console_arena, &conf_parser.buf, (char)c);
       }
-      array_push(&console_arena, &conf_parser.buf, '\0', false);
+      array_push(&console_arena, &conf_parser.buf, '\0');
       conf_parser.len = conf_parser.buf.count - 1;
     }
     assert(conf_parser.buf.items[conf_parser.len] == '\0');
@@ -1981,7 +2004,7 @@ static void docs_append(uint8_t *utf8, int32_t len) {
   // Instead of appending it, we replace it with forward slash.
   for (int32_t i = 0; i < len; ++i)
     if (utf8[i] == '\\') utf8[i] = '/';
-  array_extend(&docs.arena, &docs, utf8, (uint32_t)len, true);
+  array_extend_zero(&docs.arena, &docs, utf8, (uint32_t)len);
   ++docs.doc_count;
 }
 
@@ -2042,7 +2065,7 @@ static void setup_directory(const char *path, TagDirectories *tag_dirs) {
   size_t len = (size_t)len_utf16;
   DirectoryPath root_dir = {.len = len};
   wmemcpy(root_dir.path, utf16_buf_norm.items, len);
-  array_push(&console_arena, &dir_stack, root_dir, false);
+  array_push(&console_arena, &dir_stack, root_dir);
   while (dir_stack.count > 0) {
     DirectoryPath dir = dir_stack.items[--dir_stack.count];
     log_wmessage(LOG_DEBUG, L"Path: %ls", dir.path);
@@ -2052,7 +2075,7 @@ static void setup_directory(const char *path, TagDirectories *tag_dirs) {
     int32_t bytes_i32 = utf16_to_utf8(dir.path);
     assert(bytes_i32 > 0);
     uint32_t bytes = (uint32_t)bytes_i32;
-    array_reserve(&console_arena, &dir_string_arena, bytes + 1, false);
+    array_reserve(&console_arena, &dir_string_arena, bytes + 1);
     uint8_t *k_arena = dir_string_arena.items;
     size_t k_offset = dir_string_arena.count;
     memcpy(k_arena + k_offset, utf8_buf.items, bytes);
@@ -2066,7 +2089,7 @@ static void setup_directory(const char *path, TagDirectories *tag_dirs) {
       // be calculated (e.g., using the document ids to retrieve file names and
       // recognize depth reduction)
       if (tag_dirs) {
-        array_push(&console_arena, tag_dirs, dup_index, false);
+        array_push(&console_arena, tag_dirs, dup_index);
       }
       continue;
     }
@@ -2093,13 +2116,13 @@ static void setup_directory(const char *path, TagDirectories *tag_dirs) {
     }
     // Commit the new directory
     dir_string_arena.count += bytes;
-    array_grow(&console_arena, &dir_node_arena, 1, false);
+    array_grow(&console_arena, &dir_node_arena, 1);
     DirectoryNode *node = &dir_node_arena.items[node_tail];
     node->k_offset = k_offset;
     assert(node);
-    array_init(&console_arena, node, CIN_DIRECTORY_ITEMS_CAP, false);
+    array_init(&console_arena, node, CIN_DIRECTORY_ITEMS_CAP);
     if (tag_dirs) {
-      array_push(&console_arena, tag_dirs, (int32_t)node_tail, false);
+      array_push(&console_arena, tag_dirs, (int32_t)node_tail);
     }
     do {
       if (data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
@@ -2122,12 +2145,12 @@ static void setup_directory(const char *path, TagDirectories *tag_dirs) {
         assert(nested_path.path[nested_path.len - 1] == L'\0');
         assert(nested_path.len > 0);
         ++dir_stack.abs_count;
-        array_ensure_capacity(&console_arena, &dir_stack, dir_stack.abs_count, false);
-        array_push(&console_arena, &dir_stack, nested_path, false);
+        array_ensure_capacity_core(&console_arena, &dir_stack, dir_stack.abs_count, false);
+        array_push(&console_arena, &dir_stack, nested_path);
       } else {
         wmemcpy(dir.path + dir.len, file, file_len);
         int32_t utf8_len = utf16_to_utf8(dir.path);
-        array_push(&console_arena, node, (int32_t)array_bytes(&docs), false);
+        array_push(&console_arena, node, (int32_t)array_bytes(&docs));
         docs_append(utf8_buf.items, utf8_len);
       }
     } while (FindNextFileW(search, &data) != 0);
@@ -2207,11 +2230,11 @@ static inline void setup_pattern(const char *pattern, TagPatternItems *tag_patte
       array_shrink(&docs, (uint32_t)len);
       --docs.doc_count;
       if (tag_pattern_items) {
-        array_push(&console_arena, tag_pattern_items, dup_doc, false);
+        array_push(&console_arena, tag_pattern_items, dup_doc);
       }
     } else {
       if (tag_pattern_items) {
-        array_push(&console_arena, tag_pattern_items, tail_doc, false);
+        array_push(&console_arena, tag_pattern_items, tail_doc);
       }
     }
   } while (FindNextFileW(search, &data) != 0);
@@ -2233,11 +2256,11 @@ static inline void setup_url(const char *url, TagUrlItems *tag_url_items) {
     array_shrink(&docs, (uint32_t)len_utf8);
     --docs.doc_count;
     if (tag_url_items) {
-      array_push(&console_arena, tag_url_items, dup_doc, false);
+      array_push(&console_arena, tag_url_items, dup_doc);
     }
   } else {
     if (tag_url_items) {
-      array_push(&console_arena, tag_url_items, tail_doc, false);
+      array_push(&console_arena, tag_url_items, tail_doc);
     }
   }
 }
@@ -2252,8 +2275,8 @@ static inline void setup_tag(const char *tag, TagItems *tag_items) {
 
 static inline void setup_screen(const char *geometry, uint32_t bytes, Cin_Layout *layout) {
   Cin_Screen screen = {.offset = (int32_t)screen_arena.count, .len = (int32_t)bytes - 1};
-  array_extend(&console_arena, &screen_arena, geometry, bytes, false);
-  array_push(&console_arena, layout, screen, false);
+  array_extend(&console_arena, &screen_arena, geometry, bytes);
+  array_push(&console_arena, layout, screen);
 }
 
 static inline void setup_layout(const char *name, Cin_Layout *layout) {
@@ -2278,9 +2301,9 @@ static bool init_config(const char *filename) {
   table_calloc(&pat_map, CIN_PATTERN_ITEMS_CAP);
   table_calloc(&url_map, CIN_URLS_CAP);
   arena_chunk_init(&docs.arena, CIN_DOCS_ARENA_CAP);
-  array_init(&docs.arena, &docs, CIN_DOCS_CAP, true);
-  array_init(&console_arena, &dir_node_arena, CIN_DIRECTORIES_CAP, false);
-  array_init(&console_arena, &dir_string_arena, CIN_DIRECTORY_STRINGS_CAP, false);
+  array_init_zero(&docs.arena, &docs, CIN_DOCS_CAP);
+  array_init(&console_arena, &dir_node_arena, CIN_DIRECTORIES_CAP);
+  array_init(&console_arena, &dir_string_arena, CIN_DIRECTORY_STRINGS_CAP);
   tag_tree = radix_tree();
   layout_tree = radix_tree();
   Conf_Root *root = &conf_parser.scopes.items[0].root;
@@ -2303,7 +2326,7 @@ static bool init_config(const char *filename) {
         return false;
       }
       Cin_Layout *layout = arena_bump_T1(&console_arena, Cin_Layout);
-      array_init(&console_arena, layout, CIN_LAYOUT_SCREENS_CAP, false);
+      array_init(&console_arena, layout, CIN_LAYOUT_SCREENS_CAP);
       log_message(LOG_DEBUG, "Name: %s", scope->layout.name.items);
       FOREACH_PART(&scope->layout.screen, part, bytes) {
         log_message(LOG_DEBUG, "Screen: %s, len=%d", part, bytes);
@@ -2322,17 +2345,17 @@ static bool init_config(const char *filename) {
         tag_items = arena_bump_T1(&console_arena, TagItems);
         if (scope->media.directories.count) {
           tag_items->directories = arena_bump_T1(&console_arena, TagDirectories);
-          array_init(&console_arena, tag_items->directories, CIN_DIRECTORIES_CAP, false);
+          array_init(&console_arena, tag_items->directories, CIN_DIRECTORIES_CAP);
           tag_directories = tag_items->directories;
         }
         if (scope->media.patterns.count) {
           tag_items->pattern_items = arena_bump_T1(&console_arena, TagPatternItems);
-          array_init(&console_arena, tag_items->pattern_items, scope->media.patterns.count, false);
+          array_init(&console_arena, tag_items->pattern_items, scope->media.patterns.count);
           tag_pattern_items = tag_items->pattern_items;
         }
         if (scope->media.urls.count) {
           tag_items->url_items = arena_bump_T1(&console_arena, TagUrlItems);
-          array_init(&console_arena, tag_items->url_items, scope->media.urls.count, false);
+          array_init(&console_arena, tag_items->url_items, scope->media.urls.count);
           tag_url_items = tag_items->url_items;
         }
       }
@@ -2527,12 +2550,12 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len, TempDo
               docs.items + docs.gsa[l_bound], docs.items + docs.gsa[r_bound]);
   static uint16_t dedup_counter = 1;
   int32_t n = (r_bound - l_bound) + 1;
-  array_init(&docs.arena, result, (uint32_t)n, true);
+  array_init_zero(&docs.arena, result, (uint32_t)n);
   for (int32_t i = l_bound; i <= r_bound; ++i) {
     int32_t doc = docs.suffix_to_doc[i];
     if (docs.dedup_counters[doc] != dedup_counter) {
       docs.dedup_counters[doc] = dedup_counter;
-      array_push(&docs.arena, result, doc, false);
+      array_push(&docs.arena, result, doc);
       log_message(LOG_TRACE, "docs.gsa[%7d] = %-25.25s (%7d)| (%7d) = %-30.30s counter=%d", i, docs.items + docs.gsa[i], docs.gsa[i], doc, docs.items + doc, dedup_counter);
     }
   }
@@ -2926,12 +2949,12 @@ static inline bool init_repl(void) {
   if (!GetConsoleCursorInfo(repl.out, &repl.cursor_info)) goto handle_out;
   if (!WriteConsoleW(repl.out, PREFIX_STR, PREFIX_STRLEN, NULL, NULL)) goto handle_out;
   if (!arena_chunk_init(&console_arena, CIN_ARENA_CAP)) goto memory;
-  array_init(&console_arena, &wwrite_buf, CIN_ARRAY_CAP, false);
-  array_init(&console_arena, &write_buf, CIN_ARRAY_CAP, false);
-  array_init(&console_arena, &preview, CIN_ARRAY_CAP, false);
-  array_init(&console_arena, &utf16_buf_raw, CIN_MAX_PATH, false);
-  array_init(&console_arena, &utf16_buf_norm, CIN_MAX_PATH, false);
-  array_init(&console_arena, &utf8_buf, CIN_MAX_PATH, CIN_MAX_PATH_BYTES);
+  array_init(&console_arena, &wwrite_buf, CIN_ARRAY_CAP);
+  array_init(&console_arena, &write_buf, CIN_ARRAY_CAP);
+  array_init(&console_arena, &preview, CIN_ARRAY_CAP);
+  array_init(&console_arena, &utf16_buf_raw, CIN_MAX_PATH);
+  array_init(&console_arena, &utf16_buf_norm, CIN_MAX_PATH);
+  array_init(&console_arena, &utf8_buf, CIN_MAX_PATH_BYTES);
   repl.msg = create_console_message();
   repl.msg_index = 0;
   repl.home = (COORD){.X = PREFIX, .Y = buffer_info.dwCursorPosition.Y};
@@ -2988,7 +3011,7 @@ static inline bool resize_console(void) {
   SHORT cols = (SHORT)buf_dwSize_X;
   COORD buffer_size = {.X = cols, .Y = rows};
   DWORD buffer_count = (DWORD)cols * (DWORD)rows;
-  array_resize(&console_arena, &console_buffer, buffer_count, false);
+  array_resize(&console_arena, &console_buffer, buffer_count);
   COORD region_start = {.X = 0, .Y = 0};
   SMALL_RECT region = {
       .Left = 0,
@@ -3020,7 +3043,7 @@ static inline bool resize_console(void) {
       rows = upper_cursor.Y - lower_cursor.Y + 1;
       buffer_size.Y = rows;
       buffer_count = (DWORD)cols * (DWORD)rows;
-      array_resize(&console_arena, &console_buffer, buffer_count, false);
+      array_resize(&console_arena, &console_buffer, buffer_count);
       region.Left = 0;
       region.Top = lower_cursor.Y;
       region.Right = cols - 1;
@@ -3143,7 +3166,7 @@ static struct CommandContext {
 static inline void set_preview(bool success, const wchar_t *format, ...) {
   preview.count = 0;
   if (!success) {
-    array_wsextend(&console_arena, &preview, COMMAND_ERROR_WMESSAGE, false);
+    array_wsextend(&console_arena, &preview, COMMAND_ERROR_WMESSAGE);
   }
   size_t start = preview.count;
   va_list args;
@@ -3154,7 +3177,7 @@ static inline void set_preview(bool success, const wchar_t *format, ...) {
   assert(len_i32 >= 0);
   uint32_t len = (uint32_t)len_i32;
   va_end(args);
-  array_grow(&console_arena, &preview, len + 1, false);
+  array_grow(&console_arena, &preview, len + 1);
   _vsnwprintf_s(preview.items + start, preview.capacity, len, format, args_dup);
   va_end(args_dup);
 }
@@ -3179,15 +3202,15 @@ static inline bool validate_screens(void) {
   }
   cmd_ctx.targets.count = 0;
   if (!n_count) {
-    array_wsextend(&console_arena, &cmd_ctx.targets, L"(all screens)\0", false);
+    array_wsextend(&console_arena, &cmd_ctx.targets, L"(all screens)\0");
     for (size_t i = 0; i < cmd_ctx.layout->count; ++i) {
-      array_push(&console_arena, &cmd_ctx.numbers, i + 1, false);
+      array_push(&console_arena, &cmd_ctx.numbers, i + 1);
     }
   } else {
     if (n_count == 1) {
-      array_wsextend(&console_arena, &cmd_ctx.targets, L"(screen ", false);
+      array_wsextend(&console_arena, &cmd_ctx.targets, L"(screen ");
     } else {
-      array_wsextend(&console_arena, &cmd_ctx.targets, L"(screens ", false);
+      array_wsextend(&console_arena, &cmd_ctx.targets, L"(screens ");
     }
     const wchar_t *v_str = L"%zu" CIN_SCREEN_SEPARATOR;
     for (size_t i = 0; i < n_count; ++i) {
@@ -3195,12 +3218,12 @@ static inline bool validate_screens(void) {
       int32_t len_i32 = _scwprintf(v_str, number);
       assert(len_i32);
       uint32_t len = (uint32_t)len_i32 + 1;
-      array_reserve(&console_arena, &cmd_ctx.targets, len, false);
+      array_reserve(&console_arena, &cmd_ctx.targets, len);
       swprintf(cmd_ctx.targets.items + cmd_ctx.targets.count, len, v_str, number);
       cmd_ctx.targets.count += len - 1;
     }
     cmd_ctx.targets.count -= CIN_SCREEN_SEPARATOR_LEN;
-    array_push(&console_arena, &cmd_ctx.targets, L')', false);
+    array_push(&console_arena, &cmd_ctx.targets, L')');
     cmd_ctx.targets.items[cmd_ctx.targets.count] = L'\0';
   }
   return true;
@@ -3303,7 +3326,7 @@ static void cmd_tag_executor(void) {
   if (cmd_ctx.tag->collected) {
     // TODO:
     array_foreach(cmd_ctx.tag->collected, int32_t, i, o) {
-      log_message(LOG_TRACE, "Tag doc %u=%i", i, o);
+      log_message(LOG_INFO, "Tag doc %u=%i", i, o);
     }
     return;
   }
@@ -3335,7 +3358,7 @@ static void cmd_tag_executor(void) {
           int32_t dup = rh_insert(&duplicates, k_arena, start->k_offset, start_len + 1, 0);
           if (dup >= 0) continue;
           log_message(LOG_TRACE, "Tag directory: %s (%zu)", start_str, start_len);
-          array_extend(&console_arena, collected, start->items, start->count, true);
+          array_extend(&console_arena, collected, start->items, start->count);
           for (size_t j = ++node_index; j < dir_node_arena.count; ++j) {
             DirectoryNode *node = &dir_node_arena.items[j];
             if (!node->count) continue;
@@ -3345,7 +3368,7 @@ static void cmd_tag_executor(void) {
             dup = rh_insert(&duplicates, k_arena, node->k_offset, len + 1, 0);
             if (dup >= 0) continue;
             log_message(LOG_TRACE, "Tag directory: %s", str);
-            array_extend(&console_arena, collected, node->items, node->count, true);
+            array_extend(&console_arena, collected, node->items, node->count);
           }
         }
         table_free(duplicates);
@@ -3377,11 +3400,11 @@ static void cmd_tag_executor(void) {
     array_free(&console_arena, cmd_ctx.tag->directories);
   }
   if (pattern_k) {
-    array_extend(&console_arena, collected, cmd_ctx.tag->pattern_items->items, (uint32_t)pattern_k, false);
+    array_extend(&console_arena, collected, cmd_ctx.tag->pattern_items->items, (uint32_t)pattern_k);
     array_free(&console_arena, cmd_ctx.tag->pattern_items);
   }
   if (url_k) {
-    array_extend(&console_arena, collected, cmd_ctx.tag->url_items->items, (uint32_t)url_k, false);
+    array_extend(&console_arena, collected, cmd_ctx.tag->url_items->items, (uint32_t)url_k);
     array_free(&console_arena, cmd_ctx.tag->url_items);
   }
 }
@@ -3504,8 +3527,8 @@ static void cmd_swap_validator(void) {
       set_preview(false, L"swap requires 2 numbers or a layout with 2 screens");
       return;
     }
-    array_push(&console_arena, &cmd_ctx.numbers, 1, false);
-    array_push(&console_arena, &cmd_ctx.numbers, 2, false);
+    array_push(&console_arena, &cmd_ctx.numbers, 1);
+    array_push(&console_arena, &cmd_ctx.numbers, 2);
     break;
   default:
     set_preview(false, L"swap must have 2 or 0 numbers, not %zu", n);
@@ -3584,7 +3607,7 @@ static inline void register_cmd(const wchar_t *name, const wchar_t *help, cmd_va
   int32_t len_i32 = _scwprintf(v_str, name, help);
   assert(len_i32);
   uint32_t len = (uint32_t)len_i32 + 1;
-  array_reserve(&console_arena, &cmd_ctx.help, len, false);
+  array_reserve(&console_arena, &cmd_ctx.help, len);
   swprintf(cmd_ctx.help.items + cmd_ctx.help.count, len, v_str, name, help);
   cmd_ctx.help.count += len - 1;
 }
@@ -3598,11 +3621,10 @@ static bool init_commands(void) {
   cmd_ctx.layout = (cmd_layout)layout_v;
   cmd_ctx.queued_layout = cmd_ctx.layout;
   cmd_ctx.trie = patricia_node(NULL, 0);
-  array_init(&console_arena, &cmd_ctx.numbers, COMMAND_NUMBERS_CAP, false);
+  array_init(&console_arena, &cmd_ctx.numbers, COMMAND_NUMBERS_CAP);
   array_wsextend(&console_arena, &cmd_ctx.help,
                  WCR L"Available commands:" WCRLF L"  "
-                     L"Note: optional arguments before/after in brackets []" WCRLF,
-                 false);
+                     L"Note: optional arguments before/after in brackets []" WCRLF);
   register_cmd(L"help", L"Show all commands", cmd_help_validator);
   register_cmd(L"layout", L"Change layout to name [layout (name)]", cmd_layout_validator);
   register_cmd(L"reroll", L"Shuffle media [(1 2 ..) reroll]", cmd_reroll_validator);
@@ -3632,7 +3654,7 @@ static cmd_validator parse_repl(void) {
   cmd_ctx.executor = NULL;
   cmd_ctx.numbers.count = 0;
   cmd_ctx.unicode = NULL;
-  array_reserve(&console_arena, repl.msg, 1, false);
+  array_reserve(&console_arena, repl.msg, 1);
   repl.msg->items[repl.msg->count] = L'\0';
   wchar_t *p = repl.msg->items;
   while (iswspace(*p)) ++p;
@@ -3645,13 +3667,13 @@ static cmd_validator parse_repl(void) {
     } else if (*p == ' ') {
       if (number) {
         // 4c. push decimal number onto array
-        array_push(&console_arena, &cmd_ctx.numbers, number, false);
+        array_push(&console_arena, &cmd_ctx.numbers, number);
       }
       number = 0;
     } else if (cin_wisloweralpha(*p)) {
       // if numbers array empty and number, push
       if (number) {
-        array_push(&console_arena, &cmd_ctx.numbers, number, false);
+        array_push(&console_arena, &cmd_ctx.numbers, number);
         number = 0;
       }
       break;
@@ -3667,7 +3689,7 @@ static cmd_validator parse_repl(void) {
   if (!*p) {
     // 2/4b. command
     if (number) {
-      array_push(&console_arena, &cmd_ctx.numbers, number, false);
+      array_push(&console_arena, &cmd_ctx.numbers, number);
     }
     return cmd_reroll_validator;
   }
@@ -3845,7 +3867,7 @@ int main(int argc, char **argv) {
     case VK_UP: {
       if (!repl.msg->prev) continue;
       DWORD prev_count = repl.msg->count;
-      array_resize(&console_arena, repl.msg, repl.msg->prev->count, false);
+      array_resize(&console_arena, repl.msg, repl.msg->prev->count);
       wmemcpy(repl.msg->items, repl.msg->prev->items, repl.msg->prev->count);
       repl.msg_index = repl.msg->count;
       repl.msg->next = repl.msg->prev->next;
@@ -3879,7 +3901,7 @@ int main(int argc, char **argv) {
       Console_Message *head = repl.msg->prev;
       while (head->prev) head = head->prev;
       DWORD prev_count = repl.msg->count;
-      array_resize(&console_arena, repl.msg, head->count, false);
+      array_resize(&console_arena, repl.msg, head->count);
       wmemcpy(repl.msg->items, head->items, head->count);
       repl.msg_index = repl.msg->count;
       repl.msg->next = head->next;
@@ -3946,7 +3968,7 @@ int main(int argc, char **argv) {
         // overwrite first written pair
         assert(IS_LOW_SURROGATE(c));
         surrogates[surrogate_count] = c;
-        array_wsplice(&console_arena, repl.msg, repl.msg_index, surrogates + 2, 2, false);
+        array_wsplice(&console_arena, repl.msg, repl.msg_index, surrogates + 2, 2);
         repl.msg_index -= 2;
         cursor_curr();
         wwrite(repl.msg->items + repl.msg_index, repl.msg->count - repl.msg_index);
@@ -3957,7 +3979,7 @@ int main(int argc, char **argv) {
         // pair might be completed, write just in case
         assert(IS_LOW_SURROGATE(c));
         surrogates[surrogate_count++] = c;
-        array_wsplice(&console_arena, repl.msg, repl.msg_index, surrogates, 2, false);
+        array_wsplice(&console_arena, repl.msg, repl.msg_index, surrogates, 2);
         wwrite(repl.msg->items + repl.msg_index, repl.msg->count - repl.msg_index);
         repl.msg_index += 2;
         cursor_curr();
@@ -3968,7 +3990,7 @@ int main(int argc, char **argv) {
         } else {
           assert(!IS_LOW_SURROGATE(c));
           c = cin_wlower(c);
-          array_winsert(&console_arena, repl.msg, repl.msg_index, c, false);
+          array_winsert(&console_arena, repl.msg, repl.msg_index, c);
           wwrite(repl.msg->items + repl.msg_index, repl.msg->count - repl.msg_index);
           ++repl.msg_index;
           cursor_curr();
