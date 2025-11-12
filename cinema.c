@@ -56,28 +56,6 @@ static const char *LOG_LEVELS[LOG_TRACE + 1] = {"ERROR", "WARNING", "INFO", "DEB
 #define CIN_TABLE_CAP 64
 #define CIN_ARRAY_GROWTH 2
 
-#define table_calloc(t, cap)                         \
-  do {                                               \
-    assert((t)->capacity == 0);                      \
-    assert((cap) > 0);                               \
-    assert((cap) % 2 == 0);                          \
-    (t)->items = calloc((cap), sizeof(*(t)->items)); \
-    (t)->capacity = (cap);                           \
-    (t)->count = 0;                                  \
-    (t)->mask = (t)->capacity - 1;                   \
-  } while (0)
-
-#define table_double(t)                                      \
-  do {                                                       \
-    assert((t)->capacity > 0);                               \
-    assert((t)->capacity % 2 == 0);                          \
-    (t)->capacity <<= 1;                                     \
-    (t)->items = calloc((t)->capacity, sizeof(*(t)->items)); \
-    (t)->count = 0;                                          \
-  } while (0)
-
-#define table_free(t) free((t).items)
-
 static struct Cin_System {
   // Assuming large pages is the default, design around always committing
   DWORD alloc_type;
@@ -213,11 +191,13 @@ static inline uint32_t arena_free_pow1(Arena *arena, Arena_Slice *slice) {
   assert(slice->size && "trying to free void memory");
   uint32_t aligned_size = slice->size & ~7U;
   uint32_t occupied = aligned_size;
+  uint32_t offset = 0;
   while (occupied) {
     uint32_t k = (uint32_t)__builtin_ctz(occupied);
-    uint8_t *pos = slice->items + pow2(k);
+    uint8_t *pos = slice->items + offset;
     Arena_Slice src = {.items = pos, .k = k, .size = 0};
     arena_free_pow2(arena, &src);
+    offset += pow2(k);
     occupied &= occupied - 1;
   }
   return aligned_size;
@@ -417,7 +397,7 @@ static inline void arena_slice_free(Arena *arena, Arena_Slice *slice) {
 
 #define cache_foreach(c, T, i, o)     \
   for (uint32_t i = 0; i == 0; i = 1) \
-    for (T *o = (T *)(c)->head; o; o = (T *)o->next, ++i)
+    for (T *o = (c)->head; o; o = o->next, ++i)
 
 #define array_struct_members(T) \
   T *items;                     \
@@ -640,7 +620,7 @@ static_assert(CIN_PTR == 8 ? (CIN_ARRAY_SIZE == 24) : true, "bytes updated (poss
 
 #define array_foreach(a, T, i, o)                           \
   for (uint32_t i = 0, _j = 0; i < (a)->count; _j = 0, ++i) \
-    for (T o = (T)(a)->items[i]; _j == 0; _j = 1)
+    for (T o = (a)->items[i]; _j == 0; _j = 1)
 
 static Arena console_arena = {0};
 static Arena docs_arena = {0};
@@ -1639,13 +1619,14 @@ static inline radix_v radix_query(RadixTree *tree, const uint8_t *pattern, size_
   return NULL;
 }
 
-static inline int32_t rand_int(int32_t min, int32_t max) {
-  uint32_t range = (uint32_t)max - (uint32_t)min + 1;
+static inline uint32_t rand_between(uint32_t min, uint32_t max) {
+  assert(max >= min);
+  uint32_t range = max - min + 1;
   uint32_t upper = UINT_MAX - (UINT_MAX % range);
   uint32_t random;
   do rand_s(&random);
   while (random >= upper);
-  return min + (int32_t)(random % range);
+  return min + (random % range);
 }
 
 static inline uint64_t fnv1a_hash(const uint8_t *str, size_t len) {
@@ -1657,78 +1638,110 @@ static inline uint64_t fnv1a_hash(const uint8_t *str, size_t len) {
   return hash;
 }
 
-typedef struct RobinHoodBucket {
+typedef struct Robin_Hood_Bucket {
+  // key is (char *)strings + str_offset
+  // value is value
   uint64_t hash;
-  size_t k_offset;
-  int32_t v;
+  size_t str_offset;
+  int32_t value;
   int32_t filled;
-} RobinHoodBucket;
+} Robin_Hood_Bucket;
 
-typedef struct RobinHoodMap {
-  array_struct_members(RobinHoodBucket);
+typedef struct Robin_Hood_Table {
+  array_struct_members(Robin_Hood_Bucket);
   size_t mask;
-} RobinHoodMap;
+} Robin_Hood_Table;
 
-#define RH_LOAD_FACTOR 85
+#define TABLE_LOAD_FACTOR 85
 
-static inline void rh_double(RobinHoodMap *map) {
-  uint32_t prev_cap = map->capacity;
-  RobinHoodBucket *prev_buckets = map->items;
-  table_double(map);
-  map->mask = map->capacity - 1;
+static inline void table_init(Arena *arena, Robin_Hood_Table *table, uint32_t capacity) {
+  assert(table->capacity == 0);
+  assert(capacity > 0);
+  table->items = arena_bump_T(arena, Robin_Hood_Bucket, capacity);
+  table->count = 0;
+  table->capacity = capacity;
+  table->bytes_capacity = capacity * sizeof(Robin_Hood_Bucket);
+  table->bytes_capacity_k = 0;
+  table->mask = table->capacity - 1;
+}
+
+static inline void table_double(Arena *arena, Robin_Hood_Table *table) {
+  if (unlikely(table->bytes_capacity >= CIN_ARENA_MAX)) {
+    printf("Cinema crashed trying to allocate excessive memory (%u bytes)",
+           table->bytes_capacity << 1);
+    exit(1);
+  }
+  uint32_t prev_bytes_cap = table->bytes_capacity;
+  uint32_t prev_cap = table->capacity;
+  Robin_Hood_Bucket *prev_buckets = table->items;
+  table->capacity <<= 1;
+  table->items = arena_bump_T(arena, Robin_Hood_Bucket, table->capacity);
+  memcpy(table->items, prev_buckets, table->bytes_capacity);
+  table->bytes_capacity <<= 1;
+  table->count = 0;
+  table->mask = table->capacity - 1;
+  assert(prev_buckets != table->items);
+  assert(table->capacity > 0);
+  assert(cin_ispow2(table->capacity));
   for (uint32_t i = 0; i < prev_cap; ++i) {
     if (prev_buckets[i].filled) {
-      size_t home = prev_buckets[i].hash & map->mask;
+      size_t home = prev_buckets[i].hash & table->mask;
       size_t dist = 0;
-      RobinHoodBucket bucket = prev_buckets[i];
-      while (map->items[home].filled) {
-        size_t cur_dist = (home - (map->items[home].hash & map->mask)) & map->mask;
+      Robin_Hood_Bucket bucket = prev_buckets[i];
+      while (table->items[home].filled) {
+        size_t cur_dist = (home - (table->items[home].hash & table->mask)) & table->mask;
         if (cur_dist < dist) {
-          RobinHoodBucket tmp = map->items[home];
-          map->items[home] = bucket;
+          Robin_Hood_Bucket tmp = table->items[home];
+          table->items[home] = bucket;
           bucket = tmp;
           dist = cur_dist;
         }
-        home = (home + 1) & map->mask;
+        home = (home + 1) & table->mask;
         ++dist;
       }
-      map->items[home] = bucket;
-      ++map->count;
+      table->items[home] = bucket;
+      ++table->count;
     }
   }
-  free(prev_buckets);
+  arena_free_pos(arena, (uint8_t *)prev_buckets, prev_bytes_cap);
 }
 
-static inline int32_t rh_insert(RobinHoodMap *map, uint8_t *k_arena, size_t k_offset, size_t len, int32_t v) {
+static inline int32_t table_insert(Arena *arena, Robin_Hood_Table *table,
+                                   uint8_t *strings, size_t str_offset,
+                                   size_t len, int32_t value) {
   // robin hood hashing (without tombstones) with fnv-1a
-  uint8_t *k = k_arena + k_offset;
-  if (map->count >= (map->capacity * RH_LOAD_FACTOR) / 100) {
-    rh_double(map);
+  uint8_t *str = strings + str_offset;
+  if (table->count >= (table->capacity * TABLE_LOAD_FACTOR) / 100) {
+    table_double(arena, table);
   }
-  uint64_t hash = fnv1a_hash(k, len);
-  size_t i = hash & map->mask;
+  uint64_t hash = fnv1a_hash(str, len);
+  size_t i = hash & table->mask;
   size_t dist = 0;
-  RobinHoodBucket candidate = {.hash = hash, .v = v, .k_offset = k_offset, .filled = 1};
-  while (map->items[i].filled) {
-    uint8_t *i_k = k_arena + map->items[i].k_offset;
-    if (map->items[i].hash == hash && strcmp((char *)i_k, (char *)k) == 0) {
-      log_message(LOG_TRACE, "Found duplicate key '%s' in hashmap", k);
-      return map->items[i].v;
+  Robin_Hood_Bucket candidate = {.hash = hash, .value = value, .str_offset = str_offset, .filled = 1};
+  while (table->items[i].filled) {
+    uint8_t *i_str = strings + table->items[i].str_offset;
+    if (table->items[i].hash == hash && strcmp((char *)i_str, (char *)str) == 0) {
+      log_message(LOG_TRACE, "Found duplicate key '%s' in hashmap", str);
+      return table->items[i].value;
     }
-    size_t cur_dist = (i - (map->items[i].hash & map->mask)) & map->mask;
+    size_t cur_dist = (i - (table->items[i].hash & table->mask)) & table->mask;
     if (cur_dist < dist) {
       // evict rich to house poor
-      RobinHoodBucket tmp = map->items[i];
-      map->items[i] = candidate;
+      Robin_Hood_Bucket tmp = table->items[i];
+      table->items[i] = candidate;
       candidate = tmp;
       dist = cur_dist;
     }
-    i = (i + 1) & map->mask;
+    i = (i + 1) & table->mask;
     ++dist;
   }
-  map->items[i] = candidate;
-  ++map->count;
+  table->items[i] = candidate;
+  ++table->count;
   return -1;
+}
+
+static inline void table_free_items(Arena *arena, Robin_Hood_Table *table) {
+  if (table->items) arena_free_pos(arena, (uint8_t *)table->items, table->bytes_capacity);
 }
 
 array_define(Conf_Key, char);
@@ -2018,7 +2031,7 @@ static void docs_append(uint8_t *utf8, int32_t len) {
 
 typedef struct DirectoryNode {
   array_struct_members(int32_t);
-  size_t k_offset;
+  size_t str_offset;
 } DirectoryNode;
 
 typedef struct DirectoryPath {
@@ -2050,8 +2063,8 @@ static struct {
   uint32_t abs_count;
 } dir_stack = {0};
 
-static array_struct(uint8_t) dir_string_arena = {0};
-static array_struct(DirectoryNode) dir_node_arena = {0};
+static array_struct(uint8_t) directory_strings = {0};
+static array_struct(DirectoryNode) directory_nodes = {0};
 static array_struct(uint8_t) screen_arena = {0};
 
 #define CIN_DIRECTORIES_CAP 64
@@ -2061,9 +2074,9 @@ static array_struct(uint8_t) screen_arena = {0};
 #define CIN_URLS_CAP 64
 #define CIN_LAYOUT_SCREENS_CAP 8
 
-static RobinHoodMap dir_map = {0};
-static RobinHoodMap pat_map = {0};
-static RobinHoodMap url_map = {0};
+static Robin_Hood_Table dir_table = {0};
+static Robin_Hood_Table pat_table = {0};
+static Robin_Hood_Table url_table = {0};
 static RadixTree *tag_tree = NULL;
 static RadixTree *layout_tree = NULL;
 
@@ -2083,14 +2096,14 @@ static void setup_directory(const char *path, TagDirectories *tag_dirs) {
     int32_t bytes_i32 = utf16_to_utf8(dir.path);
     assert(bytes_i32 > 0);
     uint32_t bytes = (uint32_t)bytes_i32;
-    array_reserve(&console_arena, &dir_string_arena, bytes + 1);
-    uint8_t *k_arena = dir_string_arena.items;
-    size_t k_offset = dir_string_arena.count;
-    memcpy(k_arena + k_offset, utf8_buf.items, bytes);
-    size_t node_tail = dir_node_arena.count;
+    array_reserve(&console_arena, &directory_strings, bytes + 1);
+    uint8_t *strings = directory_strings.items;
+    size_t str_offset = directory_strings.count;
+    memcpy(strings + str_offset, utf8_buf.items, bytes);
+    size_t node_tail = directory_nodes.count;
     // TODO: if an unmatched directory is inserted, its next occurence
     // will think that the current node_tail is correct, when it is not
-    int32_t dup_index = rh_insert(&dir_map, k_arena, k_offset, bytes, (int32_t)node_tail);
+    int32_t dup_index = table_insert(&console_arena, &dir_table, strings, str_offset, bytes, (int32_t)node_tail);
     if (dup_index >= 0) {
       // NOTE: When the key is already in the hash, we have access to an index
       // into the dynamic nodes arena. Lazy evaluation: the terminator but must
@@ -2123,12 +2136,12 @@ static void setup_directory(const char *path, TagDirectories *tag_dirs) {
       continue;
     }
     // Commit the new directory
-    dir_string_arena.count += bytes;
-    array_grow(&console_arena, &dir_node_arena, 1);
-    DirectoryNode *node = &dir_node_arena.items[node_tail];
-    node->k_offset = k_offset;
+    directory_strings.count += bytes;
+    array_grow(&console_arena, &directory_nodes, 1);
+    DirectoryNode *node = &directory_nodes.items[node_tail];
     assert(node);
     array_init(&console_arena, node, CIN_DIRECTORY_ITEMS_CAP);
+    node->str_offset = str_offset;
     if (tag_dirs) {
       array_push(&console_arena, tag_dirs, (int32_t)node_tail);
     }
@@ -2233,7 +2246,7 @@ static inline void setup_pattern(const char *pattern, TagPatternItems *tag_patte
     size_t tail_offset = (size_t)array_bytes(&docs);
     int32_t tail_doc = (int32_t)array_bytes(&docs);
     docs_append(utf8_buf.items, len);
-    int32_t dup_doc = rh_insert(&pat_map, docs.items, tail_offset, (size_t)len, tail_doc);
+    int32_t dup_doc = table_insert(&console_arena, &pat_table, docs.items, tail_offset, (size_t)len, tail_doc);
     if (dup_doc >= 0) {
       array_shrink(&docs, (uint32_t)len);
       --docs.doc_count;
@@ -2259,7 +2272,7 @@ static inline void setup_url(const char *url, TagUrlItems *tag_url_items) {
   size_t tail_offset = (size_t)array_bytes(&docs);
   int32_t tail_doc = (int32_t)array_bytes(&docs);
   docs_append(utf8_buf.items, len_utf8);
-  int32_t dup_doc = rh_insert(&url_map, docs.items, tail_offset, (size_t)len_utf8, tail_doc);
+  int32_t dup_doc = table_insert(&console_arena, &url_table, docs.items, tail_offset, (size_t)len_utf8, tail_doc);
   if (dup_doc >= 0) {
     array_shrink(&docs, (uint32_t)len_utf8);
     --docs.doc_count;
@@ -2305,13 +2318,13 @@ static inline void setup_layout(const char *name, Cin_Layout *layout) {
 
 static bool init_config(const char *filename) {
   if (!parse_config(filename)) return false;
-  table_calloc(&dir_map, CIN_DIRECTORIES_CAP);
-  table_calloc(&pat_map, CIN_PATTERN_ITEMS_CAP);
-  table_calloc(&url_map, CIN_URLS_CAP);
+  table_init(&console_arena, &dir_table, CIN_DIRECTORIES_CAP);
+  table_init(&console_arena, &pat_table, CIN_PATTERN_ITEMS_CAP);
+  table_init(&console_arena, &url_table, CIN_URLS_CAP);
   arena_chunk_init(&docs_arena, CIN_DOCS_ARENA_CAP);
   array_init_zero(&docs_arena, &docs, CIN_DOCS_CAP);
-  array_init(&console_arena, &dir_node_arena, CIN_DIRECTORIES_CAP);
-  array_init(&console_arena, &dir_string_arena, CIN_DIRECTORY_STRINGS_CAP);
+  array_init(&console_arena, &directory_nodes, CIN_DIRECTORIES_CAP);
+  array_init(&console_arena, &directory_strings, CIN_DIRECTORY_STRINGS_CAP);
   tag_tree = radix_tree();
   layout_tree = radix_tree();
   Conf_Root *root = &conf_parser.scopes.items[0].root;
@@ -2401,9 +2414,9 @@ static bool init_config(const char *filename) {
       break;
     }
   }
-  table_free(dir_map);
-  table_free(pat_map);
-  table_free(url_map);
+  table_free_items(&console_arena, &dir_table);
+  table_free_items(&console_arena, &pat_table);
+  table_free_items(&console_arena, &url_table);
   array_free_items(&console_arena, &dir_stack);
   array_free_items(&console_arena, &conf_parser.scopes);
   array_free_items(&console_arena, &conf_parser.buf);
@@ -2871,9 +2884,7 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
           if (multi) arena_free_pos(&iocp_thread_arena, (uint8_t *)buf, (uint32_t)len);
         } else {
           if (instance->buf_tail->next) instance->buf_tail->next->bytes = 0;
-          else instance->buf_tail->next = arena_bump(&iocp_thread_arena,
-                                                     sizeof(ReadBuffer),
-                                                     align_size(ReadBuffer));
+          else instance->buf_tail->next = arena_bump_T1(&iocp_thread_arena, ReadBuffer);
           instance->buf_tail = instance->buf_tail->next;
         }
       }
@@ -3287,7 +3298,7 @@ static void mpv_spawn(Instance *instance, size_t index) {
   assert(ok_pipe);
   bool ok_iocp = CreateIoCompletionPort(instance->pipe, cin_io.iocp, (ULONG_PTR)instance, 0) != NULL;
   assert(ok_iocp);
-  instance->buf_head = arena_bump(&io_arena, sizeof(ReadBuffer), align_size(ReadBuffer));
+  instance->buf_head = arena_bump_T1(&io_arena, ReadBuffer);
   instance->buf_tail = instance->buf_head;
   bool ok_read = overlap_read(instance);
   assert(ok_read);
@@ -3356,31 +3367,31 @@ static void cmd_tag_executor(void) {
       {
         TagDirectories *directories = cmd_ctx.tag->directories;
         directory_k = deduplicate_i32(arena1, directories->items, directories->count);
-        RobinHoodMap duplicates = {0};
-        table_calloc(&duplicates, CIN_DIRECTORIES_CAP);
-        uint8_t *k_arena = dir_string_arena.items;
+        Robin_Hood_Table duplicates = {0};
+        table_init(arena1, &duplicates, CIN_DIRECTORIES_CAP);
+        uint8_t *strings = directory_strings.items;
         for (size_t i = 0; i < directory_k; ++i) {
           size_t node_index = (size_t)directories->items[i];
-          DirectoryNode *start = &dir_node_arena.items[node_index];
-          uint8_t *start_str = dir_string_arena.items + start->k_offset;
+          DirectoryNode *start = &directory_nodes.items[node_index];
+          uint8_t *start_str = directory_strings.items + start->str_offset;
           size_t start_len = strlen((char *)start_str);
-          int32_t dup = rh_insert(&duplicates, k_arena, start->k_offset, start_len + 1, 0);
+          int32_t dup = table_insert(arena1, &duplicates, strings, start->str_offset, start_len + 1, 0);
           if (dup >= 0) continue;
           log_message(LOG_TRACE, "Tag directory: %s (%zu)", start_str, start_len);
-          array_extend(&console_arena, collected, start->items, start->count);
-          for (size_t j = ++node_index; j < dir_node_arena.count; ++j) {
-            DirectoryNode *node = &dir_node_arena.items[j];
+          array_extend(arena1, collected, start->items, start->count);
+          for (size_t j = ++node_index; j < directory_nodes.count; ++j) {
+            DirectoryNode *node = &directory_nodes.items[j];
             if (!node->count) continue;
-            uint8_t *str = dir_string_arena.items + node->k_offset;
+            uint8_t *str = directory_strings.items + node->str_offset;
             if (strncmp((char *)str, (char *)start_str, start_len) != 0) break;
             size_t len = strlen((char *)str);
-            dup = rh_insert(&duplicates, k_arena, node->k_offset, len + 1, 0);
+            dup = table_insert(arena1, &duplicates, strings, node->str_offset, len + 1, 0);
             if (dup >= 0) continue;
             log_message(LOG_TRACE, "Tag directory: %s", str);
-            array_extend(&console_arena, collected, node->items, node->count);
+            array_extend(arena1, collected, node->items, node->count);
           }
         }
-        table_free(duplicates);
+        table_free_items(arena1, &duplicates);
       }
     }
     if (cmd_ctx.tag->pattern_items) {
