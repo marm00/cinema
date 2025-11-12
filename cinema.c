@@ -642,6 +642,11 @@ static_assert(CIN_PTR == 8 ? (CIN_ARRAY_SIZE == 24) : true, "bytes updated (poss
   for (uint32_t i = 0, _j = 0; i < (a)->count; _j = 0, ++i) \
     for (T o = (T)(a)->items[i]; _j == 0; _j = 1)
 
+static Arena console_arena = {0};
+static Arena docs_arena = {0};
+static Arena io_arena = {0};
+static Arena iocp_thread_arena = {0};
+
 // https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
 // A path can have 248 "characters" (260 - 12 = 248)
 // with 12 reserved for 8.3 file name.
@@ -660,8 +665,6 @@ static_assert(CIN_PTR == 8 ? (CIN_ARRAY_SIZE == 24) : true, "bytes updated (poss
 #define CIN_MAX_WRITABLE_PATH_BYTES ((MAX_PATH - 12) * 4)
 #define CIN_COMMAND_PROMPT_LIMIT 8191
 #define CIN_MAX_LOG_MESSAGE 1024
-
-static Arena console_arena = {0};
 
 typedef struct Console_Message {
   array_struct_members(wchar_t);
@@ -1237,7 +1240,7 @@ static int32_t hash_i32(const Hash_Table_I32 *table, const int32_t value) {
   return hash;
 }
 
-static inline size_t deduplicate_i32(int32_t *items, size_t len) {
+static inline size_t deduplicate_i32(Arena *arena, int32_t *items, size_t len) {
   if (len <= 128) {
     size_t k = 0;
     for (size_t i = 0; i < len; ++i) {
@@ -1249,11 +1252,11 @@ static inline size_t deduplicate_i32(int32_t *items, size_t len) {
     }
     return k;
   } else {
-    // TODO: thread-safe arena dedup
     size_t hash_n = 1;
     while (hash_n < len * 2) hash_n <<= 1;
-    int32_t *seen = calloc(hash_n, sizeof(int32_t));
-    uint8_t *set = calloc(hash_n, sizeof(int32_t));
+    assert(hash_n <= CIN_ARENA_MAX);
+    int32_t *seen = arena_bump_T(arena, int32_t, (uint32_t)hash_n);
+    int32_t *set = arena_bump_T(arena, int32_t, (uint32_t)hash_n);
     size_t k = 0;
     size_t mask = hash_n - 1;
     for (size_t i = 0; i < len; ++i) {
@@ -1269,8 +1272,8 @@ static inline size_t deduplicate_i32(int32_t *items, size_t len) {
       items[k++] = v;
     next:;
     }
-    free(seen);
-    free(set);
+    arena_free_pos(arena, (uint8_t *)seen, (uint32_t)hash_n);
+    arena_free_pos(arena, (uint8_t *)set, (uint32_t)hash_n);
     return k;
   }
 }
@@ -2002,7 +2005,6 @@ struct Document_Collection {
   int32_t *lcp;
   int32_t *suffix_to_doc;
   uint16_t *dedup_counters;
-  Arena arena;
 } docs = {0};
 
 static void docs_append(uint8_t *utf8, int32_t len) {
@@ -2010,7 +2012,7 @@ static void docs_append(uint8_t *utf8, int32_t len) {
   // Instead of appending it, we replace it with forward slash.
   for (int32_t i = 0; i < len; ++i)
     if (utf8[i] == '\\') utf8[i] = '/';
-  array_extend_zero(&docs.arena, &docs, utf8, (uint32_t)len);
+  array_extend_zero(&docs_arena, &docs, utf8, (uint32_t)len);
   ++docs.doc_count;
 }
 
@@ -2306,8 +2308,8 @@ static bool init_config(const char *filename) {
   table_calloc(&dir_map, CIN_DIRECTORIES_CAP);
   table_calloc(&pat_map, CIN_PATTERN_ITEMS_CAP);
   table_calloc(&url_map, CIN_URLS_CAP);
-  arena_chunk_init(&docs.arena, CIN_DOCS_ARENA_CAP);
-  array_init_zero(&docs.arena, &docs, CIN_DOCS_CAP);
+  arena_chunk_init(&docs_arena, CIN_DOCS_ARENA_CAP);
+  array_init_zero(&docs_arena, &docs, CIN_DOCS_CAP);
   array_init(&console_arena, &dir_node_arena, CIN_DIRECTORIES_CAP);
   array_init(&console_arena, &dir_string_arena, CIN_DIRECTORY_STRINGS_CAP);
   tag_tree = radix_tree();
@@ -2405,7 +2407,7 @@ static bool init_config(const char *filename) {
   array_free_items(&console_arena, &dir_stack);
   array_free_items(&console_arena, &conf_parser.scopes);
   array_free_items(&console_arena, &conf_parser.buf);
-  array_to_pow1(&docs.arena, &docs);
+  array_to_pow1(&docs_arena, &docs);
   assert(array_bytes(&docs) <= CIN_ARENA_MAX && "overflew k = 31");
   if (array_bytes(&docs) == CIN_ARENA_MAX) {
     // extremely rare case where we exceed INT_MAX by 1 byte,
@@ -2421,7 +2423,7 @@ static bool init_config(const char *filename) {
 }
 
 static bool init_documents(void) {
-  docs.gsa = arena_bump_T(&docs.arena, uint8_t, docs.bytes_mul32);
+  docs.gsa = arena_bump_T(&docs_arena, uint8_t, docs.bytes_mul32);
   int32_t d_bytes = (int32_t)array_bytes(&docs);
   int32_t remainder = (int32_t)docs.bytes_capacity - d_bytes;
   assert(remainder >= 0);
@@ -2434,7 +2436,7 @@ static bool init_documents(void) {
     log_message(LOG_ERROR, "Failed to build SA");
     return false;
   }
-  int32_t *plcp = arena_bump_T(&docs.arena, uint8_t, docs.bytes_mul32);
+  int32_t *plcp = arena_bump_T(&docs_arena, uint8_t, docs.bytes_mul32);
 #if defined(LIBSAIS_OPENMP)
   result = libsais_plcp_gsa_omp(docs.items, docs.gsa, plcp, d_bytes, cin_system.threads);
 #else
@@ -2444,7 +2446,7 @@ static bool init_documents(void) {
     log_message(LOG_ERROR, "Failed to build PLCP array");
     return false;
   }
-  docs.lcp = arena_bump_T(&docs.arena, uint8_t, docs.bytes_mul32);
+  docs.lcp = arena_bump_T(&docs_arena, uint8_t, docs.bytes_mul32);
 #if defined(LIBSAIS_OPENMP)
   result = libsais_lcp_omp(plcp, docs.gsa, docs.lcp, d_bytes, cin_system.threads);
 #else
@@ -2455,7 +2457,7 @@ static bool init_documents(void) {
     return false;
   }
   docs.suffix_to_doc = plcp;
-  docs.dedup_counters = arena_bump_T(&docs.arena, uint16_t, (uint32_t)d_bytes);
+  docs.dedup_counters = arena_bump_T(&docs_arena, uint16_t, (uint32_t)d_bytes);
   docs.suffix_to_doc[0] = 0;
   for (int32_t i = 1; i < docs.doc_count; ++i) {
     docs.suffix_to_doc[i] = docs.gsa[i - 1] + 1;
@@ -2556,12 +2558,12 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len, TempDo
               docs.items + docs.gsa[l_bound], docs.items + docs.gsa[r_bound]);
   static uint16_t dedup_counter = 1;
   int32_t n = (r_bound - l_bound) + 1;
-  array_init_zero(&docs.arena, result, (uint32_t)n);
+  array_init_zero(&docs_arena, result, (uint32_t)n);
   for (int32_t i = l_bound; i <= r_bound; ++i) {
     int32_t doc = docs.suffix_to_doc[i];
     if (docs.dedup_counters[doc] != dedup_counter) {
       docs.dedup_counters[doc] = dedup_counter;
-      array_push(&docs.arena, result, doc);
+      array_push(&docs_arena, result, doc);
       log_message(LOG_TRACE, "docs.gsa[%7d] = %-25.25s (%7d)| (%7d) = %-30.30s counter=%d", i, docs.items + docs.gsa[i], docs.gsa[i], doc, docs.items + doc, dedup_counter);
     }
   }
@@ -2617,8 +2619,6 @@ cache_define(Writes_Cache, OverlappedWrite);
 cache_define(Instance_Cache, Instance);
 
 static struct {
-  Arena arena;
-  Arena iocp_arena;
   Writes_Cache writes;
   Instance_Cache instances;
   HANDLE iocp;
@@ -2683,7 +2683,7 @@ static bool overlap_read(Instance *instance) {
 
 static bool overlap_write(Instance *instance, MPV_Packet type, const char *cmd, const char *arg1, const char *arg2) {
   OverlappedWrite *write = NULL;
-  cache_get_zero(&cin_io.arena, &cin_io.writes, write);
+  cache_get_zero(&io_arena, &cin_io.writes, write);
   write->ovl_ctx.type = type;
   int64_t request_id = (int64_t)(uintptr_t)write;
   int32_t bytes = 0;
@@ -2837,7 +2837,7 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
               assert(!memchr(b->buf, '\0', b->bytes));
               len += b->bytes;
             }
-            char *contiguous_buf = arena_bump(&cin_io.iocp_arena, (uint32_t)len, align_size(char));
+            char *contiguous_buf = arena_bump_T(&iocp_thread_arena, char, (uint32_t)len);
             size_t offset = 0;
             for (ReadBuffer *b = instance->buf_head; b != instance->buf_tail; b = b->next) {
               assert(b);
@@ -2868,10 +2868,10 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
           memcpy(instance->buf_head, buf + tail_pos, remainder);
           instance->buf_head->bytes = remainder;
           instance->buf_tail = instance->buf_head;
-          if (multi) arena_free_pos(&cin_io.iocp_arena, (uint8_t *)buf, (uint32_t)len);
+          if (multi) arena_free_pos(&iocp_thread_arena, (uint8_t *)buf, (uint32_t)len);
         } else {
           if (instance->buf_tail->next) instance->buf_tail->next->bytes = 0;
-          else instance->buf_tail->next = arena_bump(&cin_io.iocp_arena,
+          else instance->buf_tail->next = arena_bump(&iocp_thread_arena,
                                                      sizeof(ReadBuffer),
                                                      align_size(ReadBuffer));
           instance->buf_tail = instance->buf_tail->next;
@@ -2884,10 +2884,10 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
 }
 
 static inline bool init_mpv(void) {
-  arena_chunk_init(&cin_io.arena, CIN_IO_ARENA_CAP);
-  arena_chunk_init(&cin_io.iocp_arena, CIN_IO_ARENA_CAP);
-  cache_init(&cin_io.arena, &cin_io.writes, 1, true);
-  cache_init(&cin_io.arena, &cin_io.instances, 1, false);
+  arena_chunk_init(&io_arena, CIN_IO_ARENA_CAP);
+  arena_chunk_init(&iocp_thread_arena, CIN_IO_ARENA_CAP);
+  cache_init(&io_arena, &cin_io.writes, 1, true);
+  cache_init(&io_arena, &cin_io.instances, 1, false);
   cin_io.iocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
   if (!cin_io.iocp) {
     log_last_error("Failed to create iocp");
@@ -3287,7 +3287,7 @@ static void mpv_spawn(Instance *instance, size_t index) {
   assert(ok_pipe);
   bool ok_iocp = CreateIoCompletionPort(instance->pipe, cin_io.iocp, (ULONG_PTR)instance, 0) != NULL;
   assert(ok_iocp);
-  instance->buf_head = arena_bump(&cin_io.arena, sizeof(ReadBuffer), align_size(ReadBuffer));
+  instance->buf_head = arena_bump(&io_arena, sizeof(ReadBuffer), align_size(ReadBuffer));
   instance->buf_tail = instance->buf_head;
   bool ok_read = overlap_read(instance);
   assert(ok_read);
@@ -3341,6 +3341,9 @@ static void cmd_tag_executor(void) {
   size_t directory_k = 0;
   size_t pattern_k = 0;
   size_t url_k = 0;
+  Arena *arena1 = &console_arena;
+  Arena *arena2 = &docs_arena;
+  Arena *arena3 = &io_arena;
 #if defined(CIN_OPENMP)
 #pragma omp parallel
 #pragma omp single
@@ -3352,7 +3355,7 @@ static void cmd_tag_executor(void) {
 #endif
       {
         TagDirectories *directories = cmd_ctx.tag->directories;
-        directory_k = deduplicate_i32(directories->items, directories->count);
+        directory_k = deduplicate_i32(arena1, directories->items, directories->count);
         RobinHoodMap duplicates = {0};
         table_calloc(&duplicates, CIN_DIRECTORIES_CAP);
         uint8_t *k_arena = dir_string_arena.items;
@@ -3386,7 +3389,7 @@ static void cmd_tag_executor(void) {
 #endif
       {
         TagPatternItems *patterns = cmd_ctx.tag->pattern_items;
-        pattern_k = deduplicate_i32(patterns->items, patterns->count);
+        pattern_k = deduplicate_i32(arena2, patterns->items, patterns->count);
       }
     }
     if (cmd_ctx.tag->url_items) {
@@ -3395,7 +3398,7 @@ static void cmd_tag_executor(void) {
 #endif
       {
         TagUrlItems *urls = cmd_ctx.tag->url_items;
-        url_k = deduplicate_i32(urls->items, urls->count);
+        url_k = deduplicate_i32(arena3, urls->items, urls->count);
       }
     }
 #if defined(CIN_OPENMP)
@@ -3457,7 +3460,7 @@ static void cmd_search_executor(void) {
     overlap_write(instance, MPV_LOADFILE, "loadfile",
                   (char *)docs.items + array.items[i % (size_t)array.count], NULL);
   }
-  array_free_items(&docs.arena, &array);
+  array_free_items(&docs_arena, &array);
 }
 
 static void cmd_search_validator(void) {
@@ -3578,7 +3581,7 @@ static void cmd_layout_executor(void) {
     ++screen;
   }
   for (Instance *next = NULL; screen < next_count; ++screen) {
-    cache_get(&cin_io.arena, &cin_io.instances, next);
+    cache_get(&io_arena, &cin_io.instances, next);
     mpv_spawn(next, screen);
   }
   if (!mpv_demand) mpv_unlock();
