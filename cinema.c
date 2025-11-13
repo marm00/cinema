@@ -1644,8 +1644,9 @@ typedef struct Robin_Hood_Bucket {
   // value is value
   uint64_t hash;
   size_t str_offset;
-  int32_t value;
-  int32_t filled;
+  intptr_t value;
+  bool filled;
+  // TODO: 7 more bytes available
 } Robin_Hood_Bucket;
 
 typedef struct Robin_Hood_Table {
@@ -1707,9 +1708,9 @@ static inline void table_double(Arena *arena, Robin_Hood_Table *table) {
   arena_free_pos(arena, (uint8_t *)prev_buckets, prev_bytes_cap);
 }
 
-static inline int32_t table_insert(Arena *arena, Robin_Hood_Table *table,
+static inline intptr_t table_insert(Arena *arena, Robin_Hood_Table *table,
                                    uint8_t *strings, size_t str_offset,
-                                   size_t len, int32_t value) {
+                                   size_t len, intptr_t value) {
   // robin hood hashing (without tombstones) with fnv-1a
   uint8_t *str = strings + str_offset;
   if (table->count >= (table->capacity * TABLE_LOAD_FACTOR) / 100) {
@@ -1718,7 +1719,7 @@ static inline int32_t table_insert(Arena *arena, Robin_Hood_Table *table,
   uint64_t hash = fnv1a_hash(str, len);
   size_t i = hash & table->mask;
   size_t dist = 0;
-  Robin_Hood_Bucket candidate = {.hash = hash, .value = value, .str_offset = str_offset, .filled = 1};
+  Robin_Hood_Bucket candidate = {.hash = hash, .value = value, .str_offset = str_offset, .filled = true};
   while (table->items[i].filled) {
     uint8_t *i_str = strings + table->items[i].str_offset;
     if (table->items[i].hash == hash && strcmp((char *)i_str, (char *)str) == 0) {
@@ -1738,7 +1739,7 @@ static inline int32_t table_insert(Arena *arena, Robin_Hood_Table *table,
   }
   table->items[i] = candidate;
   ++table->count;
-  return -1;
+  return -1LL;
 }
 
 static inline void table_free_items(Arena *arena, Robin_Hood_Table *table) {
@@ -2110,14 +2111,14 @@ static void setup_directory(const char *path, TagDirectories *tag_dirs) {
     size_t node_tail = directory_nodes.count;
     // TODO: if an unmatched directory is inserted, its next occurence
     // will think that the current node_tail is correct, when it is not
-    int32_t dup_index = table_insert(&console_arena, &dir_table, strings, str_offset, bytes, (int32_t)node_tail);
+    intptr_t dup_index = table_insert(&console_arena, &dir_table, strings, str_offset, bytes, (intptr_t)node_tail);
     if (dup_index >= 0) {
       // NOTE: When the key is already in the hash, we have access to an index
       // into the dynamic nodes arena. Lazy evaluation: the terminator but must
       // be calculated (e.g., using the document ids to retrieve file names and
       // recognize depth reduction)
       if (tag_dirs) {
-        array_push(&console_arena, tag_dirs, dup_index);
+        array_push(&console_arena, tag_dirs, (int32_t)dup_index);
       }
       continue;
     }
@@ -2253,12 +2254,12 @@ static inline void setup_pattern(const char *pattern, TagPatternItems *tag_patte
     size_t tail_offset = (size_t)array_bytes(&docs);
     int32_t tail_doc = (int32_t)array_bytes(&docs);
     docs_append(utf8_buf.items, len);
-    int32_t dup_doc = table_insert(&console_arena, &pat_table, docs.items, tail_offset, (size_t)len, tail_doc);
+    intptr_t dup_doc = table_insert(&console_arena, &pat_table, docs.items, tail_offset, (size_t)len, tail_doc);
     if (dup_doc >= 0) {
       array_shrink(&docs, (uint32_t)len);
       --docs.doc_count;
       if (tag_pattern_items) {
-        array_push(&console_arena, tag_pattern_items, dup_doc);
+        array_push(&console_arena, tag_pattern_items, (int32_t)dup_doc);
       }
     } else {
       if (tag_pattern_items) {
@@ -2279,12 +2280,12 @@ static inline void setup_url(const char *url, TagUrlItems *tag_url_items) {
   size_t tail_offset = (size_t)array_bytes(&docs);
   int32_t tail_doc = (int32_t)array_bytes(&docs);
   docs_append(utf8_buf.items, len_utf8);
-  int32_t dup_doc = table_insert(&console_arena, &url_table, docs.items, tail_offset, (size_t)len_utf8, tail_doc);
+  intptr_t dup_doc = table_insert(&console_arena, &url_table, docs.items, tail_offset, (size_t)len_utf8, tail_doc);
   if (dup_doc >= 0) {
     array_shrink(&docs, (uint32_t)len_utf8);
     --docs.doc_count;
     if (tag_url_items) {
-      array_push(&console_arena, tag_url_items, dup_doc);
+      array_push(&console_arena, tag_url_items, (int32_t)dup_doc);
     }
   } else {
     if (tag_url_items) {
@@ -3422,7 +3423,7 @@ static void cmd_tag_executor(void) {
           DirectoryNode *start = &directory_nodes.items[node_index];
           uint8_t *start_str = directory_strings.items + start->str_offset;
           size_t start_len = strlen((char *)start_str);
-          int32_t dup = table_insert(arena1, &duplicates, strings, start->str_offset, start_len + 1, 0);
+          intptr_t dup = table_insert(arena1, &duplicates, strings, start->str_offset, start_len + 1, 0);
           if (dup >= 0) continue;
           log_message(LOG_TRACE, "Tag directory: %s (%zu)", start_str, start_len);
           array_extend(arena1, playlist, start->items, start->count);
