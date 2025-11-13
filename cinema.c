@@ -1629,6 +1629,7 @@ static inline uint32_t rand_between(uint32_t min, uint32_t max) {
   return min + (random % range);
 }
 
+// TODO: size_t to uint64_t
 static inline uint64_t fnv1a_hash(const uint8_t *str, size_t len) {
   uint64_t hash = 0xcbf29ce484222325ULL;
   for (size_t i = 0; i < len; ++i) {
@@ -2574,16 +2575,21 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len, Playli
   log_message(LOG_DEBUG, "Boundaries are [%d, %d] or [%s, %s]", l_bound, r_bound,
               docs.items + docs.gsa[l_bound], docs.items + docs.gsa[r_bound]);
   static uint16_t dedup_counter = 1;
-  int32_t n = (r_bound - l_bound) + 1;
+  int32_t n = min(docs.doc_count, (r_bound - l_bound) + 1);
   array_ensure_capacity_core(&docs_arena, result, (uint32_t)n, false);
+  result->count = 0;
   for (int32_t i = l_bound; i <= r_bound; ++i) {
     int32_t doc = docs.suffix_to_doc[i];
     if (docs.dedup_counters[doc] != dedup_counter) {
       docs.dedup_counters[doc] = dedup_counter;
+      assert(result->count < result->capacity);
+      assert(result->count <= (uint32_t)n);
       array_push(&docs_arena, result, doc);
-      log_message(LOG_TRACE, "docs.gsa[%7d] = %-25.25s (%7d)| (%7d) = %-30.30s counter=%d", i, docs.items + docs.gsa[i], docs.gsa[i], doc, docs.items + doc, dedup_counter);
+      log_message(LOG_TRACE, "docs.gsa[%7d] = %-25.25s (%7d)| (%7d) = %-30.30s counter=%d",
+                  i, docs.items + docs.gsa[i], docs.gsa[i], doc, docs.items + doc, dedup_counter);
     }
   }
+  array_to_pow1(&docs_arena, result);
   if (++dedup_counter == 0) {
     memset(docs.dedup_counters, 0, (size_t)array_bytes(&docs) * sizeof(uint16_t));
     dedup_counter = 1;
@@ -2936,10 +2942,8 @@ static inline bool init_mpv(void) {
   cache_init_core(&io_arena, &cin_io.instances, 1, false);
   cache_init_core(&io_arena, &cin_io.playlists, 1, false);
   Playlist *global = cin_io.playlists.head;
-  array_init_core(&io_arena, global, (uint32_t)docs.doc_count, false);
-  for (int32_t i = 0; i < docs.doc_count; ++i) {
-    array_push(&io_arena, global, docs.suffix_to_doc[i]);
-  }
+  array_set(&io_arena, global, docs.suffix_to_doc, (uint32_t)docs.doc_count);
+  array_to_pow1(&io_arena, global);
   cin_io.instances.head->playlist = global;
   cin_io.iocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
   if (!cin_io.iocp) {
@@ -3350,7 +3354,7 @@ static void mpv_spawn(Instance *instance, size_t index) {
   ++mpv_demand;
 }
 
-#define FOREACH_MPVTARGET(i, instance)                          \
+#define mpv_target_foreach(i, instance)                         \
   for (size_t i = 0, _j = 0, _s = cmd_ctx.numbers.items[0] - 1; \
        i < cmd_ctx.numbers.count;                               \
        _j = 0, _s = cmd_ctx.numbers.items[++i] - 1)             \
@@ -3370,7 +3374,7 @@ static void cmd_help_validator(void) {
 
 static void cmd_reroll_executor(void) {
   // TODO: shuffle
-  FOREACH_MPVTARGET(i, instance) {
+  mpv_target_foreach(i, instance) {
     playlist_play_next(instance);
   }
 }
@@ -3384,7 +3388,7 @@ static void cmd_reroll_validator(void) {
 static void cmd_tag_executor(void) {
   if (cmd_ctx.tag->playlist) {
     // TODO:
-    FOREACH_MPVTARGET(i, instance) {
+    mpv_target_foreach(i, instance) {
       playlist_set(instance, cmd_ctx.tag->playlist);
       playlist_play_next(instance);
     }
@@ -3515,7 +3519,7 @@ static void cmd_search_executor(void) {
       log_message(LOG_INFO, "Search playlist count=%d, cap=%d", playlist->count, playlist->capacity);
     }
   }
-  FOREACH_MPVTARGET(i, instance) {
+  mpv_target_foreach(i, instance) {
     playlist_set(instance, playlist);
     playlist_play_next(instance);
   }
