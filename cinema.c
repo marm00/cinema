@@ -2794,7 +2794,7 @@ static bool overlap_write(Instance *instance, MPV_Packet type, const char *cmd, 
   return true;
 }
 
-static inline void playlist_set(Instance *instance, Playlist *playlist) {
+static inline void instance_set_playlist(Instance *instance, Playlist *playlist) {
   Playlist *prev = instance->playlist;
   if (prev && --prev->targets == 0 && !prev->from_tag &&
       prev != playlist && prev != &media.global_playlist) {
@@ -2808,7 +2808,7 @@ static inline void playlist_set(Instance *instance, Playlist *playlist) {
   instance->playlist = playlist;
 }
 
-static inline void playlist_play_next(Instance *instance) {
+static inline void instance_play_next(Instance *instance) {
   assert(instance->playlist);
   Playlist *playlist = instance->playlist;
   uint32_t random = rand_between(0, playlist->count - 1);
@@ -2830,9 +2830,10 @@ static inline void mpv_kill(Instance *instance) {
   ReadBuffer *buf_head = instance->buf_head;
   ReadBuffer *buf_tail = instance->buf_tail;
   Instance *next = instance->next;
-  playlist_set(instance, NULL);
+  // setting playlist to NULL to decrement potential prev targets
+  instance_set_playlist(instance, NULL);
   ZeroMemory(instance, sizeof(Instance));
-  playlist_set(instance, &media.global_playlist);
+  instance_set_playlist(instance, &media.global_playlist);
   instance->buf_head = buf_head;
   instance->buf_tail = buf_tail;
   instance->next = next;
@@ -3421,7 +3422,7 @@ static void cmd_help_validator(void) {
 static void cmd_reroll_executor(void) {
   // TODO: shuffle
   mpv_target_foreach(i, instance) {
-    playlist_play_next(instance);
+    instance_play_next(instance);
   }
 }
 
@@ -3432,14 +3433,7 @@ static void cmd_reroll_validator(void) {
 }
 
 static void cmd_tag_executor(void) {
-  if (cmd_ctx.tag->playlist) {
-    // TODO:
-    mpv_target_foreach(i, instance) {
-      playlist_set(instance, cmd_ctx.tag->playlist);
-      playlist_play_next(instance);
-    }
-    return;
-  }
+  if (cmd_ctx.tag->playlist) goto reroll;
   cache_get(&docs_arena, &media.playlists, cmd_ctx.tag->playlist);
   Playlist *playlist = cmd_ctx.tag->playlist;
   playlist->from_tag = true;
@@ -3527,6 +3521,11 @@ static void cmd_tag_executor(void) {
     array_free(&console_arena, cmd_ctx.tag->url_items);
     cmd_ctx.tag->url_items = NULL;
   }
+reroll:
+  mpv_target_foreach(i, instance) {
+    instance_set_playlist(instance, cmd_ctx.tag->playlist);
+    instance_play_next(instance);
+  }
 }
 
 static void cmd_tag_validator(void) {
@@ -3556,40 +3555,36 @@ static void cmd_tag_validator(void) {
 }
 
 static void cmd_search_executor(void) {
-  uint8_t *pattern = (uint8_t *)"";
-  int32_t len = 0;
   Playlist *playlist = &media.global_playlist;
-  if (cmd_ctx.unicode) {
-    len = utf16_to_utf8(cmd_ctx.unicode);
-    pattern = utf8_buf.items;
-    if (len) {
-      uint32_t len_u32 = (uint32_t)len;
-      log_message(LOG_DEBUG, "Search with pattern: '%s', len: %d", pattern, len);
-      array_reserve(&docs_arena, &media.search_patterns, len_u32);
-      uint8_t *strings = media.search_patterns.items;
-      uint32_t pos = media.search_patterns.count;
-      memcpy(strings + pos, pattern, len_u32);
-      Table_Key key = {.strings = strings, .pos = pos, .len = len_u32};
-      cache_get(&docs_arena, &media.playlists, playlist);
-      table_value value = (table_value)playlist;
-      table_value result = table_insert(&docs_arena, &media.search_table, &key, value);
-      if (result >= 0) {
-        cache_put(&media.playlists, playlist);
-        playlist = (Playlist *)result;
-        log_message(LOG_DEBUG, "Searched for cached pattern");
-      } else {
-        playlist->search_pos = pos;
-        playlist->search_len = len_u32;
-        playlist->from_tag = false;
-        media.search_patterns.count += len_u32;
-        document_listing(pattern, len - 1, playlist);
-      }
-      log_message(LOG_INFO, "Search playlist count=%d, cap=%d", playlist->count, playlist->capacity);
+  int32_t len = 0;
+  if (cmd_ctx.unicode && (len = utf16_to_utf8(cmd_ctx.unicode))) {
+    uint8_t *pattern = utf8_buf.items;
+    uint32_t len_u32 = (uint32_t)len;
+    log_message(LOG_DEBUG, "Search with pattern: '%s', len: %d", pattern, len);
+    array_reserve(&docs_arena, &media.search_patterns, len_u32);
+    uint8_t *strings = media.search_patterns.items;
+    uint32_t pos = media.search_patterns.count;
+    memcpy(strings + pos, pattern, len_u32);
+    Table_Key key = {.strings = strings, .pos = pos, .len = len_u32};
+    cache_get(&docs_arena, &media.playlists, playlist);
+    table_value value = (table_value)playlist;
+    table_value result = table_insert(&docs_arena, &media.search_table, &key, value);
+    if (result >= 0) {
+      cache_put(&media.playlists, playlist);
+      playlist = (Playlist *)result;
+      log_message(LOG_DEBUG, "Searched for cached pattern");
+    } else {
+      playlist->search_pos = pos;
+      playlist->search_len = len_u32;
+      playlist->from_tag = false;
+      media.search_patterns.count += len_u32;
+      document_listing(pattern, len - 1, playlist);
     }
+    log_message(LOG_INFO, "Search playlist count=%d, cap=%d", playlist->count, playlist->capacity);
   }
   mpv_target_foreach(i, instance) {
-    playlist_set(instance, playlist);
-    playlist_play_next(instance);
+    instance_set_playlist(instance, playlist);
+    instance_play_next(instance);
   }
 }
 
@@ -3712,7 +3707,7 @@ static void cmd_layout_executor(void) {
   }
   for (Instance *next = NULL; screen < next_count; ++screen) {
     cache_get(&io_arena, &cin_io.instances, next);
-    playlist_set(next, &media.global_playlist);
+    instance_set_playlist(next, &media.global_playlist);
     mpv_spawn(next, screen);
   }
   if (!mpv_demand) mpv_unlock();
