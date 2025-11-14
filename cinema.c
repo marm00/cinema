@@ -2080,6 +2080,9 @@ array_define(TagUrlItems, int32_t);
 
 typedef struct Playlist {
   array_struct_members(int32_t);
+  uint32_t sattolo_start;
+  uint32_t fisher_yates_start;
+  uint32_t next_index;
   uint32_t targets;
   bool from_tag;
   // TODO: search not applicable to tag
@@ -2794,6 +2797,46 @@ static bool overlap_write(Instance *instance, MPV_Packet type, const char *cmd, 
   return true;
 }
 
+static inline void playlist_setup_shuffle(Playlist *playlist) {
+  uint32_t n = playlist->count;
+  assert(n);
+  uint32_t s = n - 1;
+  uint32_t fy = 0;
+  if (n > 1) {
+    static const uint32_t SATTOLO_FACTOR = 20;
+    uint32_t remainder = (s * SATTOLO_FACTOR) / 100;
+    uint32_t tail = max(playlist->targets, remainder);
+    uint32_t clamped_tail = min(tail, s);
+    fy = s - clamped_tail;
+  }
+  // initial fisher-yates to prevent tail cluster
+  for (uint32_t i = s; i >= 1; --i) {
+    uint32_t j = rand_between(0, i);
+    int32_t tmp = playlist->items[j];
+    playlist->items[j] = playlist->items[i];
+    playlist->items[i] = tmp;
+  }
+  playlist->sattolo_start = s;
+  playlist->fisher_yates_start = fy;
+  playlist->next_index = 0;
+}
+
+static inline void playlist_shuffle(Playlist *playlist) {
+  for (uint32_t i = playlist->sattolo_start; i >= 1; --i) {
+    uint32_t j = rand_between(0, i - 1);
+    int32_t tmp = playlist->items[j];
+    playlist->items[j] = playlist->items[i];
+    playlist->items[i] = tmp;
+  }
+  for (uint32_t i = playlist->fisher_yates_start; i >= 1; --i) {
+    uint32_t j = rand_between(0, i);
+    int32_t tmp = playlist->items[j];
+    playlist->items[j] = playlist->items[i];
+    playlist->items[i] = tmp;
+  }
+  playlist->next_index = 0;
+}
+
 static inline void instance_set_playlist(Instance *instance, Playlist *playlist) {
   Playlist *prev = instance->playlist;
   if (prev && --prev->targets == 0 && !prev->from_tag &&
@@ -2812,9 +2855,12 @@ static inline void instance_set_playlist(Instance *instance, Playlist *playlist)
 static inline void instance_play_next(Instance *instance) {
   assert(instance->playlist);
   Playlist *playlist = instance->playlist;
-  uint32_t random = rand_between(0, playlist->count - 1);
+  uint32_t index = instance->playlist->next_index;
   overlap_write(instance, MPV_LOADFILE, "loadfile",
-                (char *)docs.items + playlist->items[random], NULL);
+                (char *)docs.items + playlist->items[index], NULL);
+  if (++instance->playlist->next_index == instance->playlist->count) {
+    playlist_shuffle(instance->playlist);
+  }
 }
 
 #define CIN_MPVKEY_LEFT "\""
@@ -3523,6 +3569,7 @@ static void cmd_tag_executor(void) {
     cmd_ctx.tag->url_items = NULL;
   }
   array_to_pow1(&docs_arena, playlist);
+  playlist_setup_shuffle(playlist);
 reroll:
   mpv_target_foreach(i, instance) {
     instance_set_playlist(instance, cmd_ctx.tag->playlist);
@@ -3581,6 +3628,7 @@ static void cmd_search_executor(void) {
       playlist->from_tag = false;
       media.search_patterns.count += len_u32;
       document_listing(pattern, len - 1, playlist);
+      playlist_setup_shuffle(playlist);
     }
     log_message(LOG_INFO, "Search playlist count=%d, cap=%d", playlist->count, playlist->capacity);
   }
