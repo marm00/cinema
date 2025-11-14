@@ -1639,18 +1639,28 @@ static inline uint64_t fnv1a_hash(const uint8_t *str, size_t len) {
   return hash;
 }
 
-typedef struct Robin_Hood_Bucket {
-  // key is (char *)strings + str_offset
+typedef size_t table_key_pos;
+typedef intptr_t table_value;
+
+typedef struct Table_Key {
+  uint8_t *strings;
+  table_key_pos pos;
+  size_t len;
+} Table_Key;
+
+typedef struct Table_Bucket {
+  // key is (char *)strings + pos
   // value is value
   uint64_t hash;
-  size_t str_offset;
-  intptr_t value;
+  table_key_pos pos;
+  table_value value;
   bool filled;
-  // TODO: 7 more bytes available
-} Robin_Hood_Bucket;
+  bool deleted;
+  // TODO: free bytes remaining
+} Table_Bucket;
 
 typedef struct Robin_Hood_Table {
-  array_struct_members(Robin_Hood_Bucket);
+  array_struct_members(Table_Bucket);
   size_t mask;
 } Robin_Hood_Table;
 
@@ -1659,10 +1669,10 @@ typedef struct Robin_Hood_Table {
 static inline void table_init(Arena *arena, Robin_Hood_Table *table, uint32_t capacity) {
   assert(table->capacity == 0);
   assert(capacity > 0);
-  table->items = arena_bump_T(arena, Robin_Hood_Bucket, capacity);
+  table->items = arena_bump_T(arena, Table_Bucket, capacity);
   table->count = 0;
   table->capacity = capacity;
-  table->bytes_capacity = capacity * sizeof(Robin_Hood_Bucket);
+  table->bytes_capacity = capacity * sizeof(Table_Bucket);
   table->bytes_capacity_k = 0;
   table->mask = table->capacity - 1;
 }
@@ -1675,9 +1685,9 @@ static inline void table_double(Arena *arena, Robin_Hood_Table *table) {
   }
   uint32_t prev_bytes_cap = table->bytes_capacity;
   uint32_t prev_cap = table->capacity;
-  Robin_Hood_Bucket *prev_buckets = table->items;
+  Table_Bucket *prev_buckets = table->items;
   table->capacity <<= 1;
-  table->items = arena_bump_T(arena, Robin_Hood_Bucket, table->capacity);
+  table->items = arena_bump_T(arena, Table_Bucket, table->capacity);
   memcpy(table->items, prev_buckets, table->bytes_capacity);
   table->bytes_capacity <<= 1;
   table->count = 0;
@@ -1686,14 +1696,14 @@ static inline void table_double(Arena *arena, Robin_Hood_Table *table) {
   assert(table->capacity > 0);
   assert(cin_ispow2(table->capacity));
   for (uint32_t i = 0; i < prev_cap; ++i) {
-    if (prev_buckets[i].filled) {
+    if (prev_buckets[i].filled && !prev_buckets[i].deleted) {
       size_t home = prev_buckets[i].hash & table->mask;
       size_t dist = 0;
-      Robin_Hood_Bucket bucket = prev_buckets[i];
+      Table_Bucket bucket = prev_buckets[i];
       while (table->items[home].filled) {
         size_t cur_dist = (home - (table->items[home].hash & table->mask)) & table->mask;
         if (cur_dist < dist) {
-          Robin_Hood_Bucket tmp = table->items[home];
+          Table_Bucket tmp = table->items[home];
           table->items[home] = bucket;
           bucket = tmp;
           dist = cur_dist;
@@ -1708,37 +1718,60 @@ static inline void table_double(Arena *arena, Robin_Hood_Table *table) {
   arena_free_pos(arena, (uint8_t *)prev_buckets, prev_bytes_cap);
 }
 
-static inline intptr_t table_insert(Arena *arena, Robin_Hood_Table *table,
-                                   uint8_t *strings, size_t str_offset,
-                                   size_t len, intptr_t value) {
-  // robin hood hashing (without tombstones) with fnv-1a
-  uint8_t *str = strings + str_offset;
+static inline table_value table_insert(Arena *arena, Robin_Hood_Table *table,
+                                       Table_Key *key, table_value value) {
+  // robin hood hashing (with tombstones) with fnv-1a
+  uint8_t *str = key->strings + key->pos;
   if (table->count >= (table->capacity * TABLE_LOAD_FACTOR) / 100) {
     table_double(arena, table);
   }
-  uint64_t hash = fnv1a_hash(str, len);
+  uint64_t hash = fnv1a_hash(str, key->len);
   size_t i = hash & table->mask;
   size_t dist = 0;
-  Robin_Hood_Bucket candidate = {.hash = hash, .value = value, .str_offset = str_offset, .filled = true};
+  size_t tombstone = SIZE_MAX;
+  Table_Bucket candidate = {.hash = hash, .value = value, .pos = key->pos, .filled = true, .deleted = false};
   while (table->items[i].filled) {
-    uint8_t *i_str = strings + table->items[i].str_offset;
-    if (table->items[i].hash == hash && strcmp((char *)i_str, (char *)str) == 0) {
-      log_message(LOG_TRACE, "Found duplicate key '%s' in hashmap", str);
-      return table->items[i].value;
-    }
-    size_t cur_dist = (i - (table->items[i].hash & table->mask)) & table->mask;
-    if (cur_dist < dist) {
-      // evict rich to house poor
-      Robin_Hood_Bucket tmp = table->items[i];
-      table->items[i] = candidate;
-      candidate = tmp;
-      dist = cur_dist;
+    if (table->items[i].deleted) {
+      if (tombstone == SIZE_MAX) tombstone = i;
+    } else {
+      uint8_t *i_str = key->strings + table->items[i].pos;
+      if (table->items[i].hash == hash && strcmp((char *)i_str, (char *)str) == 0) {
+        log_message(LOG_TRACE, "Found duplicate key '%s' in hashmap", str);
+        return table->items[i].value;
+      }
+      size_t cur_dist = (i - (table->items[i].hash & table->mask)) & table->mask;
+      if (cur_dist < dist) {
+        // evict rich to house poor
+        Table_Bucket tmp = table->items[i];
+        table->items[i] = candidate;
+        candidate = tmp;
+        dist = cur_dist;
+      }
     }
     i = (i + 1) & table->mask;
     ++dist;
   }
-  table->items[i] = candidate;
+  if (tombstone == SIZE_MAX) table->items[i] = candidate;
+  else table->items[tombstone] = candidate;
   ++table->count;
+  return -1LL;
+}
+
+static inline table_value table_delete(Robin_Hood_Table *table, Table_Key *key) {
+  uint8_t *str = key->strings + key->pos;
+  uint64_t hash = fnv1a_hash(str, key->len);
+  size_t i = hash & table->mask;
+  while (table->items[i].filled) {
+    if (!table->items[i].deleted) {
+      uint8_t *i_str = key->strings + table->items[i].pos;
+      if (table->items[i].hash == hash && strcmp((char *)i_str, (char *)str) == 0) {
+        table->items[i].deleted = true;
+        return table->items[i].value;
+      }
+    }
+    i = (i + 1) & table->mask;
+  }
+  assert(false && "tried to delete a key that does not exist");
   return -1LL;
 }
 
@@ -2019,6 +2052,7 @@ struct Document_Collection {
   int32_t *gsa;
   int32_t *lcp;
   int32_t *suffix_to_doc;
+  Robin_Hood_Table queries;
   uint16_t *dedup_counters;
 } docs = {0};
 
@@ -2047,6 +2081,10 @@ array_define(TagUrlItems, int32_t);
 
 typedef struct Playlist {
   array_struct_members(int32_t);
+  uint32_t targets;
+  union {
+    table_key_pos search_pos;
+  };
   cache_node_struct_members(Playlist);
 } Playlist;
 
@@ -2081,6 +2119,7 @@ static array_struct(uint8_t) screen_arena = {0};
 #define CIN_PATTERN_ITEMS_CAP 64
 #define CIN_URLS_CAP 64
 #define CIN_LAYOUT_SCREENS_CAP 8
+#define CIN_QUERIES_CAP 8
 
 static Robin_Hood_Table dir_table = {0};
 static Robin_Hood_Table pat_table = {0};
@@ -2111,7 +2150,8 @@ static void setup_directory(const char *path, TagDirectories *tag_dirs) {
     size_t node_tail = directory_nodes.count;
     // TODO: if an unmatched directory is inserted, its next occurence
     // will think that the current node_tail is correct, when it is not
-    intptr_t dup_index = table_insert(&console_arena, &dir_table, strings, str_offset, bytes, (intptr_t)node_tail);
+    Table_Key key = {.strings = strings, .pos = str_offset, .len = bytes};
+    intptr_t dup_index = table_insert(&console_arena, &dir_table, &key, (intptr_t)node_tail);
     if (dup_index >= 0) {
       // NOTE: When the key is already in the hash, we have access to an index
       // into the dynamic nodes arena. Lazy evaluation: the terminator but must
@@ -2254,7 +2294,8 @@ static inline void setup_pattern(const char *pattern, TagPatternItems *tag_patte
     size_t tail_offset = (size_t)array_bytes(&docs);
     int32_t tail_doc = (int32_t)array_bytes(&docs);
     docs_append(utf8_buf.items, len);
-    intptr_t dup_doc = table_insert(&console_arena, &pat_table, docs.items, tail_offset, (size_t)len, tail_doc);
+    Table_Key key = {.strings = docs.items, .pos = tail_offset, .len = (size_t)len};
+    intptr_t dup_doc = table_insert(&console_arena, &pat_table, &key, tail_doc);
     if (dup_doc >= 0) {
       array_shrink(&docs, (uint32_t)len);
       --docs.doc_count;
@@ -2280,7 +2321,8 @@ static inline void setup_url(const char *url, TagUrlItems *tag_url_items) {
   size_t tail_offset = (size_t)array_bytes(&docs);
   int32_t tail_doc = (int32_t)array_bytes(&docs);
   docs_append(utf8_buf.items, len_utf8);
-  intptr_t dup_doc = table_insert(&console_arena, &url_table, docs.items, tail_offset, (size_t)len_utf8, tail_doc);
+  Table_Key key = {.strings = docs.items, .pos = tail_offset, .len = (size_t)len_utf8};
+  intptr_t dup_doc = table_insert(&console_arena, &url_table, &key, tail_doc);
   if (dup_doc >= 0) {
     array_shrink(&docs, (uint32_t)len_utf8);
     --docs.doc_count;
@@ -2502,6 +2544,7 @@ static bool init_documents(void) {
     }
     docs.suffix_to_doc[i] = docs.suffix_to_doc[left];
   }
+  table_init(&docs_arena, &docs.queries, CIN_QUERIES_CAP);
   return true;
 }
 
@@ -3423,7 +3466,8 @@ static void cmd_tag_executor(void) {
           DirectoryNode *start = &directory_nodes.items[node_index];
           uint8_t *start_str = directory_strings.items + start->str_offset;
           size_t start_len = strlen((char *)start_str);
-          intptr_t dup = table_insert(arena1, &duplicates, strings, start->str_offset, start_len + 1, 0);
+          Table_Key key = {.strings = strings, .pos = start->str_offset, .len = start_len + 1};
+          intptr_t dup = table_insert(arena1, &duplicates, &key, 0);
           if (dup >= 0) continue;
           log_message(LOG_TRACE, "Tag directory: %s (%zu)", start_str, start_len);
           array_extend(arena1, playlist, start->items, start->count);
@@ -3433,7 +3477,9 @@ static void cmd_tag_executor(void) {
             uint8_t *str = directory_strings.items + node->str_offset;
             if (strncmp((char *)str, (char *)start_str, start_len) != 0) break;
             size_t len = strlen((char *)str);
-            dup = table_insert(arena1, &duplicates, strings, node->str_offset, len + 1, 0);
+            key.pos = node->str_offset;
+            key.len = len + 1;
+            dup = table_insert(arena1, &duplicates, &key, 0);
             if (dup >= 0) continue;
             log_message(LOG_TRACE, "Tag directory: %s", str);
             array_extend(arena1, playlist, node->items, node->count);
