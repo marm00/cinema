@@ -2052,7 +2052,6 @@ struct Document_Collection {
   int32_t *gsa;
   int32_t *lcp;
   int32_t *suffix_to_doc;
-  Robin_Hood_Table queries;
   uint16_t *dedup_counters;
 } docs = {0};
 
@@ -2082,13 +2081,23 @@ array_define(TagUrlItems, int32_t);
 typedef struct Playlist {
   array_struct_members(int32_t);
   uint32_t targets;
-  union {
-    table_key_pos search_pos;
-  };
+  bool from_tag;
+  // TODO: search not applicable to tag
+  table_key_pos search_pos;
+  size_t search_len;
   cache_node_struct_members(Playlist);
 } Playlist;
 
 cache_define(Playlist_Cache, Playlist);
+
+array_define(Search_Patterns, uint8_t);
+
+struct Media {
+  Playlist global_playlist;
+  Playlist_Cache playlists;
+  Robin_Hood_Table search_table;
+  Search_Patterns search_patterns;
+} media = {0};
 
 typedef struct TagItems {
   Playlist *playlist;
@@ -2544,7 +2553,7 @@ static bool init_documents(void) {
     }
     docs.suffix_to_doc[i] = docs.suffix_to_doc[left];
   }
-  table_init(&docs_arena, &docs.queries, CIN_QUERIES_CAP);
+  table_init(&docs_arena, &media.search_table, CIN_QUERIES_CAP);
   return true;
 }
 
@@ -2633,7 +2642,6 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len, Playli
                   i, docs.items + docs.gsa[i], docs.gsa[i], doc, docs.items + doc, dedup_counter);
     }
   }
-  array_to_pow1(&docs_arena, result);
   if (++dedup_counter == 0) {
     memset(docs.dedup_counters, 0, (size_t)array_bytes(&docs) * sizeof(uint16_t));
     dedup_counter = 1;
@@ -2689,7 +2697,6 @@ cache_define(Instance_Cache, Instance);
 static struct {
   Write_Cache writes;
   Instance_Cache instances;
-  Playlist_Cache playlists;
   HANDLE iocp;
 } cin_io = {0};
 
@@ -2787,23 +2794,18 @@ static bool overlap_write(Instance *instance, MPV_Packet type, const char *cmd, 
   return true;
 }
 
-static inline void playlist_set(Instance *instance, Playlist *next) {
+static inline void playlist_set(Instance *instance, Playlist *playlist) {
   Playlist *prev = instance->playlist;
-  if (prev) {
-    bool playlist_in_use = false;
-    cache_foreach(&cin_io.instances, Instance, i, o) {
-      if (o->playlist == prev) {
-        playlist_in_use = true;
-        break;
-      }
-    }
-    if (!playlist_in_use) {
-      // TODO: cannot put back in cache in case of tag,
-      // because that would mean deduplicating again
-      // cache_put(&cin_io.playlists, prev);
-    }
+  if (prev && --prev->targets == 0 && !prev->from_tag &&
+      prev != playlist && prev != &media.global_playlist) {
+    Table_Key key = {.strings = media.search_patterns.items,
+                     .pos = prev->search_pos,
+                     .len = prev->search_len};
+    table_delete(&media.search_table, &key);
+    cache_put(&media.playlists, prev);
   }
-  instance->playlist = next;
+  ++playlist->targets;
+  instance->playlist = playlist;
 }
 
 static inline void playlist_play_next(Instance *instance) {
@@ -2830,7 +2832,7 @@ static inline void mpv_kill(Instance *instance) {
   Instance *next = instance->next;
   playlist_set(instance, NULL);
   ZeroMemory(instance, sizeof(Instance));
-  playlist_set(instance, cin_io.playlists.head);
+  playlist_set(instance, &media.global_playlist);
   instance->buf_head = buf_head;
   instance->buf_tail = buf_tail;
   instance->next = next;
@@ -2984,10 +2986,10 @@ static inline bool init_mpv(void) {
   arena_chunk_init(&iocp_thread_arena, CIN_IO_ARENA_CAP);
   cache_init_core(&io_arena, &cin_io.writes, 1, true);
   cache_init_core(&io_arena, &cin_io.instances, 1, false);
-  cache_init_core(&io_arena, &cin_io.playlists, 1, false);
-  Playlist *global = cin_io.playlists.head;
-  array_set(&io_arena, global, docs.suffix_to_doc, (uint32_t)docs.doc_count);
-  array_to_pow1(&io_arena, global);
+  cache_init_core(&docs_arena, &media.playlists, 1, true);
+  Playlist *global = &media.global_playlist;
+  array_set(&docs_arena, global, docs.suffix_to_doc, (uint32_t)docs.doc_count);
+  array_to_pow1(&docs_arena, global);
   cin_io.instances.head->playlist = global;
   cin_io.iocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
   if (!cin_io.iocp) {
@@ -3438,8 +3440,9 @@ static void cmd_tag_executor(void) {
     }
     return;
   }
-  cache_get(&io_arena, &cin_io.playlists, cmd_ctx.tag->playlist);
+  cache_get(&docs_arena, &media.playlists, cmd_ctx.tag->playlist);
   Playlist *playlist = cmd_ctx.tag->playlist;
+  playlist->from_tag = true;
   size_t directory_k = 0;
   size_t pattern_k = 0;
   size_t url_k = 0;
@@ -3555,14 +3558,32 @@ static void cmd_tag_validator(void) {
 static void cmd_search_executor(void) {
   uint8_t *pattern = (uint8_t *)"";
   int32_t len = 0;
-  Playlist *playlist = cin_io.playlists.head;
+  Playlist *playlist = &media.global_playlist;
   if (cmd_ctx.unicode) {
     len = utf16_to_utf8(cmd_ctx.unicode);
     pattern = utf8_buf.items;
     if (len) {
+      uint32_t len_u32 = (uint32_t)len;
       log_message(LOG_DEBUG, "Search with pattern: '%s', len: %d", pattern, len);
-      cache_get(&io_arena, &cin_io.playlists, playlist);
-      document_listing(pattern, len - 1, playlist);
+      array_reserve(&docs_arena, &media.search_patterns, len_u32);
+      uint8_t *strings = media.search_patterns.items;
+      uint32_t pos = media.search_patterns.count;
+      memcpy(strings + pos, pattern, len_u32);
+      Table_Key key = {.strings = strings, .pos = pos, .len = len_u32};
+      cache_get(&docs_arena, &media.playlists, playlist);
+      table_value value = (table_value)playlist;
+      table_value result = table_insert(&docs_arena, &media.search_table, &key, value);
+      if (result >= 0) {
+        cache_put(&media.playlists, playlist);
+        playlist = (Playlist *)result;
+        log_message(LOG_DEBUG, "Searched for cached pattern");
+      } else {
+        playlist->search_pos = pos;
+        playlist->search_len = len_u32;
+        playlist->from_tag = false;
+        media.search_patterns.count += len_u32;
+        document_listing(pattern, len - 1, playlist);
+      }
       log_message(LOG_INFO, "Search playlist count=%d, cap=%d", playlist->count, playlist->capacity);
     }
   }
@@ -3691,7 +3712,7 @@ static void cmd_layout_executor(void) {
   }
   for (Instance *next = NULL; screen < next_count; ++screen) {
     cache_get(&io_arena, &cin_io.instances, next);
-    next->playlist = cin_io.playlists.head;
+    playlist_set(next, &media.global_playlist);
     mpv_spawn(next, screen);
   }
   if (!mpv_demand) mpv_unlock();
