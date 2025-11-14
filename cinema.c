@@ -2802,6 +2802,7 @@ static inline void instance_set_playlist(Instance *instance, Playlist *playlist)
                      .pos = prev->search_pos,
                      .len = prev->search_len};
     table_delete(&media.search_table, &key);
+    array_free_items(&docs_arena, prev);
     cache_put(&media.playlists, prev);
   }
   ++playlist->targets;
@@ -3434,7 +3435,7 @@ static void cmd_reroll_validator(void) {
 
 static void cmd_tag_executor(void) {
   if (cmd_ctx.tag->playlist) goto reroll;
-  cache_get(&docs_arena, &media.playlists, cmd_ctx.tag->playlist);
+  cache_get_zero(&docs_arena, &media.playlists, cmd_ctx.tag->playlist);
   Playlist *playlist = cmd_ctx.tag->playlist;
   playlist->from_tag = true;
   size_t directory_k = 0;
@@ -3521,6 +3522,7 @@ static void cmd_tag_executor(void) {
     array_free(&console_arena, cmd_ctx.tag->url_items);
     cmd_ctx.tag->url_items = NULL;
   }
+  array_to_pow1(&docs_arena, playlist);
 reroll:
   mpv_target_foreach(i, instance) {
     instance_set_playlist(instance, cmd_ctx.tag->playlist);
@@ -3566,7 +3568,7 @@ static void cmd_search_executor(void) {
     uint32_t pos = media.search_patterns.count;
     memcpy(strings + pos, pattern, len_u32);
     Table_Key key = {.strings = strings, .pos = pos, .len = len_u32};
-    cache_get(&docs_arena, &media.playlists, playlist);
+    cache_get_zero(&docs_arena, &media.playlists, playlist);
     table_value value = (table_value)playlist;
     table_value result = table_insert(&docs_arena, &media.search_table, &key, value);
     if (result >= 0) {
