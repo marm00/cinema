@@ -622,6 +622,26 @@ static_assert(CIN_PTR == 8 ? (CIN_ARRAY_SIZE == 24) : true, "bytes updated (poss
   for (uint32_t i = 0, _j = 0; i < (a)->count; _j = 0, ++i) \
     for (T o = (a)->items[i]; _j == 0; _j = 1)
 
+#define array_shuffle_fisher_yates(a, T, tail, head) \
+  do {                                               \
+    for (uint32_t _i = (tail); _i >= (head); --_i) { \
+      uint32_t _j = rand_between(0, _i);             \
+      T _tmp = (a)->items[_j];                       \
+      (a)->items[_j] = (a)->items[_i];               \
+      (a)->items[_i] = _tmp;                         \
+    }                                                \
+  } while (0)
+
+#define array_shuffle_sattolo(a, T, tail, head)     \
+  do {                                              \
+    for (uint32_t _i = (tail); _i > (head); --_i) { \
+      uint32_t _j = rand_between((head), _i - 1);   \
+      T _tmp = (a)->items[_j];                      \
+      (a)->items[_j] = (a)->items[_i];              \
+      (a)->items[_i] = _tmp;                        \
+    }                                               \
+  } while (0)
+
 static Arena console_arena = {0};
 static Arena docs_arena = {0};
 static Arena io_arena = {0};
@@ -2080,8 +2100,6 @@ array_define(TagUrlItems, int32_t);
 
 typedef struct Playlist {
   array_struct_members(int32_t);
-  uint32_t sattolo_start;
-  uint32_t fisher_yates_start;
   uint32_t next_index;
   uint32_t targets;
   bool from_tag;
@@ -2800,40 +2818,30 @@ static bool overlap_write(Instance *instance, MPV_Packet type, const char *cmd, 
 static inline void playlist_setup_shuffle(Playlist *playlist) {
   uint32_t n = playlist->count;
   assert(n);
-  uint32_t s = n - 1;
-  uint32_t fy = 0;
-  if (n > 1) {
-    static const uint32_t SATTOLO_FACTOR = 20;
-    uint32_t remainder = (s * SATTOLO_FACTOR) / 100;
-    uint32_t tail = max(playlist->targets, remainder);
-    uint32_t clamped_tail = min(tail, s);
-    fy = s - clamped_tail;
-  }
-  // initial fisher-yates to prevent tail cluster
-  for (uint32_t i = s; i >= 1; --i) {
-    uint32_t j = rand_between(0, i);
-    int32_t tmp = playlist->items[j];
-    playlist->items[j] = playlist->items[i];
-    playlist->items[i] = tmp;
-  }
-  playlist->sattolo_start = s;
-  playlist->fisher_yates_start = fy;
+  uint32_t fy = n - 1;
+  array_shuffle_fisher_yates(playlist, int32_t, fy, 1);
   playlist->next_index = 0;
 }
 
 static inline void playlist_shuffle(Playlist *playlist) {
-  for (uint32_t i = playlist->sattolo_start; i >= 1; --i) {
-    uint32_t j = rand_between(0, i - 1);
-    int32_t tmp = playlist->items[j];
-    playlist->items[j] = playlist->items[i];
-    playlist->items[i] = tmp;
+  uint32_t n = playlist->count;
+  uint32_t s = 0;
+  uint32_t fy = 0;
+  if (n > 2) {
+    s = n - 1;
+    static const uint32_t SATTOLO_FACTOR = 5;
+    uint32_t remainder = s / SATTOLO_FACTOR;
+    assert(playlist->targets);
+    uint32_t tail = max(playlist->targets, remainder);
+    uint32_t clamped_tail = min(tail, s);
+    uint32_t diff = s - clamped_tail;
+    uint32_t clamped_diff = max(1, diff);
+    fy = s - clamped_diff;
+    assert(fy >= 1);
+    assert(s > fy);
   }
-  for (uint32_t i = playlist->fisher_yates_start; i >= 1; --i) {
-    uint32_t j = rand_between(0, i);
-    int32_t tmp = playlist->items[j];
-    playlist->items[j] = playlist->items[i];
-    playlist->items[i] = tmp;
-  }
+  array_shuffle_fisher_yates(playlist, int32_t, fy, 1);
+  array_shuffle_sattolo(playlist, int32_t, s, fy);
   playlist->next_index = 0;
 }
 
@@ -2874,11 +2882,11 @@ static inline void instance_play_next(Instance *instance) {
 
 static inline void mpv_kill(Instance *instance) {
   assert(instance->pipe);
+  assert(instance->playlist);
+  --instance->playlist->targets;
   ReadBuffer *buf_head = instance->buf_head;
   ReadBuffer *buf_tail = instance->buf_tail;
   Instance *next = instance->next;
-  // setting playlist to NULL to decrement potential prev targets
-  instance_set_playlist(instance, NULL);
   ZeroMemory(instance, sizeof(Instance));
   instance_set_playlist(instance, &media.global_playlist);
   instance->buf_head = buf_head;
@@ -3038,6 +3046,7 @@ static inline bool init_mpv(void) {
   Playlist *global = &media.global_playlist;
   array_set(&docs_arena, global, docs.suffix_to_doc, (uint32_t)docs.doc_count);
   array_to_pow1(&docs_arena, global);
+  playlist_setup_shuffle(global);
   cin_io.instances.head->playlist = global;
   cin_io.iocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
   if (!cin_io.iocp) {
