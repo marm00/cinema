@@ -2115,7 +2115,7 @@ cache_define(Playlist_Cache, Playlist);
 array_define(Search_Patterns, uint8_t);
 
 struct Media {
-  Playlist global_playlist;
+  Playlist default_playlist;
   Playlist_Cache playlists;
   Robin_Hood_Table search_table;
   Search_Patterns search_patterns;
@@ -2847,10 +2847,10 @@ static inline void playlist_shuffle(Playlist *playlist) {
   playlist->next_index = 0;
 }
 
-static inline void instance_set_playlist(Instance *instance, Playlist *playlist) {
+static inline void playlist_set(Instance *instance, Playlist *playlist) {
   Playlist *prev = instance->playlist;
   if (prev && --prev->targets == 0 && !prev->from_tag &&
-      prev != playlist && prev != &media.global_playlist) {
+      prev != playlist && prev != &media.default_playlist) {
     Table_Key key = {.strings = media.search_patterns.items,
                      .pos = prev->search_pos,
                      .len = prev->search_len};
@@ -2862,7 +2862,11 @@ static inline void instance_set_playlist(Instance *instance, Playlist *playlist)
   instance->playlist = playlist;
 }
 
-static inline void instance_play_next(Instance *instance) {
+static inline void playlist_set_default(Instance *instance) {
+  playlist_set(instance, &media.default_playlist);
+}
+
+static inline void playlist_play(Instance *instance) {
   assert(instance->playlist);
   Playlist *playlist = instance->playlist;
   uint32_t index = instance->playlist->next_index;
@@ -2890,7 +2894,7 @@ static inline void mpv_kill(Instance *instance) {
   ReadBuffer *buf_tail = instance->buf_tail;
   Instance *next = instance->next;
   ZeroMemory(instance, sizeof(Instance));
-  instance_set_playlist(instance, &media.global_playlist);
+  playlist_set_default(instance);
   instance->buf_head = buf_head;
   instance->buf_tail = buf_tail;
   instance->next = next;
@@ -3045,11 +3049,11 @@ static inline bool init_mpv(void) {
   cache_init_core(&io_arena, &cin_io.writes, 1, true);
   cache_init_core(&io_arena, &cin_io.instances, 1, false);
   cache_init_core(&docs_arena, &media.playlists, 1, true);
-  Playlist *global = &media.global_playlist;
-  array_set(&docs_arena, global, docs.suffix_to_doc, (uint32_t)docs.doc_count);
-  array_to_pow1(&docs_arena, global);
-  playlist_setup_shuffle(global);
-  cin_io.instances.head->playlist = global;
+  Playlist *default_playlist = &media.default_playlist;
+  array_set(&docs_arena, default_playlist, docs.suffix_to_doc, (uint32_t)docs.doc_count);
+  array_to_pow1(&docs_arena, default_playlist);
+  playlist_setup_shuffle(default_playlist);
+  playlist_set_default(cin_io.instances.head);
   cin_io.iocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
   if (!cin_io.iocp) {
     log_last_error("Failed to create iocp");
@@ -3479,7 +3483,7 @@ static void cmd_help_validator(void) {
 
 static void cmd_reroll_executor(void) {
   mpv_target_foreach(i, instance) {
-    instance_play_next(instance);
+    playlist_play(instance);
   }
 }
 
@@ -3582,8 +3586,8 @@ static void cmd_tag_executor(void) {
   playlist_setup_shuffle(playlist);
 reroll:
   mpv_target_foreach(i, instance) {
-    instance_set_playlist(instance, cmd_ctx.tag->playlist);
-    instance_play_next(instance);
+    playlist_set(instance, cmd_ctx.tag->playlist);
+    playlist_play(instance);
   }
 }
 
@@ -3614,7 +3618,7 @@ static void cmd_tag_validator(void) {
 }
 
 static void cmd_search_executor(void) {
-  Playlist *playlist = &media.global_playlist;
+  Playlist *playlist = &media.default_playlist;
   int32_t len = 0;
   if (cmd_ctx.unicode && (len = utf16_to_utf8(cmd_ctx.unicode))) {
     uint8_t *pattern = utf8_buf.items;
@@ -3643,8 +3647,8 @@ static void cmd_search_executor(void) {
     log_message(LOG_INFO, "Search playlist count=%d, cap=%d", playlist->count, playlist->capacity);
   }
   mpv_target_foreach(i, instance) {
-    instance_set_playlist(instance, playlist);
-    instance_play_next(instance);
+    playlist_set(instance, playlist);
+    playlist_play(instance);
   }
 }
 
@@ -3761,6 +3765,19 @@ static void cmd_swap_validator(void) {
   set_preview(true, L"swap screen %zu with %zu", cmd_ctx.numbers.items[0], cmd_ctx.numbers.items[1]);
 }
 
+static void cmd_clear_executor(void) {
+  mpv_target_foreach(i, instance) {
+    playlist_set_default(instance);
+    playlist_play(instance);
+  }
+}
+
+static void cmd_clear_validator(void) {
+  if (!validate_screens()) return;
+  set_preview(true, L"clear %s", cmd_ctx.targets.items);
+  cmd_ctx.executor = cmd_clear_executor;
+}
+
 static void cmd_quit_executor(void) {
   cache_foreach(&cin_io.instances, Instance, i, instance) {
     log_message(LOG_DEBUG, "Closing PID=%lu", instance->pi.dwProcessId);
@@ -3801,7 +3818,7 @@ static void cmd_layout_executor(void) {
   }
   for (Instance *next = NULL; screen < next_count; ++screen) {
     cache_get(&io_arena, &cin_io.instances, next);
-    instance_set_playlist(next, &media.global_playlist);
+    playlist_set_default(next);
     mpv_spawn(next, screen);
   }
   if (!mpv_demand) mpv_unlock();
@@ -3861,6 +3878,7 @@ static bool init_commands(void) {
   register_cmd(L"search", L"Limit media to term [(1 2 ..) search (term)]", cmd_search_validator);
   register_cmd(L"maximize", L"Maximize and close others [(1) maximize]", cmd_maximize_validator);
   register_cmd(L"swap", L"Swap screen contents [(1 2) swap]", cmd_swap_validator);
+  register_cmd(L"clear", L"Clear tag/term [(1 2) clear]", cmd_clear_validator);
   register_cmd(L"quit", L"Close screens and quit Cinema", cmd_quit_validator);
   return true;
 }
