@@ -1649,23 +1649,24 @@ static inline uint32_t rand_between(uint32_t min, uint32_t max) {
   return min + (random % range);
 }
 
-// TODO: size_t to uint64_t
-static inline uint64_t fnv1a_hash(const uint8_t *str, size_t len) {
+static inline uint64_t fnv1a_hash(const uint8_t *str, uint32_t len) {
   uint64_t hash = 0xcbf29ce484222325ULL;
-  for (size_t i = 0; i < len; ++i) {
+  for (uint32_t i = 0; i < len; ++i) {
     hash ^= str[i];
     hash *= 0x100000001b3ULL;
   }
   return hash;
 }
 
-typedef size_t table_key_pos;
+typedef uint8_t table_key_t;
+typedef uint32_t table_key_pos;
+typedef uint32_t table_key_len;
 typedef intptr_t table_value;
 
 typedef struct Table_Key {
-  uint8_t *strings;
+  table_key_t *strings;
   table_key_pos pos;
-  size_t len;
+  table_key_len len;
 } Table_Key;
 
 typedef struct Table_Bucket {
@@ -1741,7 +1742,7 @@ static inline void table_double(Arena *arena, Robin_Hood_Table *table) {
 static inline table_value table_insert(Arena *arena, Robin_Hood_Table *table,
                                        Table_Key *key, table_value value) {
   // robin hood hashing (with tombstones) with fnv-1a
-  uint8_t *str = key->strings + key->pos;
+  table_key_t *str = key->strings + key->pos;
   if (table->count >= (table->capacity * TABLE_LOAD_FACTOR) / 100) {
     table_double(arena, table);
   }
@@ -1754,7 +1755,7 @@ static inline table_value table_insert(Arena *arena, Robin_Hood_Table *table,
     if (table->items[i].deleted) {
       if (tombstone == SIZE_MAX) tombstone = i;
     } else {
-      uint8_t *i_str = key->strings + table->items[i].pos;
+      table_key_t *i_str = key->strings + table->items[i].pos;
       if (table->items[i].hash == hash && strcmp((char *)i_str, (char *)str) == 0) {
         log_message(LOG_TRACE, "Found duplicate key '%s' in hashmap", str);
         return table->items[i].value;
@@ -1778,12 +1779,12 @@ static inline table_value table_insert(Arena *arena, Robin_Hood_Table *table,
 }
 
 static inline table_value table_delete(Robin_Hood_Table *table, Table_Key *key) {
-  uint8_t *str = key->strings + key->pos;
+  table_key_t *str = key->strings + key->pos;
   uint64_t hash = fnv1a_hash(str, key->len);
   size_t i = hash & table->mask;
   while (table->items[i].filled) {
     if (!table->items[i].deleted) {
-      uint8_t *i_str = key->strings + table->items[i].pos;
+      table_key_t *i_str = key->strings + table->items[i].pos;
       if (table->items[i].hash == hash && strcmp((char *)i_str, (char *)str) == 0) {
         table->items[i].deleted = true;
         return table->items[i].value;
@@ -2086,7 +2087,7 @@ static void docs_append(uint8_t *utf8, int32_t len) {
 
 typedef struct DirectoryNode {
   array_struct_members(int32_t);
-  size_t str_offset;
+  uint32_t str_offset;
 } DirectoryNode;
 
 typedef struct DirectoryPath {
@@ -2103,9 +2104,9 @@ typedef struct Playlist {
   uint32_t next_index;
   uint32_t targets;
   bool from_tag;
-  // TODO: search not applicable to tag
+  // TODO: search table key not applicable to tag
   table_key_pos search_pos;
-  size_t search_len;
+  table_key_len search_len;
   cache_node_struct_members(Playlist);
 } Playlist;
 
@@ -2175,13 +2176,13 @@ static void setup_directory(const char *path, TagDirectories *tag_dirs) {
     uint32_t bytes = (uint32_t)bytes_i32;
     array_reserve(&console_arena, &directory_strings, bytes + 1);
     uint8_t *strings = directory_strings.items;
-    size_t str_offset = directory_strings.count;
+    uint32_t str_offset = directory_strings.count;
     memcpy(strings + str_offset, utf8_buf.items, bytes);
-    size_t node_tail = directory_nodes.count;
+    uint32_t node_tail = directory_nodes.count;
     // TODO: if an unmatched directory is inserted, its next occurence
     // will think that the current node_tail is correct, when it is not
     Table_Key key = {.strings = strings, .pos = str_offset, .len = bytes};
-    intptr_t dup_index = table_insert(&console_arena, &dir_table, &key, (intptr_t)node_tail);
+    table_value dup_index = table_insert(&console_arena, &dir_table, &key, (table_value)node_tail);
     if (dup_index >= 0) {
       // NOTE: When the key is already in the hash, we have access to an index
       // into the dynamic nodes arena. Lazy evaluation: the terminator but must
@@ -2321,11 +2322,11 @@ static inline void setup_pattern(const char *pattern, TagPatternItems *tag_patte
     // This means that the docs array can contain duplicates in that case. While not
     // a big deal, it can probably be addressed without having to hash every file in
     // the directory setup, by using some pattern heuristics (e.g., directory hash)
-    size_t tail_offset = (size_t)array_bytes(&docs);
+    table_key_pos tail_offset = array_bytes(&docs);
     int32_t tail_doc = (int32_t)array_bytes(&docs);
     docs_append(utf8_buf.items, len);
-    Table_Key key = {.strings = docs.items, .pos = tail_offset, .len = (size_t)len};
-    intptr_t dup_doc = table_insert(&console_arena, &pat_table, &key, tail_doc);
+    Table_Key key = {.strings = docs.items, .pos = tail_offset, .len = (table_key_len)len};
+    table_value dup_doc = table_insert(&console_arena, &pat_table, &key, tail_doc);
     if (dup_doc >= 0) {
       array_shrink(&docs, (uint32_t)len);
       --docs.doc_count;
@@ -2348,11 +2349,11 @@ static inline void setup_url(const char *url, TagUrlItems *tag_url_items) {
   int32_t len_utf16 = utf8_to_utf16_norm(url);
   assert(len_utf16);
   int32_t len_utf8 = utf16_to_utf8(utf16_buf_norm.items);
-  size_t tail_offset = (size_t)array_bytes(&docs);
+  table_key_pos tail_offset = array_bytes(&docs);
   int32_t tail_doc = (int32_t)array_bytes(&docs);
   docs_append(utf8_buf.items, len_utf8);
-  Table_Key key = {.strings = docs.items, .pos = tail_offset, .len = (size_t)len_utf8};
-  intptr_t dup_doc = table_insert(&console_arena, &url_table, &key, tail_doc);
+  Table_Key key = {.strings = docs.items, .pos = tail_offset, .len = (table_key_len)len_utf8};
+  table_value dup_doc = table_insert(&console_arena, &url_table, &key, tail_doc);
   if (dup_doc >= 0) {
     array_shrink(&docs, (uint32_t)len_utf8);
     --docs.doc_count;
@@ -3517,21 +3518,21 @@ static void cmd_tag_executor(void) {
         for (size_t i = 0; i < directory_k; ++i) {
           size_t node_index = (size_t)directories->items[i];
           DirectoryNode *start = &directory_nodes.items[node_index];
-          uint8_t *start_str = directory_strings.items + start->str_offset;
+          table_key_t *start_str = directory_strings.items + start->str_offset;
           size_t start_len = strlen((char *)start_str);
-          Table_Key key = {.strings = strings, .pos = start->str_offset, .len = start_len + 1};
-          intptr_t dup = table_insert(arena1, &duplicates, &key, 0);
+          Table_Key key = {.strings = strings, .pos = start->str_offset, .len = (table_key_len)start_len + 1};
+          table_value dup = table_insert(arena1, &duplicates, &key, 0);
           if (dup >= 0) continue;
           log_message(LOG_TRACE, "Tag directory: %s (%zu)", start_str, start_len);
           array_extend(arena1, playlist, start->items, start->count);
           for (size_t j = ++node_index; j < directory_nodes.count; ++j) {
             DirectoryNode *node = &directory_nodes.items[j];
             if (!node->count) continue;
-            uint8_t *str = directory_strings.items + node->str_offset;
+            table_key_t *str = directory_strings.items + node->str_offset;
             if (strncmp((char *)str, (char *)start_str, start_len) != 0) break;
             size_t len = strlen((char *)str);
             key.pos = node->str_offset;
-            key.len = len + 1;
+            key.len = (table_key_len)len + 1;
             dup = table_insert(arena1, &duplicates, &key, 0);
             if (dup >= 0) continue;
             log_message(LOG_TRACE, "Tag directory: %s", str);
@@ -3617,11 +3618,11 @@ static void cmd_search_executor(void) {
   int32_t len = 0;
   if (cmd_ctx.unicode && (len = utf16_to_utf8(cmd_ctx.unicode))) {
     uint8_t *pattern = utf8_buf.items;
-    uint32_t len_u32 = (uint32_t)len;
+    table_key_len len_u32 = (table_key_len)len;
     log_message(LOG_DEBUG, "Search with pattern: '%s', len: %d", pattern, len);
     array_reserve(&docs_arena, &media.search_patterns, len_u32);
-    uint8_t *strings = media.search_patterns.items;
-    uint32_t pos = media.search_patterns.count;
+    table_key_t *strings = media.search_patterns.items;
+    table_key_pos pos = media.search_patterns.count;
     memcpy(strings + pos, pattern, len_u32);
     Table_Key key = {.strings = strings, .pos = pos, .len = len_u32};
     cache_get_zero(&docs_arena, &media.playlists, playlist);
