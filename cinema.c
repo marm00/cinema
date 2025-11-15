@@ -2710,6 +2710,7 @@ typedef struct Instance {
   HWND window;
   RECT rect;
   Playlist *playlist;
+  bool full_screen;
   cache_node_struct_members(Instance);
 } Instance;
 
@@ -3655,10 +3656,16 @@ static void cmd_search_validator(void) {
 
 static void cmd_maximize_executor(void) {
   size_t target = cmd_ctx.numbers.count ? cmd_ctx.numbers.items[0] - 1 : 0;
-  Cin_Screen *screen = &cmd_ctx.layout->items[target];
-  uint8_t *geometry = screen_arena.items + screen->offset;
-  int32_t len = screen->len;
-  log_message(LOG_DEBUG, "Screen: %s (%d)", (char *)geometry, len);
+  cache_foreach(&cin_io.instances, Instance, i, instance) {
+    if (instance->pipe) {
+      if (i == target) {
+        instance->full_screen = !instance->full_screen;
+        overlap_write(instance, MPV_WRITE, "cycle", "fullscreen", NULL);
+      } else {
+        overlap_write(instance, MPV_QUIT, "quit", NULL, NULL);
+      }
+    }
+  }
 }
 
 static void cmd_maximize_validator(void) {
@@ -3773,6 +3780,7 @@ static void cmd_layout_executor(void) {
   size_t next_count = cmd_ctx.queued_layout->count;
   cmd_ctx.layout = cmd_ctx.queued_layout;
   size_t screen = 0;
+  // TODO: bring terminal to foreground above mpv 'ontop=yes'
   mpv_lock();
   cache_foreach(&cin_io.instances, Instance, i, old) {
     if (screen >= next_count) {
@@ -3782,6 +3790,10 @@ static void cmd_layout_executor(void) {
       assert(IsWindow(old->window));
       const char *geometry = (char *)screen_arena.items + cmd_ctx.layout->items[screen].offset;
       overlap_write(old, MPV_WRITE, "set_property", "geometry", geometry);
+      if (old->full_screen) {
+        old->full_screen = false;
+        overlap_write(old, MPV_WRITE, "set_property", "fullscreen", "no");
+      }
     } else {
       mpv_spawn(old, screen);
     }
