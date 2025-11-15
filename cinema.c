@@ -3477,7 +3477,6 @@ static void cmd_help_validator(void) {
 }
 
 static void cmd_reroll_executor(void) {
-  // TODO: shuffle
   mpv_target_foreach(i, instance) {
     instance_play_next(instance);
   }
@@ -3687,9 +3686,32 @@ static void cmd_join_validator(void) {
 }
 
 static void cmd_swap_executor(void) {
-  size_t first = cmd_ctx.numbers.items[0];
-  size_t second = cmd_ctx.numbers.items[1];
+  size_t first = cmd_ctx.numbers.items[0] - 1;
+  size_t second = cmd_ctx.numbers.items[1] - 1;
   log_message(LOG_DEBUG, "Swapping screen %zu with %zu", first, second);
+  Cin_Screen *first_screen = NULL;
+  Cin_Screen *second_screen = NULL;
+  Instance *first_instance = NULL;
+  Instance *second_instance = NULL;
+  mpv_target_foreach(i, instance) {
+    if (i == 0) {
+      first_instance = instance;
+      first_screen = &cmd_ctx.layout->items[first];
+    } else {
+      assert(i == 1);
+      second_instance = instance;
+      second_screen = &cmd_ctx.layout->items[second];
+    }
+  }
+  if (first_screen && second_screen) {
+    const char *first_geometry = (char *)screen_arena.items + first_screen->offset;
+    const char *second_geometry = (char *)screen_arena.items + second_screen->offset;
+    overlap_write(first_instance, MPV_WRITE, "set_property", "geometry", second_geometry);
+    overlap_write(second_instance, MPV_WRITE, "set_property", "geometry", first_geometry);
+    Cin_Screen tmp = *second_screen;
+    *second_screen = *first_screen;
+    *first_screen = tmp;
+  }
 }
 
 static void cmd_swap_validator(void) {
