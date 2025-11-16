@@ -1683,7 +1683,7 @@ typedef struct Table_Bucket {
 
 typedef struct Robin_Hood_Table {
   array_struct_members(Table_Bucket);
-  size_t mask;
+  uint64_t mask;
 } Robin_Hood_Table;
 
 #define TABLE_LOAD_FACTOR 85
@@ -1718,7 +1718,7 @@ static inline void table_double(Arena *arena, Robin_Hood_Table *table) {
   assert(cin_ispow2(table->capacity));
   for (uint32_t i = 0; i < prev_cap; ++i) {
     if (prev_buckets[i].filled && !prev_buckets[i].deleted) {
-      size_t home = prev_buckets[i].hash & table->mask;
+      uint64_t home = prev_buckets[i].hash & table->mask;
       uint32_t dist = 0;
       Table_Bucket candidate = prev_buckets[i];
       while (table->items[home].filled) {
@@ -1742,7 +1742,7 @@ static inline void table_double(Arena *arena, Robin_Hood_Table *table) {
 static inline table_value table_find(Robin_Hood_Table *table, Table_Key *key) {
   table_key_t *str = key->strings + key->pos;
   uint64_t hash = fnv1a_hash(str, key->len);
-  size_t i = hash & table->mask;
+  uint64_t i = hash & table->mask;
   uint32_t dist = 0;
   while (table->items[i].filled) {
     Table_Bucket bucket = table->items[i];
@@ -1767,9 +1767,9 @@ static inline table_value table_insert(Arena *arena, Robin_Hood_Table *table,
     table_double(arena, table);
   }
   uint64_t hash = fnv1a_hash(str, key->len);
-  size_t i = hash & table->mask;
+  uint64_t i = hash & table->mask;
   uint32_t dist = 0;
-  size_t tombstone = SIZE_MAX;
+  uint64_t tombstone = SIZE_MAX;
   uint32_t tombstone_dist = 0;
   Table_Bucket candidate = {.hash = hash, .dist = 0, .value = value, .pos = key->pos, .filled = true, .deleted = false};
   while (table->items[i].filled) {
@@ -1812,7 +1812,7 @@ static inline table_value table_insert(Arena *arena, Robin_Hood_Table *table,
 static inline table_value table_delete(Robin_Hood_Table *table, Table_Key *key) {
   table_key_t *str = key->strings + key->pos;
   uint64_t hash = fnv1a_hash(str, key->len);
-  size_t i = hash & table->mask;
+  uint64_t i = hash & table->mask;
   while (table->items[i].filled) {
     if (!table->items[i].deleted) {
       table_key_t *i_str = key->strings + table->items[i].pos;
@@ -2258,7 +2258,7 @@ static void setup_directory(const char *path, TagDirectories *tag_dirs) {
       array_push(&console_arena, tag_dirs, (int32_t)node_tail);
     }
     table_value inserted = table_insert(&console_arena, &dir_table, &key, (table_value)node_tail);
-    assert(inserted == -1);
+    assert(inserted == -1LL);
     do {
       if (data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
         continue; // skip junction
