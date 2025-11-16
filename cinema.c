@@ -1723,10 +1723,10 @@ static inline void table_double(Arena *arena, Robin_Hood_Table *table) {
       Table_Bucket candidate = prev_buckets[i];
       while (table->items[home].filled) {
         if (dist > table->items[home].dist) {
+          candidate.dist = dist;
           Table_Bucket tmp = table->items[home];
           table->items[home] = candidate;
           candidate = tmp;
-          dist = tmp.dist;
         }
         home = (home + 1) & table->mask;
         ++dist;
@@ -1742,7 +1742,9 @@ static inline void table_double(Arena *arena, Robin_Hood_Table *table) {
 static inline table_value table_find(Robin_Hood_Table *table, Table_Key *key) {
   table_key_t *str = key->strings + key->pos;
   uint64_t hash = fnv1a_hash(str, key->len);
-  for (size_t i = hash & table->mask; table->items[i].filled; i = (i + 1) & table->mask) {
+  size_t i = hash & table->mask;
+  uint32_t dist = 0;
+  while (table->items[i].filled) {
     Table_Bucket bucket = table->items[i];
     if (!bucket.deleted) {
       table_key_t *bucket_str = key->strings + bucket.pos;
@@ -1750,6 +1752,9 @@ static inline table_value table_find(Robin_Hood_Table *table, Table_Key *key) {
         return bucket.value;
       }
     }
+    if (dist > bucket.dist) return -1LL;
+    i = (i + 1) & table->mask;
+    ++dist;
   }
   return -1LL;
 }
@@ -1765,12 +1770,13 @@ static inline table_value table_insert(Arena *arena, Robin_Hood_Table *table,
   size_t i = hash & table->mask;
   uint32_t dist = 0;
   size_t tombstone = SIZE_MAX;
+  uint32_t tombstone_dist = 0;
   Table_Bucket candidate = {.hash = hash, .dist = 0, .value = value, .pos = key->pos, .filled = true, .deleted = false};
   while (table->items[i].filled) {
     if (table->items[i].deleted) {
       if (tombstone == SIZE_MAX) {
         tombstone = i;
-        candidate.dist = dist;
+        tombstone_dist = dist;
       }
     } else {
       table_key_t *i_str = key->strings + table->items[i].pos;
@@ -1780,10 +1786,10 @@ static inline table_value table_insert(Arena *arena, Robin_Hood_Table *table,
       }
       if (tombstone == SIZE_MAX && dist > table->items[i].dist) {
         // evict rich to house poor
+        candidate.dist = dist;
         Table_Bucket tmp = table->items[i];
         table->items[i] = candidate;
         candidate = tmp;
-        dist = tmp.dist;
         str = i_str;
       }
     }
@@ -1796,7 +1802,10 @@ static inline table_value table_insert(Arena *arena, Robin_Hood_Table *table,
     ++table->count;
   } else {
     table->items[tombstone] = candidate;
+    table->items[tombstone].dist = tombstone_dist;
   }
+  assert(value >= 0);
+  assert(table_find(table, key) >= 0);
   return -1LL;
 }
 
@@ -2248,7 +2257,8 @@ static void setup_directory(const char *path, TagDirectories *tag_dirs) {
     if (tag_dirs) {
       array_push(&console_arena, tag_dirs, (int32_t)node_tail);
     }
-    table_insert(&console_arena, &dir_table, &key, (table_value)node_tail);
+    table_value inserted = table_insert(&console_arena, &dir_table, &key, (table_value)node_tail);
+    assert(inserted == -1);
     do {
       if (data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
         continue; // skip junction
@@ -2375,7 +2385,7 @@ static inline void setup_url(const char *url, TagUrlItems *tag_url_items) {
   assert(len_utf16);
   int32_t len_utf8 = utf16_to_utf8(utf16_buf_norm.items);
   table_key_pos tail_offset = array_bytes(&docs);
-  int32_t tail_doc = (int32_t)array_bytes(&docs);
+  int32_t tail_doc = (int32_t)tail_offset;
   docs_append(utf8_buf.items, len_utf8);
   Table_Key key = {.strings = docs.items, .pos = tail_offset, .len = (table_key_len)len_utf8};
   table_value dup_doc = table_insert(&console_arena, &url_table, &key, tail_doc);
