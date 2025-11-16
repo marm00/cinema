@@ -1673,6 +1673,7 @@ typedef struct Table_Bucket {
   // key is (char *)strings + pos
   // value is value
   uint64_t hash;
+  uint32_t dist;
   table_key_pos pos;
   table_value value;
   bool filled;
@@ -1709,7 +1710,6 @@ static inline void table_double(Arena *arena, Robin_Hood_Table *table) {
   Table_Bucket *prev_buckets = table->items;
   table->capacity <<= 1;
   table->items = arena_bump_T(arena, Table_Bucket, table->capacity);
-  memcpy(table->items, prev_buckets, table->bytes_capacity);
   table->bytes_capacity <<= 1;
   table->count = 0;
   table->mask = table->capacity - 1;
@@ -1719,24 +1719,39 @@ static inline void table_double(Arena *arena, Robin_Hood_Table *table) {
   for (uint32_t i = 0; i < prev_cap; ++i) {
     if (prev_buckets[i].filled && !prev_buckets[i].deleted) {
       size_t home = prev_buckets[i].hash & table->mask;
-      size_t dist = 0;
-      Table_Bucket bucket = prev_buckets[i];
+      uint32_t dist = 0;
+      Table_Bucket candidate = prev_buckets[i];
       while (table->items[home].filled) {
-        size_t cur_dist = (home - (table->items[home].hash & table->mask)) & table->mask;
-        if (cur_dist < dist) {
+        if (dist > table->items[home].dist) {
           Table_Bucket tmp = table->items[home];
-          table->items[home] = bucket;
-          bucket = tmp;
-          dist = cur_dist;
+          table->items[home] = candidate;
+          candidate = tmp;
+          dist = tmp.dist;
         }
         home = (home + 1) & table->mask;
         ++dist;
       }
-      table->items[home] = bucket;
+      table->items[home] = candidate;
+      table->items[home].dist = dist;
       ++table->count;
     }
   }
   arena_free_pos(arena, (uint8_t *)prev_buckets, prev_bytes_cap);
+}
+
+static inline table_value table_find(Robin_Hood_Table *table, Table_Key *key) {
+  table_key_t *str = key->strings + key->pos;
+  uint64_t hash = fnv1a_hash(str, key->len);
+  for (size_t i = hash & table->mask; table->items[i].filled; i = (i + 1) & table->mask) {
+    Table_Bucket bucket = table->items[i];
+    if (!bucket.deleted) {
+      table_key_t *bucket_str = key->strings + bucket.pos;
+      if (hash == bucket.hash && strcmp((char *)str, (char *)bucket_str) == 0) {
+        return bucket.value;
+      }
+    }
+  }
+  return -1LL;
 }
 
 static inline table_value table_insert(Arena *arena, Robin_Hood_Table *table,
@@ -1748,33 +1763,40 @@ static inline table_value table_insert(Arena *arena, Robin_Hood_Table *table,
   }
   uint64_t hash = fnv1a_hash(str, key->len);
   size_t i = hash & table->mask;
-  size_t dist = 0;
+  uint32_t dist = 0;
   size_t tombstone = SIZE_MAX;
-  Table_Bucket candidate = {.hash = hash, .value = value, .pos = key->pos, .filled = true, .deleted = false};
+  Table_Bucket candidate = {.hash = hash, .dist = 0, .value = value, .pos = key->pos, .filled = true, .deleted = false};
   while (table->items[i].filled) {
     if (table->items[i].deleted) {
-      if (tombstone == SIZE_MAX) tombstone = i;
+      if (tombstone == SIZE_MAX) {
+        tombstone = i;
+        candidate.dist = dist;
+      }
     } else {
       table_key_t *i_str = key->strings + table->items[i].pos;
       if (table->items[i].hash == hash && strcmp((char *)i_str, (char *)str) == 0) {
         log_message(LOG_TRACE, "Found duplicate key '%s' in hashmap", str);
         return table->items[i].value;
       }
-      size_t cur_dist = (i - (table->items[i].hash & table->mask)) & table->mask;
-      if (cur_dist < dist) {
+      if (tombstone == SIZE_MAX && dist > table->items[i].dist) {
         // evict rich to house poor
         Table_Bucket tmp = table->items[i];
         table->items[i] = candidate;
         candidate = tmp;
-        dist = cur_dist;
+        dist = tmp.dist;
+        str = i_str;
       }
     }
     i = (i + 1) & table->mask;
     ++dist;
   }
-  if (tombstone == SIZE_MAX) table->items[i] = candidate;
-  else table->items[tombstone] = candidate;
-  ++table->count;
+  if (tombstone == SIZE_MAX) {
+    table->items[i] = candidate;
+    table->items[i].dist = dist;
+    ++table->count;
+  } else {
+    table->items[tombstone] = candidate;
+  }
   return -1LL;
 }
 
@@ -2079,6 +2101,8 @@ struct Document_Collection {
 static void docs_append(uint8_t *utf8, int32_t len) {
   // NOTE: When using mpv JSON ipc, backslash actually requires 2 bytes to be valid JSON.
   // Instead of appending it, we replace it with forward slash.
+  // TODO: fix cinema.conf so that we treat \, \\, /, the same, there is currently
+  // an issue where the deduplication fails with (nested) directories on mismatch
   for (int32_t i = 0; i < len; ++i)
     if (utf8[i] == '\\') utf8[i] = '/';
   array_extend_zero(&docs_arena, &docs, utf8, (uint32_t)len);
@@ -2182,7 +2206,7 @@ static void setup_directory(const char *path, TagDirectories *tag_dirs) {
     // TODO: if an unmatched directory is inserted, its next occurence
     // will think that the current node_tail is correct, when it is not
     Table_Key key = {.strings = strings, .pos = str_offset, .len = bytes};
-    table_value dup_index = table_insert(&console_arena, &dir_table, &key, (table_value)node_tail);
+    table_value dup_index = table_find(&dir_table, &key);
     if (dup_index >= 0) {
       // NOTE: When the key is already in the hash, we have access to an index
       // into the dynamic nodes arena. Lazy evaluation: the terminator but must
@@ -2215,7 +2239,7 @@ static void setup_directory(const char *path, TagDirectories *tag_dirs) {
       continue;
     }
     // Commit the new directory
-    directory_strings.count += bytes;
+    array_grow(&console_arena, &directory_strings, bytes);
     array_grow(&console_arena, &directory_nodes, 1);
     DirectoryNode *node = &directory_nodes.items[node_tail];
     assert(node);
@@ -2224,6 +2248,7 @@ static void setup_directory(const char *path, TagDirectories *tag_dirs) {
     if (tag_dirs) {
       array_push(&console_arena, tag_dirs, (int32_t)node_tail);
     }
+    table_insert(&console_arena, &dir_table, &key, (table_value)node_tail);
     do {
       if (data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
         continue; // skip junction
@@ -2323,7 +2348,7 @@ static inline void setup_pattern(const char *pattern, TagPatternItems *tag_patte
     // a big deal, it can probably be addressed without having to hash every file in
     // the directory setup, by using some pattern heuristics (e.g., directory hash)
     table_key_pos tail_offset = array_bytes(&docs);
-    int32_t tail_doc = (int32_t)array_bytes(&docs);
+    int32_t tail_doc = (int32_t)tail_offset;
     docs_append(utf8_buf.items, len);
     Table_Key key = {.strings = docs.items, .pos = tail_offset, .len = (table_key_len)len};
     table_value dup_doc = table_insert(&console_arena, &pat_table, &key, tail_doc);
@@ -3521,6 +3546,7 @@ static void cmd_tag_executor(void) {
         uint8_t *strings = directory_strings.items;
         for (size_t i = 0; i < directory_k; ++i) {
           size_t node_index = (size_t)directories->items[i];
+          assert(node_index < directory_nodes.count);
           DirectoryNode *start = &directory_nodes.items[node_index];
           table_key_t *start_str = directory_strings.items + start->str_offset;
           size_t start_len = strlen((char *)start_str);
@@ -3692,8 +3718,10 @@ static void cmd_maximize_validator(void) {
   cmd_ctx.executor = cmd_maximize_executor;
 }
 
-static void cmd_join_validator(void) {
-  // TODO: 1 2 3 join 4 (tags/search shared)
+static void cmd_autoplay_executor(void) {
+}
+
+static void cmd_autoplay_validator(void) {
 }
 
 static void cmd_swap_executor(void) {
@@ -3873,9 +3901,10 @@ static bool init_commands(void) {
                      L"Note: optional arguments before/after in brackets []" WCRLF);
   register_cmd(L"help", L"Show all commands", cmd_help_validator);
   register_cmd(L"layout", L"Change layout to name [layout (name)]", cmd_layout_validator);
-  register_cmd(L"reroll", L"Shuffle media [(1 2 ..) reroll]", cmd_reroll_validator);
+  register_cmd(L"reroll", L"Shuffle media [(1 2 ..) (reroll)]", cmd_reroll_validator);
   register_cmd(L"tag", L"Limit media to tag [(1 2 ..) tag (name)]", cmd_tag_validator);
   register_cmd(L"search", L"Limit media to term [(1 2 ..) search (term)]", cmd_search_validator);
+  register_cmd(L"autoplay", L"Autoplay media [(1 2 ..) autoplay (seconds)]", cmd_autoplay_validator);
   register_cmd(L"maximize", L"Maximize and close others [(1) maximize]", cmd_maximize_validator);
   register_cmd(L"swap", L"Swap screen contents [(1 2) swap]", cmd_swap_validator);
   register_cmd(L"clear", L"Clear tag/term [(1 2) clear]", cmd_clear_validator);
