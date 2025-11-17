@@ -2906,7 +2906,7 @@ static inline void playlist_play(Instance *instance) {
   Playlist *playlist = instance->playlist;
   uint32_t index = instance->playlist->next_index;
   overlap_write(instance, MPV_LOADFILE, "loadfile",
-                (char *)docs.items + playlist->items[index], NULL);
+                (char *)docs.items + playlist->items[index], "insert-next");
   if (++instance->playlist->next_index == instance->playlist->count) {
     playlist_shuffle(instance->playlist);
   }
@@ -2973,6 +2973,7 @@ static inline void iocp_parse(Instance *instance, const char *buf_start, size_t 
     log_message(LOG_INFO, "Recovered original write: %p (%zu bytes)", write, write->bytes);
     switch (write->ovl_ctx.type) {
     case MPV_LOADFILE:
+      overlap_write(instance, MPV_WRITE, "playlist-next", NULL, NULL);
       break;
     case MPV_WINDOW_ID: {
       if (++mpv_supply == mpv_demand) mpv_unlock();
@@ -3059,7 +3060,7 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
             if (!lf) break;
             buf_offset = tail_pos;
             assert((lf - buf) >= 0);
-            tail_pos += (size_t)(lf - buf);
+            tail_pos = (size_t)(lf - buf);
           }
           size_t remainder = tail_pos < len ? len - tail_pos : 0;
           memcpy(instance->buf_head, buf + tail_pos, remainder);
@@ -3493,8 +3494,8 @@ static void mpv_spawn(Instance *instance, size_t index) {
   bool ok_read = overlap_read(instance);
   assert(ok_read);
   overlap_write(instance, MPV_LOADFILE, "loadfile",
-                (char *)docs.items + docs.suffix_to_doc[(0 + (int32_t)index) % docs.doc_count], NULL);
-  overlap_write(instance, MPV_WINDOW_ID, "get_property", "window-id", NULL);
+    (char *)docs.items + docs.suffix_to_doc[(0 + (int32_t)index) % docs.doc_count], "insert-next");
+    overlap_write(instance, MPV_WINDOW_ID, "get_property", "window-id", NULL);
   ++mpv_demand;
 }
 
