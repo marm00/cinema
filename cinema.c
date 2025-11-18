@@ -3309,6 +3309,16 @@ typedef struct Console_Timer_Ctx {
 
 static Console_Timer_Ctx console_timers[_CIN_TIMER_END];
 
+static inline void reset_console_timer(Console_Timer_Type type) {
+  Console_Timer_Ctx *ctx = &console_timers[type];
+  LARGE_INTEGER t;
+  FILETIME ft;
+  t.QuadPart = ctx->millis * -10000LL;
+  ft.dwHighDateTime = (DWORD)t.HighPart;
+  ft.dwLowDateTime = (DWORD)t.LowPart;
+  SetThreadpoolTimer(ctx->timer, &ft, 0, 0);
+}
+
 static VOID CALLBACK console_timer_callback(PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_TIMER Timer) {
   (void)Instance;
   (void)Timer;
@@ -3327,16 +3337,6 @@ static inline bool register_console_timer(Console_Timer_Type type, bool (*f)(voi
     return false;
   }
   return true;
-}
-
-static inline void reset_console_timer(Console_Timer_Type type) {
-  Console_Timer_Ctx *ctx = &console_timers[type];
-  LARGE_INTEGER t;
-  FILETIME ft;
-  t.QuadPart = ctx->millis * -10000LL;
-  ft.dwHighDateTime = (DWORD)t.HighPart;
-  ft.dwLowDateTime = (DWORD)t.LowPart;
-  SetThreadpoolTimer(ctx->timer, &ft, 0, 0);
 }
 
 static inline bool init_timers(void) {
