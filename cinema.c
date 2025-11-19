@@ -2753,6 +2753,7 @@ typedef struct Instance {
   Playlist *playlist;
   Console_Timer_Ctx *timer;
   bool full_screen;
+  bool autoplay_mpv;
   cache_node_struct_members(Instance);
 } Instance;
 
@@ -2919,6 +2920,17 @@ static inline void playlist_play(Instance *instance) {
   }
 }
 
+static inline void playlist_insert(Instance *instance) {
+  assert(instance->playlist);
+  Playlist *playlist = instance->playlist;
+  uint32_t index = instance->playlist->next_index;
+  overlap_write(instance, MPV_WRITE, "loadfile",
+                (char *)docs.items + playlist->items[index], "insert-next");
+  if (++instance->playlist->next_index == instance->playlist->count) {
+    playlist_shuffle(instance->playlist);
+  }
+}
+
 #define CIN_MPVKEY_LEFT "\""
 #define CIN_MPVKEY_RIGHT "\":"
 #define CIN_MPVKEY(str) (CIN_MPVKEY_LEFT str CIN_MPVKEY_RIGHT)
@@ -2963,11 +2975,15 @@ static inline void iocp_parse(Instance *instance, const char *buf_start, size_t 
     p += cin_strlen(CIN_MPVKEY_EVENT);
     assert(*p == '\"');
     ++p;
-    if (CIN_MPVVAL(p, "end-file") && (p = strstr(p, CIN_MPVKEY_REASON))) {
-      p += cin_strlen(CIN_MPVKEY_REASON);
-      assert(*p == '\"');
-      ++p;
-      if (CIN_MPVVAL(p, "quit")) mpv_kill(instance);
+    if (CIN_MPVVAL(p, "end-file")) {
+      if ((p = strstr(p, CIN_MPVKEY_REASON))) {
+        p += cin_strlen(CIN_MPVKEY_REASON);
+        assert(*p == '\"');
+        ++p;
+        if (CIN_MPVVAL(p, "quit")) mpv_kill(instance);
+      }
+    } else if (instance->autoplay_mpv && CIN_MPVVAL(p, "file-loaded")) {
+      playlist_insert(instance);
     }
   } else if ((p = strstr(buf, CIN_MPVKEY_REQUEST))) {
     p += cin_strlen(CIN_MPVKEY_REQUEST);
@@ -3508,9 +3524,7 @@ static inline bool timer_autoplay(Console_Timer_Ctx *ctx) {
       playlist_play(o);
     }
   }
-  if (!targets) {
-    cache_put(&timer_cache, ctx);
-  }
+  if (!targets) cache_put(&timer_cache, ctx);
   return true;
 }
 
@@ -3747,12 +3761,14 @@ static void cmd_maximize_validator(void) {
 static void cmd_autoplay_executor(void) {
   wchar_t *p = cmd_ctx.unicode;
   LONGLONG seconds = -1;
-  if (cin_wisnum(*p)) seconds = *p;
-  ++p;
-  while (cin_wisnum(*p)) {
-    seconds *= 10;
-    seconds += *p - L'0';
+  if (p && cin_wisnum(*p)) {
+    seconds = *p - L'0';
     ++p;
+    while (cin_wisnum(*p)) {
+      seconds *= 10;
+      seconds += *p - L'0';
+      ++p;
+    }
   }
   if (seconds > 0) {
     LONGLONG millis = seconds * 1000LL;
@@ -3762,13 +3778,26 @@ static void cmd_autoplay_executor(void) {
     mpv_target_foreach(i, instance) {
       targets = true;
       instance->timer = timer;
+      if (instance->autoplay_mpv) overlap_write(instance, MPV_WRITE, "set_property", "loop", "inf");
+      instance->autoplay_mpv = false;
     }
     if (targets) reset_console_timer(timer);
     else cache_put(&timer_cache, timer);
   } else if (seconds == 0) {
-    mpv_target_foreach(i, instance) instance->timer = NULL;
+    mpv_target_foreach(i, instance) {
+      instance->timer = NULL;
+      if (instance->autoplay_mpv) overlap_write(instance, MPV_WRITE, "set_property", "loop", "inf");
+      instance->autoplay_mpv = false;
+    }
   } else {
-    // TODO: us mpv playlist mechanism
+    mpv_target_foreach(i, instance) {
+      instance->timer = NULL;
+      if (!instance->autoplay_mpv) {
+        instance->autoplay_mpv = true;
+        overlap_write(instance, MPV_WRITE, "set_property", "loop", "no");
+      }
+      playlist_insert(instance);
+    }
   }
 }
 
