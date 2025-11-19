@@ -2144,7 +2144,6 @@ typedef struct Playlist {
 } Playlist;
 
 cache_define(Playlist_Cache, Playlist);
-
 array_define(Search_Patterns, uint8_t);
 
 struct Media {
@@ -2735,6 +2734,13 @@ typedef struct ReadBuffer {
   struct ReadBuffer *next;
 } ReadBuffer;
 
+typedef struct Console_Timer_Ctx {
+  PTP_TIMER timer;
+  LONGLONG millis;
+  bool (*f)(struct Console_Timer_Ctx *ctx);
+  cache_node_struct_members(Console_Timer_Ctx);
+} Console_Timer_Ctx;
+
 typedef struct Instance {
   OverlappedContext ovl_ctx;
   HANDLE pipe;
@@ -2745,6 +2751,7 @@ typedef struct Instance {
   HWND window;
   RECT rect;
   Playlist *playlist;
+  Console_Timer_Ctx *timer;
   bool full_screen;
   cache_node_struct_members(Instance);
 } Instance;
@@ -3158,7 +3165,8 @@ memory:
   return false;
 }
 
-static inline bool resize_console(void) {
+static inline bool resize_console(Console_Timer_Ctx *ctx) {
+  (void)ctx;
   static array_struct(CHAR_INFO) console_buffer = {0};
   // NOTE: There are two important cases for when this event gets triggered:
   // either the cursor is automatically repositioned to the tail of
@@ -3167,7 +3175,6 @@ static inline bool resize_console(void) {
   // A "benefit" of this is that we can use the preview before starting REPL.
   // TODO: update note, check types
   EnterCriticalSection(&log_lock);
-  bool ok = false;
   hide_cursor();
   CONSOLE_SCREEN_BUFFER_INFO buffer_info;
   if (!GetConsoleScreenBufferInfo_safe(repl.out, &buffer_info)) {
@@ -3176,10 +3183,7 @@ static inline bool resize_console(void) {
   }
   assert(buffer_info.dwCursorPosition.Y < buffer_info.dwSize.Y - 1);
   DWORD buf_dwSize_X = (DWORD)buffer_info.dwSize.X;
-  if (buf_dwSize_X == repl.dwSize_X) {
-    ok = true;
-    goto cleanup;
-  }
+  if (buf_dwSize_X == repl.dwSize_X) goto cleanup;
   bool bottom_up = buf_dwSize_X > repl.dwSize_X;
   COORD upper_cursor = buffer_info.dwCursorPosition;
   DWORD upper_bound = cursor_to_index(buffer_info.dwCursorPosition, buf_dwSize_X);
@@ -3261,33 +3265,24 @@ static inline bool resize_console(void) {
   }
   repl.dwSize_X = buf_dwSize_X;
   log_preview();
-  ok = true;
 cleanup:
   show_cursor();
   LeaveCriticalSection(&log_lock);
-  return ok;
+  return false;
 }
 
 static inline bool evaluate_input(void) {
   return true;
 }
-
 typedef enum {
   CIN_TIMER_RESIZE,
-  CIN_TIMER_EVALUATE,
   _CIN_TIMER_END
 } Console_Timer_Type;
 
-typedef struct Console_Timer_Ctx {
-  PTP_TIMER timer;
-  LONGLONG millis;
-  bool (*f)(void);
-} Console_Timer_Ctx;
+static Console_Timer_Ctx *console_timers[_CIN_TIMER_END];
+static cache_struct(Console_Timer_Ctx) timer_cache = {0};
 
-static Console_Timer_Ctx console_timers[_CIN_TIMER_END];
-
-static inline void reset_console_timer(Console_Timer_Type type) {
-  Console_Timer_Ctx *ctx = &console_timers[type];
+static inline void reset_console_timer(Console_Timer_Ctx *ctx) {
   LARGE_INTEGER t;
   FILETIME ft;
   t.QuadPart = ctx->millis * -10000LL;
@@ -3300,12 +3295,14 @@ static VOID CALLBACK console_timer_callback(PTP_CALLBACK_INSTANCE Instance, PVOI
   (void)Instance;
   (void)Timer;
   Console_Timer_Ctx *ctx = (Console_Timer_Ctx *)Context;
-  bool ok = ctx->f();
-  assert(ok);
+  bool restart = ctx->f(ctx);
+  if (restart) reset_console_timer(ctx);
 }
 
-static inline bool register_console_timer(Console_Timer_Type type, bool (*f)(void), LONGLONG millis) {
-  Console_Timer_Ctx *ctx = &console_timers[type];
+static inline Console_Timer_Ctx *register_console_timer(bool (*f)(Console_Timer_Ctx *ctx), LONGLONG millis) {
+  Console_Timer_Ctx *ctx = NULL;
+  cache_get_zero(&console_arena, &timer_cache, ctx);
+  assert(ctx);
   ctx->millis = millis;
   ctx->f = f;
   ctx->timer = CreateThreadpoolTimer(console_timer_callback, ctx, NULL);
@@ -3313,12 +3310,13 @@ static inline bool register_console_timer(Console_Timer_Type type, bool (*f)(voi
     log_last_error("Failed to register console timer");
     return false;
   }
-  return true;
+  return ctx;
 }
 
 static inline bool init_timers(void) {
-  if (!register_console_timer(CIN_TIMER_RESIZE, resize_console, 100LL)) return false;
-  // if (!register_console_timer(CIN_TIMER_EVALUATE, evaluate_input, 2000LL)) return false;
+  cache_init_core(&console_arena, &timer_cache, 1, true);
+  console_timers[CIN_TIMER_RESIZE] = register_console_timer(resize_console, 100LL);
+  if (!console_timers[CIN_TIMER_RESIZE]) return false;
   return true;
 }
 
@@ -3471,8 +3469,8 @@ static void mpv_spawn(Instance *instance, size_t index) {
   bool ok_read = overlap_read(instance);
   assert(ok_read);
   overlap_write(instance, MPV_LOADFILE, "loadfile",
-    (char *)docs.items + docs.suffix_to_doc[(0 + (int32_t)index) % docs.doc_count], NULL);
-    overlap_write(instance, MPV_WINDOW_ID, "get_property", "window-id", NULL);
+                (char *)docs.items + docs.suffix_to_doc[(0 + (int32_t)index) % docs.doc_count], NULL);
+  overlap_write(instance, MPV_WINDOW_ID, "get_property", "window-id", NULL);
   ++mpv_demand;
 }
 
@@ -3502,6 +3500,19 @@ static inline bool init_mpv(void) {
   return true;
 }
 
+static inline bool timer_autoplay(Console_Timer_Ctx *ctx) {
+  bool targets = false;
+  cache_foreach(&cin_io.instances, Instance, i, o) {
+    if (o->pipe && o->timer == ctx) {
+      targets = true;
+      playlist_play(o);
+    }
+  }
+  if (!targets) {
+    cache_put(&timer_cache, ctx);
+  }
+  return true;
+}
 
 #define mpv_target_foreach(i, instance)                         \
   for (size_t i = 0, _j = 0, _s = cmd_ctx.numbers.items[0] - 1; \
@@ -3734,9 +3745,52 @@ static void cmd_maximize_validator(void) {
 }
 
 static void cmd_autoplay_executor(void) {
+  wchar_t *p = cmd_ctx.unicode;
+  LONGLONG seconds = -1;
+  if (cin_wisnum(*p)) seconds = *p;
+  ++p;
+  while (cin_wisnum(*p)) {
+    seconds *= 10;
+    seconds += *p - L'0';
+    ++p;
+  }
+  if (seconds > 0) {
+    LONGLONG millis = seconds * 1000LL;
+    Console_Timer_Ctx *timer = register_console_timer(timer_autoplay, millis);
+    assert(timer);
+    bool targets = false;
+    mpv_target_foreach(i, instance) {
+      targets = true;
+      instance->timer = timer;
+    }
+    if (targets) reset_console_timer(timer);
+    else cache_put(&timer_cache, timer);
+  } else if (seconds == 0) {
+    mpv_target_foreach(i, instance) instance->timer = NULL;
+  } else {
+    // TODO: us mpv playlist mechanism
+  }
 }
 
 static void cmd_autoplay_validator(void) {
+  if (!validate_screens()) return;
+  LONGLONG seconds = 0;
+  if (cmd_ctx.unicode) {
+    wchar_t *p = cmd_ctx.unicode;
+    while (cin_wisnum(*p)) {
+      seconds *= 10;
+      seconds += *p - L'0';
+      ++p;
+    }
+    if (*p) {
+      ptrdiff_t pos = p - cmd_ctx.unicode;
+      set_preview(false, L"unexpected character '%c' at position %lld in argument", *p, pos + 1LL);
+      return;
+    }
+  }
+  if (seconds) set_preview(true, L"autoplay with '%lld' second delay %s", seconds, cmd_ctx.targets.items);
+  else set_preview(true, L"autoplay when media ends %s", cmd_ctx.targets.items);
+  cmd_ctx.executor = cmd_autoplay_executor;
 }
 
 static void cmd_swap_executor(void) {
@@ -4065,7 +4119,7 @@ int main(int argc, char **argv) {
       hide_cursor();
       break;
     case WINDOW_BUFFER_SIZE_EVENT:
-      reset_console_timer(CIN_TIMER_RESIZE);
+      reset_console_timer(console_timers[CIN_TIMER_RESIZE]);
       continue;
     default:
       continue;
