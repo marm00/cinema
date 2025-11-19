@@ -3079,29 +3079,6 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
   return 0;
 }
 
-static inline bool init_mpv(void) {
-  arena_chunk_init(&io_arena, CIN_IO_ARENA_CAP);
-  arena_chunk_init(&iocp_thread_arena, CIN_IO_ARENA_CAP);
-  cache_init_core(&io_arena, &cin_io.writes, 1, true);
-  cache_init_core(&io_arena, &cin_io.instances, 1, false);
-  cache_init_core(&docs_arena, &media.playlists, 1, true);
-  Playlist *default_playlist = &media.default_playlist;
-  array_set(&docs_arena, default_playlist, docs.suffix_to_doc, (uint32_t)docs.doc_count);
-  array_to_pow1(&docs_arena, default_playlist);
-  playlist_setup_shuffle(default_playlist);
-  playlist_set_default(cin_io.instances.head);
-  cin_io.iocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
-  if (!cin_io.iocp) {
-    log_last_error("Failed to create iocp");
-    return false;
-  }
-  if (!CreateThread(NULL, 0, iocp_listener, (LPVOID)cin_io.iocp, 0, NULL)) {
-    log_last_error("Failed to create iocp listener");
-    return false;
-  };
-  return true;
-}
-
 #define CIN_NUL 0x00
 #define CIN_BACK 0x08
 #define CIN_ENTER 0x0D
@@ -3498,6 +3475,33 @@ static void mpv_spawn(Instance *instance, size_t index) {
     overlap_write(instance, MPV_WINDOW_ID, "get_property", "window-id", NULL);
   ++mpv_demand;
 }
+
+static inline bool init_mpv(void) {
+  arena_chunk_init(&io_arena, CIN_IO_ARENA_CAP);
+  arena_chunk_init(&iocp_thread_arena, CIN_IO_ARENA_CAP);
+  cache_init_core(&io_arena, &cin_io.writes, 1, true);
+  cache_init_core(&io_arena, &cin_io.instances, 1, false);
+  cache_init_core(&docs_arena, &media.playlists, 1, true);
+  Playlist *default_playlist = &media.default_playlist;
+  array_set(&docs_arena, default_playlist, docs.suffix_to_doc, (uint32_t)docs.doc_count);
+  array_to_pow1(&docs_arena, default_playlist);
+  playlist_setup_shuffle(default_playlist);
+  Instance *head_instance = cin_io.instances.head;
+  playlist_set_default(head_instance);
+  cin_io.iocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
+  if (!cin_io.iocp) {
+    log_last_error("Failed to create iocp");
+    return false;
+  }
+  if (!CreateThread(NULL, 0, iocp_listener, (LPVOID)cin_io.iocp, 0, NULL)) {
+    log_last_error("Failed to create iocp listener");
+    return false;
+  }
+  mpv_lock();
+  mpv_spawn(head_instance, 0);
+  return true;
+}
+
 
 #define mpv_target_foreach(i, instance)                         \
   for (size_t i = 0, _j = 0, _s = cmd_ctx.numbers.items[0] - 1; \
@@ -4044,6 +4048,7 @@ int main(int argc, char **argv) {
   // TODO: support bounded viewport (excluding scrollback) maybe VT100
   // size_t visible_lines = repl.screen_info.srWindow.Bottom - repl.screen_info.srWindow.Top;
   Console_Message *msg_tail = NULL;
+  cmd_reroll_validator();
   for (;;) {
     show_cursor();
     INPUT_RECORD input;
