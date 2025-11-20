@@ -2773,6 +2773,7 @@ typedef struct Instance {
   Console_Timer_Ctx *timer;
   bool full_screen;
   bool autoplay_mpv;
+  bool locked;
   cache_node_struct_members(Instance);
 } Instance;
 
@@ -2929,6 +2930,7 @@ static inline void playlist_set_default(Instance *instance) {
 }
 
 static inline void playlist_play_core(Instance *instance, const char *arg) {
+  if (instance->locked) return;
   assert(instance->playlist);
   Playlist *playlist = instance->playlist;
   uint32_t index = instance->playlist->next_index;
@@ -3923,6 +3925,19 @@ static void cmd_autoplay_validator(void) {
   cmd_ctx.executor = cmd_autoplay_executor;
 }
 
+static void cmd_lock_executor(void) {
+  mpv_target_foreach(i, instance) {
+    instance->locked = !instance->locked;
+    if (!instance->locked) playlist_play(instance);
+  }
+}
+
+static void cmd_lock_validator(void) {
+  if (!validate_screens()) return;
+  set_preview(true, L"lock/unlock %s", cmd_ctx.targets.items);
+  cmd_ctx.executor = cmd_lock_executor;
+}
+
 static void cmd_swap_executor(void) {
   size_t first = cmd_ctx.numbers.items[0] - 1;
   size_t second = cmd_ctx.numbers.items[1] - 1;
@@ -4105,6 +4120,7 @@ static bool init_commands(void) {
   register_cmd(L"search", L"Limit media to term [(1 2 ..) search (term)]", cmd_search_validator);
   register_cmd(L"hide", L"Hide media with term [hide term]", cmd_hide_validator);
   register_cmd(L"autoplay", L"Autoplay media [(1 2 ..) autoplay (seconds)]", cmd_autoplay_validator);
+  register_cmd(L"lock", L"Lock/unlock screen contents [(1 2 ..) lock]", cmd_lock_validator);
   register_cmd(L"maximize", L"Maximize and close others [(1) maximize]", cmd_maximize_validator);
   register_cmd(L"swap", L"Swap screen contents [(1 2) swap]", cmd_swap_validator);
   register_cmd(L"clear", L"Clear tag/term [(1 2) clear]", cmd_clear_validator);
