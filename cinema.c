@@ -3739,85 +3739,79 @@ static void cmd_search_validator(void) {
 }
 
 static void cmd_hide_executor(void) {
-  if (cmd_ctx.unicode) {
-    int32_t len = utf16_to_utf8(cmd_ctx.unicode);
-    uint8_t *pattern = utf8_buf.items;
-    if (len > 1) {
-      uint32_t len_u32 = (uint32_t)len;
-      array_reserve(&docs_arena, &media.search_patterns, len_u32);
-      table_key_t *strings = media.search_patterns.items;
-      table_key_pos pos = media.search_patterns.count;
-      memcpy(strings + pos, pattern, len_u32);
-      Table_Key key = {.strings = strings, .pos = pos, .len = len_u32};
-      table_value value = table_find(&media.search_table, &key);
-      Playlist *playlist = NULL;
-      if (value >= 0) {
-        playlist = (Playlist *)value;
-      } else {
-        Playlist tmp = {0};
-        document_listing(pattern, len - 1, &tmp);
-        playlist = &tmp;
-      }
-      assert(playlist);
-      Hidden_Table *table = &media.hidden_table;
-      uint32_t hash_n = 1;
-      while (hash_n < (table->count + playlist->count) * 2) hash_n <<= 1;
-      uint32_t start = table->capacity;
-      array_ensure_capacity_core(&docs_arena, table, hash_n, true);
-      uint32_t end = table->capacity;
-      uint64_t mask = table->capacity - 1;
-      if (start < end) {
-        for (uint32_t i = start; i < end; ++i) {
-          table->items[i] = -1;
-        }
-        for (uint32_t i = 0; i < start; ++i) {
-          int32_t v = table->items[i];
-          if (v >= 0) {
-            table->items[i] = -1;
-            uint64_t hash = (uint64_t)v * CIN_INTEGER_HASH;
-            uint64_t index = hash & mask;
-            while (table->items[index] >= 0) {
-              index = (index + 1) & mask;
-            }
-            table->items[index] = v;
-          }
-        }
-      }
-      array_foreach(playlist, int32_t, i, doc) {
-        uint64_t hash = (uint64_t)doc * CIN_INTEGER_HASH;
+  if (!cmd_ctx.unicode) return;
+  int32_t len = utf16_to_utf8(cmd_ctx.unicode);
+  uint8_t *pattern = utf8_buf.items;
+  if (len <= 1) return;
+  uint32_t len_u32 = (uint32_t)len;
+  array_reserve(&docs_arena, &media.search_patterns, len_u32);
+  table_key_t *strings = media.search_patterns.items;
+  table_key_pos pos = media.search_patterns.count;
+  memcpy(strings + pos, pattern, len_u32);
+  Table_Key key = {.strings = strings, .pos = pos, .len = len_u32};
+  table_value value = table_find(&media.search_table, &key);
+  Playlist *playlist = NULL;
+  if (value >= 0) {
+    playlist = (Playlist *)value;
+  } else {
+    Playlist tmp = {0};
+    document_listing(pattern, len - 1, &tmp);
+    playlist = &tmp;
+  }
+  assert(playlist);
+  Hidden_Table *table = &media.hidden_table;
+  uint32_t hash_n = 1;
+  while (hash_n < (table->count + playlist->count) * 2) hash_n <<= 1;
+  uint32_t start = table->capacity;
+  array_ensure_capacity_core(&docs_arena, table, hash_n, true);
+  uint32_t end = table->capacity;
+  uint64_t mask = table->capacity - 1;
+  if (start < end) {
+    for (uint32_t i = start; i < end; ++i) table->items[i] = -1;
+    for (uint32_t i = 0; i < start; ++i) {
+      int32_t v = table->items[i];
+      if (v >= 0) {
+        table->items[i] = -1;
+        uint64_t hash = (uint64_t)v * CIN_INTEGER_HASH;
         uint64_t index = hash & mask;
-        while (table->items[index] >= 0) {
-          if (table->items[index] == doc) goto next;
-          index = (index + 1) & mask;
-        }
-        table->items[index] = doc;
-        ++table->count;
-      next:;
+        while (table->items[index] >= 0) index = (index + 1) & mask;
+        table->items[index] = v;
       }
-      if (value < 0) array_free_items(&docs_arena, playlist);
-      Playlist prev_default = media.default_playlist;
-      Playlist new_default = {0};
-      array_ensure_capacity_core(&docs_arena, &new_default, prev_default.count, true);
-      array_foreach(&prev_default, int32_t, i, doc) {
-        uint64_t hash = (uint64_t)doc * CIN_INTEGER_HASH;
-        uint64_t index = hash & mask;
-        while (table->items[index] >= 0) {
-          if (table->items[index] == doc) goto skip;
-          index = (index + 1) & mask;
-        }
-        array_push(&docs_arena, &new_default, doc);
-      skip:;
-      }
-      array_to_pow1(&docs_arena, &new_default);
-      media.default_playlist = new_default;
-      playlist_setup_shuffle(&media.default_playlist);
-      arena_free_pos(&docs_arena, (uint8_t *)prev_default.items, prev_default.bytes_capacity);
-      cache_foreach(&cin_io.instances, Instance, i, o) {
-        if (o->playlist && !o->playlist->from_tag) {
-          playlist_set_default(o);
-          if (o->pipe) playlist_play(o);
-        }
-      }
+    }
+  }
+  array_foreach(playlist, int32_t, i, doc) {
+    uint64_t hash = (uint64_t)doc * CIN_INTEGER_HASH;
+    uint64_t index = hash & mask;
+    while (table->items[index] >= 0) {
+      if (table->items[index] == doc) goto next;
+      index = (index + 1) & mask;
+    }
+    table->items[index] = doc;
+    ++table->count;
+  next:;
+  }
+  if (value < 0) array_free_items(&docs_arena, playlist);
+  Playlist prev_default = media.default_playlist;
+  Playlist new_default = {0};
+  array_ensure_capacity_core(&docs_arena, &new_default, prev_default.count, true);
+  array_foreach(&prev_default, int32_t, i, doc) {
+    uint64_t hash = (uint64_t)doc * CIN_INTEGER_HASH;
+    uint64_t index = hash & mask;
+    while (table->items[index] >= 0) {
+      if (table->items[index] == doc) goto skip;
+      index = (index + 1) & mask;
+    }
+    array_push(&docs_arena, &new_default, doc);
+  skip:;
+  }
+  array_to_pow1(&docs_arena, &new_default);
+  media.default_playlist = new_default;
+  playlist_setup_shuffle(&media.default_playlist);
+  arena_free_pos(&docs_arena, (uint8_t *)prev_default.items, prev_default.bytes_capacity);
+  cache_foreach(&cin_io.instances, Instance, i, o) {
+    if (o->playlist && !o->playlist->from_tag) {
+      playlist_set_default(o);
+      if (o->pipe) playlist_play(o);
     }
   }
 }
