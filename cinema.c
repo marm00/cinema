@@ -1240,6 +1240,8 @@ static int32_t hash_i32(const Hash_Table_I32 *table, const int32_t value) {
   return hash;
 }
 
+#define CIN_INTEGER_HASH 2654435761U
+
 static inline size_t deduplicate_i32(Arena *arena, int32_t *items, size_t len) {
   if (len <= 128) {
     size_t k = 0;
@@ -1261,7 +1263,7 @@ static inline size_t deduplicate_i32(Arena *arena, int32_t *items, size_t len) {
     size_t mask = hash_n - 1;
     for (size_t i = 0; i < len; ++i) {
       int32_t v = items[i];
-      size_t hash = (size_t)v * 2654435761U;
+      size_t hash = (size_t)v * CIN_INTEGER_HASH;
       size_t index = hash & mask;
       while (set[index]) {
         if (seen[index] == v) goto next;
@@ -2145,12 +2147,14 @@ typedef struct Playlist {
 
 cache_define(Playlist_Cache, Playlist);
 array_define(Search_Patterns, uint8_t);
+array_define(Hidden_Table, int32_t);
 
 struct Media {
   Playlist default_playlist;
   Playlist_Cache playlists;
   Robin_Hood_Table search_table;
   Search_Patterns search_patterns;
+  Hidden_Table hidden_table;
 } media = {0};
 
 typedef struct TagItems {
@@ -2550,11 +2554,9 @@ static bool init_config(const char *filename) {
   return true;
 }
 
-static bool init_documents(void) {
-  docs.gsa = arena_bump_T(&docs_arena, uint8_t, docs.bytes_mul32);
+static bool reinit_documents(void) {
   int32_t d_bytes = (int32_t)array_bytes(&docs);
   int32_t remainder = (int32_t)docs.bytes_capacity - d_bytes;
-  assert(remainder >= 0);
 #if defined(LIBSAIS_OPENMP)
   int32_t result = libsais_gsa_omp(docs.items, docs.gsa, d_bytes, remainder, NULL, cin_system.threads);
 #else
@@ -2564,7 +2566,7 @@ static bool init_documents(void) {
     log_message(LOG_ERROR, "Failed to build SA");
     return false;
   }
-  int32_t *plcp = arena_bump_T(&docs_arena, uint8_t, docs.bytes_mul32);
+  int32_t *plcp = docs.suffix_to_doc;
 #if defined(LIBSAIS_OPENMP)
   result = libsais_plcp_gsa_omp(docs.items, docs.gsa, plcp, d_bytes, cin_system.threads);
 #else
@@ -2574,7 +2576,6 @@ static bool init_documents(void) {
     log_message(LOG_ERROR, "Failed to build PLCP array");
     return false;
   }
-  docs.lcp = arena_bump_T(&docs_arena, uint8_t, docs.bytes_mul32);
 #if defined(LIBSAIS_OPENMP)
   result = libsais_lcp_omp(plcp, docs.gsa, docs.lcp, d_bytes, cin_system.threads);
 #else
@@ -2584,8 +2585,6 @@ static bool init_documents(void) {
     log_message(LOG_ERROR, "Failed to build LCP array");
     return false;
   }
-  docs.suffix_to_doc = plcp;
-  docs.dedup_counters = arena_bump_T(&docs_arena, uint16_t, (uint32_t)d_bytes);
   docs.suffix_to_doc[0] = 0;
   for (int32_t i = 1; i < docs.doc_count; ++i) {
     docs.suffix_to_doc[i] = docs.gsa[i - 1] + 1;
@@ -2609,8 +2608,17 @@ static bool init_documents(void) {
     }
     docs.suffix_to_doc[i] = docs.suffix_to_doc[left];
   }
-  table_init(&docs_arena, &media.search_table, CIN_QUERIES_CAP);
   return true;
+}
+
+static bool init_documents(void) {
+  int32_t d_bytes = (int32_t)array_bytes(&docs);
+  docs.gsa = arena_bump_T(&docs_arena, uint8_t, docs.bytes_mul32);
+  docs.suffix_to_doc = arena_bump_T(&docs_arena, uint8_t, docs.bytes_mul32);
+  docs.lcp = arena_bump_T(&docs_arena, uint8_t, docs.bytes_mul32);
+  docs.dedup_counters = arena_bump_T(&docs_arena, uint16_t, (uint32_t)d_bytes);
+  table_init(&docs_arena, &media.search_table, CIN_QUERIES_CAP);
+  return reinit_documents();
 }
 
 static void document_listing(const uint8_t *pattern, int32_t pattern_len, Playlist *result) {
@@ -2693,9 +2701,20 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len, Playli
       docs.dedup_counters[doc] = dedup_counter;
       assert(result->count < result->capacity);
       assert(result->count <= (uint32_t)n);
+      if (media.hidden_table.count) {
+        Hidden_Table *table = &media.hidden_table;
+        uint64_t mask = table->capacity - 1;
+        uint64_t hash = (uint64_t)doc * CIN_INTEGER_HASH;
+        uint64_t index = hash & mask;
+        while (table->items[index] >= 0) {
+          if (table->items[index] == doc) goto skip;
+          index = (index + 1) & mask;
+        }
+      }
       array_push(&docs_arena, result, doc);
       log_message(LOG_TRACE, "docs.gsa[%7d] = %-25.25s (%7d)| (%7d) = %-30.30s counter=%d",
                   i, docs.items + docs.gsa[i], docs.gsa[i], doc, docs.items + doc, dedup_counter);
+    skip:;
     }
   }
   if (++dedup_counter == 0) {
@@ -2909,26 +2928,23 @@ static inline void playlist_set_default(Instance *instance) {
   playlist_set(instance, &media.default_playlist);
 }
 
-static inline void playlist_play(Instance *instance) {
+static inline void playlist_play_core(Instance *instance, const char *arg) {
   assert(instance->playlist);
   Playlist *playlist = instance->playlist;
   uint32_t index = instance->playlist->next_index;
   overlap_write(instance, MPV_LOADFILE, "loadfile",
-                (char *)docs.items + playlist->items[index], NULL);
+                (char *)docs.items + playlist->items[index], arg);
   if (++instance->playlist->next_index == instance->playlist->count) {
     playlist_shuffle(instance->playlist);
   }
 }
 
+static inline void playlist_play(Instance *instance) {
+  playlist_play_core(instance, NULL);
+}
+
 static inline void playlist_insert(Instance *instance) {
-  assert(instance->playlist);
-  Playlist *playlist = instance->playlist;
-  uint32_t index = instance->playlist->next_index;
-  overlap_write(instance, MPV_WRITE, "loadfile",
-                (char *)docs.items + playlist->items[index], "insert-next");
-  if (++instance->playlist->next_index == instance->playlist->count) {
-    playlist_shuffle(instance->playlist);
-  }
+  playlist_play_core(instance, "insert-next");
 }
 
 #define CIN_MPVKEY_LEFT "\""
@@ -2993,7 +3009,7 @@ static inline void iocp_parse(Instance *instance, const char *buf_start, size_t 
     OverlappedWrite *write = (OverlappedWrite *)(uintptr_t)req_id;
     assert(write);
     assert(write->bytes);
-    log_message(LOG_INFO, "Recovered original write: %p (%zu bytes)", write, write->bytes);
+    log_message(LOG_DEBUG, "Recovered original write: %p (%zu bytes)", write, write->bytes);
     switch (write->ovl_ctx.type) {
     case MPV_LOADFILE:
       // overlap_write(instance, MPV_WRITE, "playlist-next", NULL, NULL);
@@ -3511,8 +3527,6 @@ static inline bool init_mpv(void) {
     log_last_error("Failed to create iocp listener");
     return false;
   }
-  mpv_lock();
-  mpv_spawn(head_instance, 0);
   return true;
 }
 
@@ -3722,6 +3736,99 @@ static void cmd_search_validator(void) {
   if (!validate_screens()) return;
   set_preview(true, L"search '%s' %s", cmd_ctx.unicode ? cmd_ctx.unicode : L"", cmd_ctx.targets.items);
   cmd_ctx.executor = cmd_search_executor;
+}
+
+static void cmd_hide_executor(void) {
+  if (cmd_ctx.unicode) {
+    int32_t len = utf16_to_utf8(cmd_ctx.unicode);
+    uint8_t *pattern = utf8_buf.items;
+    if (len > 1) {
+      uint32_t len_u32 = (uint32_t)len;
+      array_reserve(&docs_arena, &media.search_patterns, len_u32);
+      table_key_t *strings = media.search_patterns.items;
+      table_key_pos pos = media.search_patterns.count;
+      memcpy(strings + pos, pattern, len_u32);
+      Table_Key key = {.strings = strings, .pos = pos, .len = len_u32};
+      table_value value = table_find(&media.search_table, &key);
+      Playlist *playlist = NULL;
+      if (value >= 0) {
+        playlist = (Playlist *)value;
+      } else {
+        Playlist tmp = {0};
+        document_listing(pattern, len - 1, &tmp);
+        playlist = &tmp;
+      }
+      assert(playlist);
+      Hidden_Table *table = &media.hidden_table;
+      uint32_t hash_n = 1;
+      while (hash_n < (table->count + playlist->count) * 2) hash_n <<= 1;
+      uint32_t start = table->capacity;
+      array_ensure_capacity_core(&docs_arena, table, hash_n, true);
+      uint32_t end = table->capacity;
+      uint64_t mask = table->capacity - 1;
+      if (start < end) {
+        for (uint32_t i = start; i < end; ++i) {
+          table->items[i] = -1;
+        }
+        for (uint32_t i = 0; i < start; ++i) {
+          int32_t v = table->items[i];
+          if (v >= 0) {
+            table->items[i] = -1;
+            uint64_t hash = (uint64_t)v * CIN_INTEGER_HASH;
+            uint64_t index = hash & mask;
+            while (table->items[index] >= 0) {
+              index = (index + 1) & mask;
+            }
+            table->items[index] = v;
+          }
+        }
+      }
+      array_foreach(playlist, int32_t, i, doc) {
+        uint64_t hash = (uint64_t)doc * CIN_INTEGER_HASH;
+        uint64_t index = hash & mask;
+        while (table->items[index] >= 0) {
+          if (table->items[index] == doc) goto next;
+          index = (index + 1) & mask;
+        }
+        table->items[index] = doc;
+        ++table->count;
+      next:;
+      }
+      if (value < 0) array_free_items(&docs_arena, playlist);
+      Playlist prev_default = media.default_playlist;
+      Playlist new_default = {0};
+      array_ensure_capacity_core(&docs_arena, &new_default, prev_default.count, true);
+      array_foreach(&prev_default, int32_t, i, doc) {
+        uint64_t hash = (uint64_t)doc * CIN_INTEGER_HASH;
+        uint64_t index = hash & mask;
+        while (table->items[index] >= 0) {
+          if (table->items[index] == doc) goto skip;
+          index = (index + 1) & mask;
+        }
+        array_push(&docs_arena, &new_default, doc);
+      skip:;
+      }
+      array_to_pow1(&docs_arena, &new_default);
+      media.default_playlist = new_default;
+      playlist_setup_shuffle(&media.default_playlist);
+      arena_free_pos(&docs_arena, (uint8_t *)prev_default.items, prev_default.bytes_capacity);
+      cache_foreach(&cin_io.instances, Instance, i, o) {
+        if (o->playlist && !o->playlist->from_tag) {
+          playlist_set_default(o);
+          if (o->pipe) playlist_play(o);
+        }
+      }
+    }
+  }
+}
+
+static void cmd_hide_validator(void) {
+  if (cmd_ctx.unicode && *cmd_ctx.unicode) {
+    set_preview(true, L"hide '%s'", cmd_ctx.unicode);
+  } else {
+    set_preview(true, L"hide '' (nothing)");
+  }
+  cmd_ctx.executor = cmd_hide_executor;
 }
 
 static void cmd_maximize_executor(void) {
@@ -4002,6 +4109,7 @@ static bool init_commands(void) {
   register_cmd(L"reroll", L"Shuffle media [(1 2 ..) (reroll)]", cmd_reroll_validator);
   register_cmd(L"tag", L"Limit media to tag [(1 2 ..) tag (name)]", cmd_tag_validator);
   register_cmd(L"search", L"Limit media to term [(1 2 ..) search (term)]", cmd_search_validator);
+  register_cmd(L"hide", L"Hide media with term [hide term]", cmd_hide_validator);
   register_cmd(L"autoplay", L"Autoplay media [(1 2 ..) autoplay (seconds)]", cmd_autoplay_validator);
   register_cmd(L"maximize", L"Maximize and close others [(1) maximize]", cmd_maximize_validator);
   register_cmd(L"swap", L"Swap screen contents [(1 2) swap]", cmd_swap_validator);
@@ -4121,6 +4229,9 @@ int main(int argc, char **argv) {
   if (!init_commands()) exit(1);
   if (!init_documents()) exit(1);
   if (!init_mpv()) exit(1);
+  mpv_lock();
+  mpv_spawn(cin_io.instances.head, 0);
+  cmd_reroll_validator();
   // NOTE: It seems impossible to reach outside the bounds of the viewport
   // within Windows Terminal using a custom ReadConsoleInput approach. Virtual
   // terminal sequences and related APIs are bound to the viewport. So,
@@ -4131,7 +4242,6 @@ int main(int argc, char **argv) {
   // TODO: support bounded viewport (excluding scrollback) maybe VT100
   // size_t visible_lines = repl.screen_info.srWindow.Bottom - repl.screen_info.srWindow.Top;
   Console_Message *msg_tail = NULL;
-  cmd_reroll_validator();
   for (;;) {
     show_cursor();
     INPUT_RECORD input;
