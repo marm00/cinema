@@ -1197,6 +1197,14 @@ static void log_last_error(const char *message, ...) {
   LeaveCriticalSection(&log_lock);
 }
 
+#define CIN_STRERROR_BYTES 95
+
+static inline void log_fopen_error(const char *filename, int32_t err) {
+  char err_buf[CIN_STRERROR_BYTES];
+  strerror_s(err_buf, CIN_STRERROR_BYTES, err);
+  log_message(LOG_ERROR, "Failed to open file '%s': %s", filename, err_buf);
+}
+
 typedef struct Hash_Table_I32 {
   int32_t *keys;
   int32_t *values;
@@ -1881,7 +1889,6 @@ static struct {
   bool error;
 } conf_parser = {0};
 
-#define CIN_STRERROR_BYTES 95
 #define CONF_LINE_CAP 512
 #define CONF_SCOPES_CAP 16
 
@@ -1990,9 +1997,7 @@ static bool parse_config(const char *filename) {
   FILE *file;
   int32_t err = fopen_s(&file, filename, "rt");
   if (err) {
-    char err_buf[CIN_STRERROR_BYTES];
-    strerror_s(err_buf, CIN_STRERROR_BYTES, err);
-    log_message(LOG_ERROR, "Failed to open config file '%s': %s", filename, err_buf);
+    log_fopen_error(filename, err);
     goto end;
   }
   array_init(&console_arena, &conf_parser.buf, CONF_LINE_CAP);
@@ -2188,6 +2193,7 @@ static array_struct(uint8_t) directory_strings = {0};
 static array_struct(DirectoryNode) directory_nodes = {0};
 static array_struct(uint8_t) layout_strings = {0};
 static array_struct(uint8_t) screen_strings = {0};
+static array_struct(char) geometry_buf = {0};
 
 #define CIN_DIRECTORIES_CAP 64
 #define CIN_DIRECTORY_ITEMS_CAP 64
@@ -2457,6 +2463,7 @@ static bool init_config(const char *filename) {
   array_init_zero(&docs_arena, &docs, CIN_DOCS_CAP);
   array_init(&console_arena, &directory_nodes, CIN_DIRECTORIES_CAP);
   array_init(&console_arena, &directory_strings, CIN_DIRECTORY_STRINGS_CAP);
+  array_init(&console_arena, &geometry_buf, CIN_LAYOUT_SCREENS_CAP);
   tag_tree = radix_tree();
   layout_tree = radix_tree();
   Conf_Root *root = &conf_parser.scopes.items[0].root;
@@ -3954,24 +3961,89 @@ static void cmd_lock_validator(void) {
 
 static void cmd_store_executor(void) {
   cmd_layout layout = cmd_ctx.queued_layout;
-  size_t scope_line = 0;
   char *name = NULL;
-  if (layout) {
-    scope_line = layout->scope_line;
-    name = (char*)layout_strings.items + layout->offset;
+  bool try_overwrite = layout != NULL;
+  if (try_overwrite) {
+    layout->count = 0;
+    name = (char *)layout_strings.items + layout->offset;
   } else {
+    layout = arena_bump_T1(&console_arena, Cin_Layout);
     assert(cmd_ctx.unicode);
-    name = (char*)utf8_buf.items;
+    name = (char *)utf8_buf.items;
+    setup_layout(name, layout);
   }
-  FILE *file;
-  // TODO: replace/append
-  assert(name);
+  geometry_buf.count = 0;
   cache_foreach(&cin_io.instances, Instance, i, instance) {
     if (instance->pipe && IsWindow(instance->window)) {
       GetWindowRect(instance->window, &instance->rect);
-      log_message(LOG_INFO, "%ld %ld %ld %ld", instance->rect.bottom, instance->rect.left, instance->rect.right, instance->rect.top);
+      LONG width = instance->rect.right - instance->rect.left;
+      LONG height = instance->rect.bottom - instance->rect.top;
+      LONG x = instance->rect.left;
+      LONG y = instance->rect.top;
+      const char fstr[] = "%ldx%ld%+ld%+ld";
+      int32_t bytes = snprintf(NULL, 0, fstr, width, height, x, y) + 1;
+      assert(bytes > 1);
+      uint32_t bytes_u32 = (uint32_t)bytes;
+      uint32_t offset = geometry_buf.count;
+      array_grow(&console_arena, &geometry_buf, bytes_u32);
+      char *pos = geometry_buf.items + offset;
+      snprintf(pos, bytes_u32, fstr, width, height, x, y);
+      setup_screen(pos, bytes_u32, layout);
+      assert(geometry_buf.items[geometry_buf.count - 1] == '\0');
+      geometry_buf.items[geometry_buf.count - 1] = ',';
     }
   }
+  if (geometry_buf.count > 0) geometry_buf.items[--geometry_buf.count] = '\0';
+  FILE *file = NULL;
+  int32_t err = 0;
+  if (!try_overwrite) goto append;
+  size_t scope_line = layout->scope_line;
+  uint32_t name_len = layout->len;
+  err = fopen_s(&file, CIN_CONF_FILENAME, "rt");
+  if (err) {
+    log_fopen_error(CIN_CONF_FILENAME, err);
+  } else {
+    fseek(file, 0, SEEK_END);
+    long bytes = ftell(file);
+    rewind(file);
+    char *buf = arena_bump_T(&console_arena, char, (uint32_t)bytes + 1U);
+    fread(buf, 1, bytes, file);
+    fclose(file);
+    const char *p = buf;
+    const char *tail = buf + bytes;
+    size_t bottom_line = 1;
+    while (bottom_line < scope_line && (p = memchr(p, '\n', tail - p))) {
+      ++p;
+      ++bottom_line;
+    }
+    const char *overwrite_start = p;
+    if (!p || memcmp(p, "[layout]", cin_strlen("[layout]")) != 0) goto append;
+    do p = memchr(p, '\n', tail - p);
+    while (p && memcmp(++p, "name", cin_strlen("name")) != 0);
+    if (!p) goto append;
+    while (*p == ' ') ++p;
+    if (*p != '=') goto append;
+    while (*p == ' ') ++p;
+    if (memcmp(p, name, name_len) != 0) goto append;
+    p += name_len;
+    if (*p && *p != '\n') goto append;
+    while (*p && *p != '[') ++p;
+    const char *overwrite_end = p;
+    ptrdiff_t overwrite_bytes = overwrite_end - overwrite_start;
+    // TODO: overwrite
+    return;
+  }
+append:
+  err = fopen_s(&file, CIN_CONF_FILENAME, "a");
+  if (err) {
+    log_fopen_error(CIN_CONF_FILENAME, err);
+  } else {
+    fprintf(file, "[layout]\n");
+    fprintf(file, "name = %s\n", name);
+    fprintf(file, "screen = %s\n", geometry_buf.items);
+    fclose(file);
+  }
+  return;
 }
 
 static void cmd_store_validator(void) {
@@ -3991,9 +4063,9 @@ static void cmd_store_validator(void) {
     }
   } else {
     cmd_layout curr = cmd_ctx.layout;
-    char *curr_name = (char*)layout_strings.items + curr->offset;
+    char *curr_name = (char *)layout_strings.items + curr->offset;
     utf8_to_utf16_nraw(curr_name, (int32_t)curr->len);
-    set_preview(true, L"store layout '%s' (overwrite current)", utf16_buf_raw.items);;
+    set_preview(true, L"store layout '%s' (overwrite current)", utf16_buf_raw.items);
     layout = curr;
   }
   cmd_ctx.queued_layout = (cmd_layout)layout;
@@ -4144,9 +4216,9 @@ static void cmd_layout_validator(void) {
     set_preview(true, L"change layout to '%s'", utf16_buf_raw.items);
   } else {
     cmd_layout curr = cmd_ctx.layout;
-    char *curr_name = (char*)layout_strings.items + curr->offset;
+    char *curr_name = (char *)layout_strings.items + curr->offset;
     utf8_to_utf16_nraw(curr_name, (int32_t)curr->len);
-    set_preview(true, L"reset layout '%s'", utf16_buf_raw.items);;
+    set_preview(true, L"reset layout '%s'", utf16_buf_raw.items);
     layout = curr;
   }
   cmd_ctx.queued_layout = (cmd_layout)layout;
