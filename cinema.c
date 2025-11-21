@@ -52,6 +52,7 @@ typedef enum {
 static const Cin_Log_Level GLOBAL_LOG_LEVEL = LOG_DEBUG;
 static const char *LOG_LEVELS[LOG_TRACE + 1] = {"ERROR", "WARNING", "INFO", "DEBUG", "TRACE"};
 
+#define CIN_CONF_FILENAME "cinema.conf"
 #define CIN_ARRAY_CAP 256
 #define CIN_TABLE_CAP 64
 #define CIN_ARRAY_GROWTH 2
@@ -1864,6 +1865,7 @@ typedef struct Conf_Scope {
     Conf_Media media;
     Conf_Layout layout;
   };
+  size_t line;
 } Conf_Scope;
 
 array_define(Conf_Scopes, Conf_Scope);
@@ -1891,6 +1893,7 @@ static inline Conf_Scope *conf_scope(void) {
 static inline void conf_enter_scope(Conf_Scope_Type type) {
   Conf_Scope scope = {0};
   scope.type = type;
+  scope.line = conf_parser.line;
   array_push(&console_arena, &conf_parser.scopes, scope);
 }
 
@@ -1899,7 +1902,7 @@ static inline void conf_error_log(size_t row, size_t col, const char *allowed) {
   writef("Skipping line %zu due to unexpected token at position %zu. Allowed: %s.\r\n", row + 1, col + 1, allowed);
 }
 
-static inline bool conf_kcmp(char *k, Conf_Scope_Type type, Conf_Key *out, bool unique) {
+static inline bool conf_keycmp(char *k, Conf_Scope_Type type, Conf_Key *out, bool unique) {
   if (memcmp(k, conf_parser.buf.items, conf_parser.k_len) != 0) return false;
   assert(&conf_scope()->type);
   uint32_t v_len = (uint32_t)(conf_parser.len - (size_t)(conf_parser.v - conf_parser.buf.items));
@@ -1940,21 +1943,21 @@ static inline bool conf_kcmp(char *k, Conf_Scope_Type type, Conf_Key *out, bool 
   return true;
 }
 
-static inline bool conf_kget(void) {
+static inline bool conf_keyget(void) {
   switch (conf_parser.k_len) {
   case 11:
-    if (conf_kcmp("directories", CONF_SCOPE_MEDIA, &conf_scope()->media.directories, false)) return true;
+    if (conf_keycmp("directories", CONF_SCOPE_MEDIA, &conf_scope()->media.directories, false)) return true;
     break;
   case 8:
-    if (conf_kcmp("patterns", CONF_SCOPE_MEDIA, &conf_scope()->media.patterns, false)) return true;
+    if (conf_keycmp("patterns", CONF_SCOPE_MEDIA, &conf_scope()->media.patterns, false)) return true;
     break;
   case 6:
-    if (conf_kcmp("screen", CONF_SCOPE_LAYOUT, &conf_scope()->layout.screen, false)) return true;
+    if (conf_keycmp("screen", CONF_SCOPE_LAYOUT, &conf_scope()->layout.screen, false)) return true;
     break;
   case 4:
-    if (conf_kcmp("urls", CONF_SCOPE_MEDIA, &conf_scope()->media.urls, false)) return true;
-    if (conf_kcmp("tags", CONF_SCOPE_MEDIA, &conf_scope()->media.tags, false)) return true;
-    if (conf_kcmp("name", CONF_SCOPE_LAYOUT, &conf_scope()->layout.name, true)) return true;
+    if (conf_keycmp("urls", CONF_SCOPE_MEDIA, &conf_scope()->media.urls, false)) return true;
+    if (conf_keycmp("tags", CONF_SCOPE_MEDIA, &conf_scope()->media.tags, false)) return true;
+    if (conf_keycmp("name", CONF_SCOPE_LAYOUT, &conf_scope()->layout.name, true)) return true;
     break;
   default:
     break;
@@ -1962,19 +1965,19 @@ static inline bool conf_kget(void) {
   return false;
 }
 
-static inline bool conf_scmp(char *s, Conf_Scope_Type type) {
+static inline bool conf_scopecmp(char *s, Conf_Scope_Type type) {
   if (memcmp(s, conf_parser.buf.items + 1, conf_parser.k_len) != 0) return false;
   conf_enter_scope(type);
   return true;
 }
 
-static inline bool conf_sget(void) {
+static inline bool conf_scopeget(void) {
   switch (conf_parser.k_len) {
   case 6:
-    if (conf_scmp("layout", CONF_SCOPE_LAYOUT)) return true;
+    if (conf_scopecmp("layout", CONF_SCOPE_LAYOUT)) return true;
     break;
   case 5:
-    if (conf_scmp("media", CONF_SCOPE_MEDIA)) return true;
+    if (conf_scopecmp("media", CONF_SCOPE_MEDIA)) return true;
     break;
   default:
     break;
@@ -2042,7 +2045,7 @@ static bool parse_config(const char *filename) {
         goto end;
       }
       conf_parser.v = p;
-      if (!conf_kget()) {
+      if (!conf_keyget()) {
         conf_parser.buf.items[conf_parser.k_len] = '\0';
         log_message(LOG_ERROR, "Unknown key '%s' on line %zu, please check for typos",
                     conf_parser.buf.items, conf_parser.line);
@@ -2063,7 +2066,7 @@ static bool parse_config(const char *filename) {
                     conf_parser.line, conf_parser.buf.items, conf_parser.k_len + 2);
         goto end;
       }
-      if (!conf_sget()) {
+      if (!conf_scopeget()) {
         conf_parser.buf.items[conf_parser.k_len + 2] = '\0';
         log_message(LOG_ERROR, "Scope '%s' at line %zu is unknown, please check for typos",
                     conf_parser.buf.items, conf_parser.line);
@@ -2165,11 +2168,16 @@ typedef struct TagItems {
 } TagItems;
 
 typedef struct Cin_Screen {
-  int32_t offset;
-  int32_t len;
+  uint32_t offset;
+  uint32_t len;
 } Cin_Screen;
 
-array_define(Cin_Layout, Cin_Screen);
+typedef struct Cin_Layout {
+  size_t scope_line;
+  array_struct_members(Cin_Screen);
+  uint32_t offset;
+  uint32_t len;
+} Cin_Layout;
 
 static struct {
   array_struct_members(DirectoryPath);
@@ -2178,7 +2186,8 @@ static struct {
 
 static array_struct(uint8_t) directory_strings = {0};
 static array_struct(DirectoryNode) directory_nodes = {0};
-static array_struct(uint8_t) screen_arena = {0};
+static array_struct(uint8_t) layout_strings = {0};
+static array_struct(uint8_t) screen_strings = {0};
 
 #define CIN_DIRECTORIES_CAP 64
 #define CIN_DIRECTORY_ITEMS_CAP 64
@@ -2414,17 +2423,21 @@ static inline void setup_tag(const char *tag, TagItems *tag_items) {
 }
 
 static inline void setup_screen(const char *geometry, uint32_t bytes, Cin_Layout *layout) {
-  Cin_Screen screen = {.offset = (int32_t)screen_arena.count, .len = (int32_t)bytes - 1};
-  array_extend(&console_arena, &screen_arena, geometry, bytes);
+  Cin_Screen screen = {.offset = screen_strings.count, .len = bytes};
+  array_extend(&console_arena, &screen_strings, geometry, bytes);
   array_push(&console_arena, layout, screen);
 }
 
 static inline void setup_layout(const char *name, Cin_Layout *layout) {
   int32_t len_utf16 = utf8_to_utf16_norm(name);
-  assert(len_utf16);
+  assert(len_utf16 > 1);
   int32_t len_utf8 = utf16_to_utf8(utf16_buf_norm.items);
-  assert(len_utf8);
-  radix_insert(layout_tree, utf8_buf.items, (size_t)len_utf8, layout);
+  assert(len_utf8 > 1);
+  uint32_t len_utf8_u32 = (uint32_t)len_utf8;
+  layout->offset = layout_strings.count;
+  layout->len = len_utf8_u32;
+  array_extend(&console_arena, &layout_strings, utf8_buf.items, len_utf8_u32);
+  radix_insert(layout_tree, utf8_buf.items, len_utf8_u32, layout);
 }
 
 #define FOREACH_PART(k, part, bytes)                                                                   \
@@ -2466,6 +2479,7 @@ static bool init_config(const char *filename) {
         return false;
       }
       Cin_Layout *layout = arena_bump_T1(&console_arena, Cin_Layout);
+      layout->scope_line = scope->line;
       array_init(&console_arena, layout, CIN_LAYOUT_SCREENS_CAP);
       log_message(LOG_DEBUG, "Name: %s", scope->layout.name.items);
       FOREACH_PART(&scope->layout.screen, part, bytes) {
@@ -3470,7 +3484,7 @@ static void mpv_spawn(Instance *instance, size_t index) {
   for (; j < digits; ++j) mpv_command[CIN_MPVCALL_LEN + j] = mpv_command[left + j];
   Cin_Screen screen = cmd_ctx.layout->items[index];
   // screen.len actually includes null-terminator
-  int32_t len = utf8_to_utf16_nraw((char *)screen_arena.items + screen.offset, screen.len);
+  int32_t len = utf8_to_utf16_nraw((char *)screen_strings.items + screen.offset, (int32_t)screen.len);
   if (len > (int32_t)CIN_MPVCALL_GEOMETRY_LEN) {
     // TODO: error message for user
     assert(false);
@@ -3938,6 +3952,54 @@ static void cmd_lock_validator(void) {
   cmd_ctx.executor = cmd_lock_executor;
 }
 
+static void cmd_store_executor(void) {
+  cmd_layout layout = cmd_ctx.queued_layout;
+  size_t scope_line = 0;
+  char *name = NULL;
+  if (layout) {
+    scope_line = layout->scope_line;
+    name = (char*)layout_strings.items + layout->offset;
+  } else {
+    assert(cmd_ctx.unicode);
+    name = (char*)utf8_buf.items;
+  }
+  FILE *file;
+  // TODO: replace/append
+  assert(name);
+  cache_foreach(&cin_io.instances, Instance, i, instance) {
+    if (instance->pipe && IsWindow(instance->window)) {
+      GetWindowRect(instance->window, &instance->rect);
+      log_message(LOG_INFO, "%ld %ld %ld %ld", instance->rect.bottom, instance->rect.left, instance->rect.right, instance->rect.top);
+    }
+  }
+}
+
+static void cmd_store_validator(void) {
+  radix_v layout = NULL;
+  const uint8_t *layout_name = NULL;
+  (void)cmd_ctx.unicode;
+  if (cmd_ctx.unicode) {
+    int32_t len = utf16_to_utf8(cmd_ctx.unicode);
+    layout = radix_query(layout_tree, utf8_buf.items, (size_t)len - 1, &layout_name);
+    if (layout) {
+      utf8_to_utf16_raw((char *)layout_name);
+      assert(layout);
+      assert(layout_name);
+      set_preview(true, L"store layout '%s' (overwrite)", utf16_buf_raw.items);
+    } else {
+      set_preview(true, L"store new layout: '%s'", cmd_ctx.unicode);
+    }
+  } else {
+    cmd_layout curr = cmd_ctx.layout;
+    char *curr_name = (char*)layout_strings.items + curr->offset;
+    utf8_to_utf16_nraw(curr_name, (int32_t)curr->len);
+    set_preview(true, L"store layout '%s' (overwrite current)", utf16_buf_raw.items);;
+    layout = curr;
+  }
+  cmd_ctx.queued_layout = (cmd_layout)layout;
+  cmd_ctx.executor = cmd_store_executor;
+}
+
 static void cmd_swap_executor(void) {
   size_t first = cmd_ctx.numbers.items[0] - 1;
   size_t second = cmd_ctx.numbers.items[1] - 1;
@@ -3957,8 +4019,8 @@ static void cmd_swap_executor(void) {
     }
   }
   if (first_screen && second_screen) {
-    const char *first_geometry = (char *)screen_arena.items + first_screen->offset;
-    const char *second_geometry = (char *)screen_arena.items + second_screen->offset;
+    const char *first_geometry = (char *)screen_strings.items + first_screen->offset;
+    const char *second_geometry = (char *)screen_strings.items + second_screen->offset;
     overlap_write(first_instance, MPV_WRITE, "set_property", "geometry", second_geometry);
     overlap_write(second_instance, MPV_WRITE, "set_property", "geometry", first_geometry);
     Cin_Screen tmp = *second_screen;
@@ -4047,7 +4109,7 @@ static void cmd_layout_executor(void) {
     } else if (old->pipe) {
       log_message(LOG_INFO, "i=%u, screen=%zu", i);
       assert(IsWindow(old->window));
-      const char *geometry = (char *)screen_arena.items + cmd_ctx.layout->items[screen].offset;
+      const char *geometry = (char *)screen_strings.items + cmd_ctx.layout->items[screen].offset;
       overlap_write(old, MPV_WRITE, "set_property", "geometry", geometry);
       if (old->full_screen) {
         old->full_screen = false;
@@ -4081,8 +4143,11 @@ static void cmd_layout_validator(void) {
     assert(layout_name);
     set_preview(true, L"change layout to '%s'", utf16_buf_raw.items);
   } else {
-    layout = cmd_ctx.layout;
-    set_preview(true, L"reset layout");
+    cmd_layout curr = cmd_ctx.layout;
+    char *curr_name = (char*)layout_strings.items + curr->offset;
+    utf8_to_utf16_nraw(curr_name, (int32_t)curr->len);
+    set_preview(true, L"reset layout '%s'", utf16_buf_raw.items);;
+    layout = curr;
   }
   cmd_ctx.queued_layout = (cmd_layout)layout;
   cmd_ctx.executor = cmd_layout_executor;
@@ -4121,6 +4186,7 @@ static bool init_commands(void) {
   register_cmd(L"hide", L"Hide media with term [hide term]", cmd_hide_validator);
   register_cmd(L"autoplay", L"Autoplay media [(1 2 ..) autoplay (seconds)]", cmd_autoplay_validator);
   register_cmd(L"lock", L"Lock/unlock screen contents [(1 2 ..) lock]", cmd_lock_validator);
+  register_cmd(L"store", L"Store layout in cinema.conf [store (layout)]", cmd_store_validator);
   register_cmd(L"maximize", L"Maximize and close others [(1) maximize]", cmd_maximize_validator);
   register_cmd(L"swap", L"Swap screen contents [(1 2) swap]", cmd_swap_validator);
   register_cmd(L"clear", L"Clear tag/term [(1 2) clear]", cmd_clear_validator);
@@ -4235,7 +4301,7 @@ int main(int argc, char **argv) {
   if (!init_repl()) exit(1);
   if (!InitializeCriticalSectionAndSpinCount(&log_lock, 0)) exit(1);
   if (!init_timers()) exit(1);
-  if (!init_config("cinema.conf")) exit(1);
+  if (!init_config(CIN_CONF_FILENAME)) exit(1);
   if (!init_commands()) exit(1);
   if (!init_documents()) exit(1);
   if (!init_mpv()) exit(1);
