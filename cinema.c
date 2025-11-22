@@ -4046,39 +4046,40 @@ static void cmd_store_executor(void) {
     ptrdiff_t remainder = overwrite_end - p;
     int32_t screen_bytes = snprintf(NULL, 0, fstr_screen, geometry_buf.items) + 1;
     uint32_t required_bytes = buf_bytes;
-    if (remainder >= (ptrdiff_t)screen_bytes) {
+    uint32_t extra_newlines = 0;
+    char *p2 = (char *)p;
+    while ((p2 = memchr(p2, '\n', (size_t)(overwrite_end - p2)))) {
+      ++extra_newlines;
+      ++p2;
+    }
+    uint32_t insert_bytes = (uint32_t)screen_bytes + (extra_newlines * 2);
+    if (remainder >= (ptrdiff_t)insert_bytes) {
       snprintf((char *)p, (size_t)screen_bytes, fstr_screen, geometry_buf.items);
       p += screen_bytes - 1;
-      char *empty = (char *)p;
-      if (*++p == '\n') {
-        *empty++ = '\r';
-        ++empty;
-        ++p;
+      p2 = (char *)p;
+      for (uint32_t i = 1U; i < extra_newlines; ++i) {
+        *p2++ = '\r';
+        *p2++ = '\n';
       }
-      while (p < overwrite_end) {
-        assert(*p != '\n');
-        if (*p == '\r') {
-          *empty++ = '\r';
-          *empty++ = '\n';
-          ++p;
-        }
-        ++p;
-      }
-      p = empty;
+      p = p2;
       memmove((char *)p, overwrite_end, leftover_bytes);
     } else {
-      uint32_t overwrite_offset = 0;
-      if (*(overwrite_end - 1) == '\n') overwrite_offset = 2;
       size_t p_pos = (size_t)(p - buf);
-      uint32_t diff = (uint32_t)screen_bytes - (uint32_t)remainder;
-      required_bytes = buf_bytes + diff + overwrite_offset;
+      uint32_t diff = (uint32_t)insert_bytes - (uint32_t)remainder;
+      required_bytes = buf_bytes + diff;
       const char *prev = buf;
       buf = arena_bump_T(&console_arena, char, required_bytes);
       memcpy(buf, prev, p_pos);
       p = buf + p_pos;
       snprintf((char *)p, (size_t)screen_bytes, fstr_screen, geometry_buf.items);
       p += screen_bytes - 1;
-      memmove((char *)p, overwrite_end - overwrite_offset, leftover_bytes + overwrite_offset);
+      p2 = (char *)p;
+      for (uint32_t i = 1U; i < extra_newlines; ++i) {
+        *p2++ = '\r';
+        *p2++ = '\n';
+      }
+      p = p2;
+      memmove((char *)p, overwrite_end, leftover_bytes);
       arena_free_pos(&console_arena, (uint8_t *)prev, buf_bytes);
     }
     p += leftover_bytes;
