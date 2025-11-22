@@ -797,6 +797,7 @@ static void vwritef(const char *format, va_list args) {
 #define WCR_LEN 1
 #define CR "\r"
 #define CR_LEN 1
+#define CRLF "\r\n"
 
 static inline void hide_cursor(void) {
   repl.cursor_info.bVisible = false;
@@ -3972,22 +3973,23 @@ static void cmd_store_executor(void) {
     name = (char *)utf8_buf.items;
     setup_layout(name, layout);
   }
+  cmd_ctx.layout = layout;
   geometry_buf.count = 0;
   cache_foreach(&cin_io.instances, Instance, i, instance) {
     if (instance->pipe && IsWindow(instance->window)) {
+      const char fstr_rect[] = "%ldx%ld%+ld%+ld";
       GetWindowRect(instance->window, &instance->rect);
       LONG width = instance->rect.right - instance->rect.left;
       LONG height = instance->rect.bottom - instance->rect.top;
       LONG x = instance->rect.left;
       LONG y = instance->rect.top;
-      const char fstr[] = "%ldx%ld%+ld%+ld";
-      int32_t bytes = snprintf(NULL, 0, fstr, width, height, x, y) + 1;
+      int32_t bytes = snprintf(NULL, 0, fstr_rect, width, height, x, y) + 1;
       assert(bytes > 1);
       uint32_t bytes_u32 = (uint32_t)bytes;
       uint32_t offset = geometry_buf.count;
       array_grow(&console_arena, &geometry_buf, bytes_u32);
       char *pos = geometry_buf.items + offset;
-      snprintf(pos, bytes_u32, fstr, width, height, x, y);
+      snprintf(pos, bytes_u32, fstr_rect, width, height, x, y);
       setup_screen(pos, bytes_u32, layout);
       assert(geometry_buf.items[geometry_buf.count - 1] == '\0');
       geometry_buf.items[geometry_buf.count - 1] = ',';
@@ -3996,51 +3998,116 @@ static void cmd_store_executor(void) {
   if (geometry_buf.count > 0) geometry_buf.items[--geometry_buf.count] = '\0';
   FILE *file = NULL;
   int32_t err = 0;
+  char *buf = NULL;
+  uint32_t buf_bytes = 0;
+  const char fstr_name[] = "name = %s" CRLF;
+  const char fstr_screen[] = "screen = %s" CRLF;
   if (!try_overwrite) goto append;
   size_t scope_line = layout->scope_line;
-  uint32_t name_len = layout->len;
-  err = fopen_s(&file, CIN_CONF_FILENAME, "rt");
+  uint32_t name_len = layout->len - 1;
+  err = fopen_s(&file, CIN_CONF_FILENAME, "rb");
   if (err) {
     log_fopen_error(CIN_CONF_FILENAME, err);
   } else {
     fseek(file, 0, SEEK_END);
-    long bytes = ftell(file);
+    assert(ftell(file) > 0);
+    buf_bytes = (uint32_t)ftell(file);
     rewind(file);
-    char *buf = arena_bump_T(&console_arena, char, (uint32_t)bytes + 1U);
-    fread(buf, 1, bytes, file);
+    buf = arena_bump_T(&console_arena, char, buf_bytes);
+    fread(buf, 1, buf_bytes, file);
     fclose(file);
     const char *p = buf;
-    const char *tail = buf + bytes;
+    const char *tail = buf + buf_bytes;
     size_t bottom_line = 1;
-    while (bottom_line < scope_line && (p = memchr(p, '\n', tail - p))) {
+    while (bottom_line < scope_line && (p = memchr(p, '\n', (size_t)(tail - p)))) {
       ++p;
       ++bottom_line;
     }
     const char *overwrite_start = p;
     if (!p || memcmp(p, "[layout]", cin_strlen("[layout]")) != 0) goto append;
-    do p = memchr(p, '\n', tail - p);
+    do p = memchr(p, '\n', (size_t)(tail - p));
     while (p && memcmp(++p, "name", cin_strlen("name")) != 0);
     if (!p) goto append;
+    p += cin_strlen("name");
     while (*p == ' ') ++p;
     if (*p != '=') goto append;
+    ++p;
     while (*p == ' ') ++p;
     if (memcmp(p, name, name_len) != 0) goto append;
     p += name_len;
-    if (*p && *p != '\n') goto append;
+    if (*p && *p != '\r') goto append;
     while (*p && *p != '[') ++p;
     const char *overwrite_end = p;
-    ptrdiff_t overwrite_bytes = overwrite_end - overwrite_start;
-    // TODO: overwrite
+    size_t leftover_bytes = (size_t)(tail - overwrite_end);
+    size_t overwrite_bytes = (size_t)(overwrite_end - overwrite_start);
+    p = memchr(overwrite_start, '\n', overwrite_bytes);
+    int32_t name_bytes = sprintf((char *)++p, fstr_name, name);
+    p += name_bytes;
+    ptrdiff_t remainder = overwrite_end - p;
+    int32_t screen_bytes = snprintf(NULL, 0, fstr_screen, geometry_buf.items) + 1;
+    uint32_t required_bytes = buf_bytes;
+    if (remainder >= (ptrdiff_t)screen_bytes) {
+      snprintf((char *)p, (size_t)screen_bytes, fstr_screen, geometry_buf.items);
+      p += screen_bytes - 1;
+      char *empty = (char *)p;
+      if (*++p == '\n') {
+        *empty++ = '\r';
+        ++empty;
+        ++p;
+      }
+      while (p < overwrite_end) {
+        assert(*p != '\n');
+        if (*p == '\r') {
+          *empty++ = '\r';
+          *empty++ = '\n';
+          ++p;
+        }
+        ++p;
+      }
+      p = empty;
+      memmove((char *)p, overwrite_end, leftover_bytes);
+    } else {
+      uint32_t overwrite_offset = 0;
+      if (*(overwrite_end - 1) == '\n') overwrite_offset = 2;
+      size_t p_pos = (size_t)(p - buf);
+      uint32_t diff = (uint32_t)screen_bytes - (uint32_t)remainder;
+      required_bytes = buf_bytes + diff + overwrite_offset;
+      const char *prev = buf;
+      buf = arena_bump_T(&console_arena, char, required_bytes);
+      memcpy(buf, prev, p_pos);
+      p = buf + p_pos;
+      snprintf((char *)p, (size_t)screen_bytes, fstr_screen, geometry_buf.items);
+      p += screen_bytes - 1;
+      memmove((char *)p, overwrite_end - overwrite_offset, leftover_bytes + overwrite_offset);
+      arena_free_pos(&console_arena, (uint8_t *)prev, buf_bytes);
+    }
+    p += leftover_bytes;
+    size_t total_bytes = (size_t)(p - buf);
+    err = fopen_s(&file, CIN_CONF_FILENAME, "wb");
+    if (err) {
+      log_fopen_error(CIN_CONF_FILENAME, err);
+    } else {
+      fwrite(buf, 1, total_bytes, file);
+      fclose(file);
+    }
+    arena_free_pos(&console_arena, (uint8_t *)buf, required_bytes);
     return;
   }
 append:
-  err = fopen_s(&file, CIN_CONF_FILENAME, "a");
+  if (buf) arena_free_pos(&console_arena, (uint8_t *)buf, buf_bytes + 1U);
+  scope_line = 1;
+  err = fopen_s(&file, CIN_CONF_FILENAME, "ab+");
   if (err) {
     log_fopen_error(CIN_CONF_FILENAME, err);
   } else {
-    fprintf(file, "[layout]\n");
-    fprintf(file, "name = %s\n", name);
-    fprintf(file, "screen = %s\n", geometry_buf.items);
+    rewind(file);
+    int32_t c;
+    while ((c = fgetc(file)) != EOF)
+      if (c == '\n') ++scope_line;
+    layout->scope_line = scope_line;
+    fprintf(file, "[layout]" CRLF);
+    fprintf(file, fstr_name, name);
+    fprintf(file, fstr_screen, geometry_buf.items);
     fclose(file);
   }
   return;
