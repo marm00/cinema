@@ -2400,9 +2400,9 @@ static inline void setup_pattern(const char *pattern, TagPatternItems *tag_patte
 }
 
 static inline void setup_url(const char *url, TagUrlItems *tag_url_items) {
-  int32_t len_utf16 = utf8_to_utf16_norm(url);
+  int32_t len_utf16 = utf8_to_utf16_raw(url);
   assert(len_utf16);
-  int32_t len_utf8 = utf16_to_utf8(utf16_buf_norm.items);
+  int32_t len_utf8 = utf16_to_utf8(utf16_buf_raw.items);
   table_key_pos tail_offset = array_bytes(&docs);
   int32_t tail_doc = (int32_t)tail_offset;
   docs_append(utf8_buf.items, len_utf8);
