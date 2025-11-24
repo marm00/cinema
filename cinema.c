@@ -1952,6 +1952,7 @@ static inline bool conf_keycmp(char *k, Conf_Scope_Type type, Conf_Key *out, boo
 }
 
 static inline bool conf_keyget(void) {
+  // TODO: chatterino
   switch (conf_parser.k_len) {
   case 11:
     if (conf_keycmp("directories", CONF_SCOPE_MEDIA, &conf_scope()->media.directories, false)) return true;
