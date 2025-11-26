@@ -1859,6 +1859,7 @@ typedef struct Conf_Media {
 typedef struct Conf_Layout {
   Conf_Key name;
   Conf_Key screen;
+  Conf_Key chat;
 } Conf_Layout;
 
 typedef enum {
@@ -1967,6 +1968,7 @@ static inline bool conf_keyget(void) {
     if (conf_keycmp("urls", CONF_SCOPE_MEDIA, &conf_scope()->media.urls, false)) return true;
     if (conf_keycmp("tags", CONF_SCOPE_MEDIA, &conf_scope()->media.tags, false)) return true;
     if (conf_keycmp("name", CONF_SCOPE_LAYOUT, &conf_scope()->layout.name, true)) return true;
+    if (conf_keycmp("chat", CONF_SCOPE_LAYOUT, &conf_scope()->layout.chat, true)) return true;
     break;
   default:
     break;
