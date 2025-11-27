@@ -1319,36 +1319,36 @@ static int rmq(int **m, const int left, const int right) {
   return min(m[left][k], m[right_start][k]);
 }
 
-typedef struct RMQPosition {
+typedef struct RMQ_Position {
   int32_t value;
   int32_t index;
-} RMQPosition;
+} RMQ_Position;
 
-static RMQPosition **rmqa_positional(const int32_t *a, const int32_t n) {
-  RMQPosition **m = malloc((size_t)n * sizeof(RMQPosition *));
+static RMQ_Position **rmqa_positional(const int32_t *a, const int32_t n) {
+  RMQ_Position **m = malloc((size_t)n * sizeof(RMQ_Position *));
   int log_n = 31 - __builtin_clz((unsigned int)n);
   for (int i = 0; i < n; ++i) {
-    m[i] = malloc((size_t)log_n * sizeof(RMQPosition));
+    m[i] = malloc((size_t)log_n * sizeof(RMQ_Position));
   }
   for (int i = 0; i < n; ++i) {
-    m[i][0] = (RMQPosition){.value = a[i], .index = i};
+    m[i][0] = (RMQ_Position){.value = a[i], .index = i};
   }
   for (int k = 1; k < log_n; ++k) {
     for (int i = 0; i + (1 << k) - 1 < n; ++i) {
-      RMQPosition left = m[i][k - 1];
-      RMQPosition right = m[i + (1 << (k - 1))][k - 1];
+      RMQ_Position left = m[i][k - 1];
+      RMQ_Position right = m[i + (1 << (k - 1))][k - 1];
       m[i][k] = left.value < right.value ? left : right;
     }
   }
   return m;
 }
 
-static RMQPosition rmq_positional(RMQPosition **m, const int left, const int right) {
+static RMQ_Position rmq_positional(RMQ_Position **m, const int left, const int right) {
   int length = right - left + 1;
   int k = 31 - __builtin_clz((unsigned int)length);
   int right_start = right - (1 << k) + 1;
-  RMQPosition min_left = m[left][k];
-  RMQPosition min_right = m[right_start][k];
+  RMQ_Position min_left = m[left][k];
+  RMQ_Position min_right = m[right_start][k];
   return min_left.value < min_right.value ? min_left : min_right;
 }
 
@@ -1356,16 +1356,16 @@ static RMQPosition rmq_positional(RMQPosition **m, const int left, const int rig
 
 typedef void (*patricia_fn)(void);
 
-typedef struct PatriciaNode {
-  struct PatriciaNode *edges[COMMAND_ALPHABET];
+typedef struct Patricia_Node {
+  struct Patricia_Node *edges[COMMAND_ALPHABET];
   const wchar_t *suffix;
   size_t len;
   patricia_fn fn;
   int32_t min;
-} PatriciaNode;
+} Patricia_Node;
 
-static inline PatriciaNode *patricia_node(const wchar_t *suffix, size_t len) {
-  PatriciaNode *node = arena_bump_T1(&console_arena, PatriciaNode);
+static inline Patricia_Node *patricia_node(const wchar_t *suffix, size_t len) {
+  Patricia_Node *node = arena_bump_T1(&console_arena, Patricia_Node);
   assert(node);
   node->suffix = suffix;
   node->len = len;
@@ -1378,16 +1378,16 @@ static inline size_t patricia_lcp(const wchar_t *a, const wchar_t *b, size_t max
   return i;
 }
 
-static inline patricia_fn patricia_query(PatriciaNode *root, const wchar_t *pattern) {
+static inline patricia_fn patricia_query(Patricia_Node *root, const wchar_t *pattern) {
   assert(root);
   assert(wcslen(pattern) > 0);
   assert((*pattern >= L'a' && *pattern <= L'z'));
-  PatriciaNode *node = root;
+  Patricia_Node *node = root;
   const wchar_t *p = pattern;
   while (*p) {
     assert((*p >= L'a' && *p <= L'z'));
     int32_t i = *p - L'a';
-    PatriciaNode *edge = node->edges[i];
+    Patricia_Node *edge = node->edges[i];
     if (edge == NULL) {
       return NULL;
     }
@@ -1404,16 +1404,16 @@ static inline patricia_fn patricia_query(PatriciaNode *root, const wchar_t *patt
   return node->fn;
 }
 
-static inline void patricia_insert(PatriciaNode *root, const wchar_t *str, patricia_fn fn) {
+static inline void patricia_insert(Patricia_Node *root, const wchar_t *str, patricia_fn fn) {
   assert(root);
   assert(wcslen(str) > 0);
   assert((*str >= L'a' && *str <= L'z'));
-  PatriciaNode *node = root;
+  Patricia_Node *node = root;
   const wchar_t *p = str;
   while (*p) {
     assert((*p >= L'a' && *p <= L'z'));
     int32_t i = *p - L'a';
-    PatriciaNode *edge = node->edges[i];
+    Patricia_Node *edge = node->edges[i];
     if (edge == NULL) {
       edge = patricia_node(p, wcslen(p));
       edge->fn = fn;
@@ -1435,7 +1435,7 @@ static inline void patricia_insert(PatriciaNode *root, const wchar_t *str, patri
       }
       node = edge;
     } else {
-      PatriciaNode *split = patricia_node(edge->suffix, common);
+      Patricia_Node *split = patricia_node(edge->suffix, common);
       edge->suffix += common;
       edge->len -= common;
       node->edges[i] = split;
@@ -1445,7 +1445,7 @@ static inline void patricia_insert(PatriciaNode *root, const wchar_t *str, patri
         split->min = -1;
         split->fn = fn;
       } else {
-        PatriciaNode *remainder = patricia_node(p, wcslen(p));
+        Patricia_Node *remainder = patricia_node(p, wcslen(p));
         remainder->fn = fn;
         int32_t edge_i = edge->suffix[0] - L'a';
         int32_t next_i = *p - L'a';
@@ -1469,29 +1469,29 @@ typedef void *radix_v;
 typedef enum {
   RADIX_LEAF,
   RADIX_INTERNAL
-} RadixNodeType;
+} Radix_Node_Type;
 
-typedef struct RadixNode {
-  RadixNodeType type;
+typedef struct Radix_Node {
+  Radix_Node_Type type;
   radix_v v;
-} RadixNode;
+} Radix_Node;
 
-typedef struct RadixLeaf {
-  RadixNode base;
+typedef struct Radix_Leaf {
+  Radix_Node base;
   const uint8_t *key;
   size_t len;
-} RadixLeaf;
+} Radix_Leaf;
 
-typedef struct RadixInternal {
-  RadixNode base;
+typedef struct Radix_Internal {
+  Radix_Node base;
   size_t critical;
   uint8_t bitmask;
-  RadixNode *child[2];
-} RadixInternal;
+  Radix_Node *child[2];
+} Radix_Internal;
 
-typedef struct RadixTree {
-  RadixNode *root;
-} RadixTree;
+typedef struct Radix_Tree {
+  Radix_Node *root;
+} Radix_Tree;
 
 static inline int32_t radix_bit(const uint8_t *key, size_t len, size_t critical, uint8_t bitmask) {
   return critical < len && key[critical] & bitmask;
@@ -1518,8 +1518,8 @@ static inline void radix_critical(const uint8_t *k1, size_t len1,
   *bitmask = 0x80;
 }
 
-static inline RadixLeaf *radix_leaf(const uint8_t *key, size_t len, radix_v v) {
-  RadixLeaf *leaf = arena_bump_T1(&console_arena, RadixLeaf);
+static inline Radix_Leaf *radix_leaf(const uint8_t *key, size_t len, radix_v v) {
+  Radix_Leaf *leaf = arena_bump_T1(&console_arena, Radix_Leaf);
   assert(leaf);
   leaf->base.type = RADIX_LEAF;
   leaf->base.v = v;
@@ -1533,8 +1533,8 @@ static inline RadixLeaf *radix_leaf(const uint8_t *key, size_t len, radix_v v) {
   return leaf;
 }
 
-static inline RadixInternal *radix_internal(size_t critical, uint8_t bitmask) {
-  RadixInternal *node = arena_bump_T1(&console_arena, RadixInternal);
+static inline Radix_Internal *radix_internal(size_t critical, uint8_t bitmask) {
+  Radix_Internal *node = arena_bump_T1(&console_arena, Radix_Internal);
   assert(node);
   node->base.type = RADIX_INTERNAL;
   node->base.v = NULL;
@@ -1554,19 +1554,19 @@ static inline int32_t radix_compare(const uint8_t *k1, size_t len1, const uint8_
   return 0;
 }
 
-static inline void radix_update(RadixInternal *internal) {
-  RadixNode *bit0 = internal->child[0];
-  RadixNode *bit1 = internal->child[1];
+static inline void radix_update(Radix_Internal *internal) {
+  Radix_Node *bit0 = internal->child[0];
+  Radix_Node *bit1 = internal->child[1];
   if (bit0 && bit1) {
-    RadixLeaf *leaf0 = (RadixLeaf *)bit0;
-    RadixLeaf *leaf1 = (RadixLeaf *)bit1;
+    Radix_Leaf *leaf0 = (Radix_Leaf *)bit0;
+    Radix_Leaf *leaf1 = (Radix_Leaf *)bit1;
     while (leaf0->base.type == RADIX_INTERNAL) {
-      RadixInternal *int0 = (RadixInternal *)leaf0;
-      leaf0 = (RadixLeaf *)(int0->child[0] ? int0->child[0] : int0->child[1]);
+      Radix_Internal *int0 = (Radix_Internal *)leaf0;
+      leaf0 = (Radix_Leaf *)(int0->child[0] ? int0->child[0] : int0->child[1]);
     }
     while (leaf1->base.type == RADIX_INTERNAL) {
-      RadixInternal *int1 = (RadixInternal *)leaf1;
-      leaf1 = (RadixLeaf *)(int1->child[0] ? int1->child[0] : int1->child[1]);
+      Radix_Internal *int1 = (Radix_Internal *)leaf1;
+      leaf1 = (Radix_Leaf *)(int1->child[0] ? int1->child[0] : int1->child[1]);
     }
     if (radix_compare(leaf0->key, leaf0->len, leaf1->key, leaf1->len) < 0) {
       internal->base.v = internal->child[0]->v;
@@ -1580,40 +1580,40 @@ static inline void radix_update(RadixInternal *internal) {
   }
 }
 
-static inline RadixTree *radix_tree(void) {
-  RadixTree *tree = arena_bump_T1(&console_arena, RadixTree);
+static inline Radix_Tree *radix_tree(void) {
+  Radix_Tree *tree = arena_bump_T1(&console_arena, Radix_Tree);
   assert(tree);
   tree->root = NULL;
   return tree;
 }
 
-static inline void radix_insert(RadixTree *tree, const uint8_t *key, size_t len, radix_v v) {
+static inline void radix_insert(Radix_Tree *tree, const uint8_t *key, size_t len, radix_v v) {
   assert(tree);
   assert(key);
   if (!tree->root) {
-    tree->root = (RadixNode *)radix_leaf(key, len, v);
+    tree->root = (Radix_Node *)radix_leaf(key, len, v);
     return;
   }
-  RadixNode **parent = &tree->root;
-  RadixNode *node = tree->root;
+  Radix_Node **parent = &tree->root;
+  Radix_Node *node = tree->root;
   while (node->type == RADIX_INTERNAL) {
-    RadixInternal *internal = (RadixInternal *)node;
+    Radix_Internal *internal = (Radix_Internal *)node;
     int32_t bit = radix_bit(key, len, internal->critical, internal->bitmask);
     parent = &internal->child[bit];
     node = internal->child[bit];
     if (!node) {
-      *parent = (RadixNode *)radix_leaf(key, len, v);
+      *parent = (Radix_Node *)radix_leaf(key, len, v);
       radix_update(internal);
-      RadixNode *curr = tree->root;
+      Radix_Node *curr = tree->root;
       if (curr && curr->type == RADIX_INTERNAL) {
         // set lexicographical minimum
-        radix_update((RadixInternal *)curr);
+        radix_update((Radix_Internal *)curr);
       }
       return;
     }
   }
   // split leaf node
-  RadixLeaf *leaf = (RadixLeaf *)node;
+  Radix_Leaf *leaf = (Radix_Leaf *)node;
   if (len == leaf->len && memcmp(key, leaf->key, len) == 0) {
     leaf->base.v = v;
     return;
@@ -1621,30 +1621,30 @@ static inline void radix_insert(RadixTree *tree, const uint8_t *key, size_t len,
   size_t critical;
   uint8_t bitmask;
   radix_critical(key, len, leaf->key, leaf->len, &critical, &bitmask);
-  RadixInternal *new_internal = radix_internal(critical, bitmask);
+  Radix_Internal *new_internal = radix_internal(critical, bitmask);
   int32_t new_bit = radix_bit(key, len, critical, bitmask);
   int32_t old_bit = radix_bit(leaf->key, leaf->len, critical, bitmask);
-  RadixLeaf *new_leaf = radix_leaf(key, len, v);
-  new_internal->child[new_bit] = (RadixNode *)new_leaf;
-  new_internal->child[old_bit] = (RadixNode *)leaf;
+  Radix_Leaf *new_leaf = radix_leaf(key, len, v);
+  new_internal->child[new_bit] = (Radix_Node *)new_leaf;
+  new_internal->child[old_bit] = (Radix_Node *)leaf;
   radix_update(new_internal);
-  *parent = (RadixNode *)new_internal;
+  *parent = (Radix_Node *)new_internal;
 }
 
-static inline radix_v radix_query(RadixTree *tree, const uint8_t *pattern, size_t len, const uint8_t **out) {
+static inline radix_v radix_query(Radix_Tree *tree, const uint8_t *pattern, size_t len, const uint8_t **out) {
   assert(tree);
   assert(pattern);
-  RadixNode *node = tree->root;
+  Radix_Node *node = tree->root;
   while (node) {
     if (node->type == RADIX_LEAF) {
-      RadixLeaf *leaf = (RadixLeaf *)node;
+      Radix_Leaf *leaf = (Radix_Leaf *)node;
       if (leaf->len >= len && memcmp(leaf->key, pattern, len) == 0) {
         if (out) *out = leaf->key;
         return leaf->base.v;
       }
       return NULL;
     }
-    RadixInternal *internal = (RadixInternal *)node;
+    Radix_Internal *internal = (Radix_Internal *)node;
     int32_t bit = radix_bit(pattern, len, internal->critical, internal->bitmask);
     node = internal->child[bit];
   }
@@ -2132,19 +2132,19 @@ static void docs_append(uint8_t *utf8, int32_t len) {
   ++docs.doc_count;
 }
 
-typedef struct DirectoryNode {
+typedef struct Directory_Node {
   array_struct_members(int32_t);
   uint32_t str_offset;
-} DirectoryNode;
+} Directory_Node;
 
-typedef struct DirectoryPath {
+typedef struct Directory_Path {
   wchar_t path[CIN_MAX_PATH];
   size_t len;
-} DirectoryPath;
+} Directory_Path;
 
-array_define(TagDirectories, int32_t);
-array_define(TagPatternItems, int32_t);
-array_define(TagUrlItems, int32_t);
+array_define(Tag_Directories, int32_t);
+array_define(Tag_Pattern_Items, int32_t);
+array_define(Tag_Url_Items, int32_t);
 
 typedef struct Playlist {
   array_struct_members(int32_t);
@@ -2169,12 +2169,12 @@ struct Media {
   Hidden_Table hidden_table;
 } media = {0};
 
-typedef struct TagItems {
+typedef struct Tag_Items {
   Playlist *playlist;
-  TagDirectories *directories;
-  TagPatternItems *pattern_items;
-  TagUrlItems *url_items;
-} TagItems;
+  Tag_Directories *directories;
+  Tag_Pattern_Items *pattern_items;
+  Tag_Url_Items *url_items;
+} Tag_Items;
 
 typedef struct Cin_Screen {
   uint32_t offset;
@@ -2189,12 +2189,12 @@ typedef struct Cin_Layout {
 } Cin_Layout;
 
 static struct {
-  array_struct_members(DirectoryPath);
+  array_struct_members(Directory_Path);
   uint32_t abs_count;
 } dir_stack = {0};
 
 static array_struct(uint8_t) directory_strings = {0};
-static array_struct(DirectoryNode) directory_nodes = {0};
+static array_struct(Directory_Node) directory_nodes = {0};
 static array_struct(uint8_t) layout_strings = {0};
 static array_struct(uint8_t) screen_strings = {0};
 static array_struct(char) geometry_buf = {0};
@@ -2210,18 +2210,18 @@ static array_struct(char) geometry_buf = {0};
 static Robin_Hood_Table dir_table = {0};
 static Robin_Hood_Table pat_table = {0};
 static Robin_Hood_Table url_table = {0};
-static RadixTree *tag_tree = NULL;
-static RadixTree *layout_tree = NULL;
+static Radix_Tree *tag_tree = NULL;
+static Radix_Tree *layout_tree = NULL;
 
-static void setup_directory(const char *path, TagDirectories *tag_dirs) {
+static void setup_directory(const char *path, Tag_Directories *tag_dirs) {
   int32_t len_utf16 = utf8_to_utf16_norm(path);
   assert(len_utf16);
   size_t len = (size_t)len_utf16;
-  DirectoryPath root_dir = {.len = len};
+  Directory_Path root_dir = {.len = len};
   wmemcpy(root_dir.path, utf16_buf_norm.items, len);
   array_push(&console_arena, &dir_stack, root_dir);
   while (dir_stack.count > 0) {
-    DirectoryPath dir = dir_stack.items[--dir_stack.count];
+    Directory_Path dir = dir_stack.items[--dir_stack.count];
     log_wmessage(LOG_DEBUG, L"Path: %ls", dir.path);
     assert(dir.path);
     assert(dir.len > 0);
@@ -2272,7 +2272,7 @@ static void setup_directory(const char *path, TagDirectories *tag_dirs) {
     // Commit the new directory
     array_grow(&console_arena, &directory_strings, bytes);
     array_grow(&console_arena, &directory_nodes, 1);
-    DirectoryNode *node = &directory_nodes.items[node_tail];
+    Directory_Node *node = &directory_nodes.items[node_tail];
     assert(node);
     array_init(&console_arena, node, CIN_DIRECTORY_ITEMS_CAP);
     node->str_offset = str_offset;
@@ -2296,7 +2296,7 @@ static void setup_directory(const char *path, TagDirectories *tag_dirs) {
         continue; // skip absolute path (+ NUL) if silently truncated
       }
       if (is_dir) {
-        DirectoryPath nested_path = {.len = path_len};
+        Directory_Path nested_path = {.len = path_len};
         wmemcpy(nested_path.path, dir.path, dir.len);
         wmemcpy(nested_path.path + dir.len, file, file_len);
         assert(nested_path.path[nested_path.len - 1] == L'\0');
@@ -2319,7 +2319,7 @@ static void setup_directory(const char *path, TagDirectories *tag_dirs) {
   assert(dir_stack.count == 0);
 }
 
-static inline void setup_pattern(const char *pattern, TagPatternItems *tag_pattern_items) {
+static inline void setup_pattern(const char *pattern, Tag_Pattern_Items *tag_pattern_items) {
   // Processes all files (not directories) that match the pattern
   // https://support.microsoft.com/en-us/office/examples-of-wildcard-characters-939e153f-bd30-47e4-a763-61897c87b3f4
   // TODO: explain allowed patterns (e.g., wildcards) in readme/json examples
@@ -2402,7 +2402,7 @@ static inline void setup_pattern(const char *pattern, TagPatternItems *tag_patte
   FindClose(search);
 }
 
-static inline void setup_url(const char *url, TagUrlItems *tag_url_items) {
+static inline void setup_url(const char *url, Tag_Url_Items *tag_url_items) {
   int32_t len_utf16 = utf8_to_utf16_raw(url);
   assert(len_utf16);
   int32_t len_utf8 = utf16_to_utf8(utf16_buf_raw.items);
@@ -2424,7 +2424,7 @@ static inline void setup_url(const char *url, TagUrlItems *tag_url_items) {
   }
 }
 
-static inline void setup_tag(const char *tag, TagItems *tag_items) {
+static inline void setup_tag(const char *tag, Tag_Items *tag_items) {
   int32_t len_utf16 = utf8_to_utf16_norm(tag);
   assert(len_utf16);
   int32_t len_utf8 = utf16_to_utf8(utf16_buf_norm.items);
@@ -2502,24 +2502,24 @@ static bool init_config(const char *filename) {
       array_free_items(&console_arena, &scope->layout.screen);
     } break;
     case CONF_SCOPE_MEDIA: {
-      TagItems *tag_items = NULL;
-      TagDirectories *tag_directories = NULL;
-      TagPatternItems *tag_pattern_items = NULL;
-      TagUrlItems *tag_url_items = NULL;
+      Tag_Items *tag_items = NULL;
+      Tag_Directories *tag_directories = NULL;
+      Tag_Pattern_Items *tag_pattern_items = NULL;
+      Tag_Url_Items *tag_url_items = NULL;
       if (scope->media.tags.count) {
-        tag_items = arena_bump_T1(&console_arena, TagItems);
+        tag_items = arena_bump_T1(&console_arena, Tag_Items);
         if (scope->media.directories.count) {
-          tag_items->directories = arena_bump_T1(&console_arena, TagDirectories);
+          tag_items->directories = arena_bump_T1(&console_arena, Tag_Directories);
           array_init(&console_arena, tag_items->directories, CIN_DIRECTORIES_CAP);
           tag_directories = tag_items->directories;
         }
         if (scope->media.patterns.count) {
-          tag_items->pattern_items = arena_bump_T1(&console_arena, TagPatternItems);
+          tag_items->pattern_items = arena_bump_T1(&console_arena, Tag_Pattern_Items);
           array_init(&console_arena, tag_items->pattern_items, scope->media.patterns.count);
           tag_pattern_items = tag_items->pattern_items;
         }
         if (scope->media.urls.count) {
-          tag_items->url_items = arena_bump_T1(&console_arena, TagUrlItems);
+          tag_items->url_items = arena_bump_T1(&console_arena, Tag_Url_Items);
           array_init(&console_arena, tag_items->url_items, scope->media.urls.count);
           tag_url_items = tag_items->url_items;
         }
@@ -2541,9 +2541,9 @@ static bool init_config(const char *filename) {
         setup_tag(part, tag_items);
       }
       // NOTE: Each tag corresponding to this media scope now points to the same
-      // TagItems address. In it, 'patterns' and 'urls' contain document ids (possibly
-      // with duplicates). Its 'directories' is a TagDirectories struct, where each
-      // item is an index into a global DirectoryNode arena (possibly with duplicates)
+      // Tag_Items address. In it, 'patterns' and 'urls' contain document ids (possibly
+      // with duplicates). Its 'directories' is a Tag_Directories struct, where each
+      // item is an index into a global Directory_Node arena (possibly with duplicates)
       // - these nodes contain a list of unique document ids. Given example directory
       // A:\b\c\, the node arena must be traversed starting there up to an index where
       // the first document in the list does not start with A:\b\c\ (so we simulate
@@ -2760,23 +2760,23 @@ typedef enum {
   MPV_QUIT
 } MPV_Packet;
 
-typedef struct OverlappedContext {
+typedef struct Overlapped_Context {
   OVERLAPPED ovl;
   MPV_Packet type;
-} OverlappedContext;
+} Overlapped_Context;
 
-typedef struct OverlappedWrite {
-  OverlappedContext ovl_ctx;
+typedef struct Overlapped_Write {
+  Overlapped_Context ovl_ctx;
   char buf[CIN_WRITE_SIZE];
   size_t bytes;
-  cache_node_struct_members(OverlappedWrite);
-} OverlappedWrite;
+  cache_node_struct_members(Overlapped_Write);
+} Overlapped_Write;
 
-typedef struct ReadBuffer {
+typedef struct Read_Buffer {
   char buf[CIN_READ_SIZE];
   size_t bytes;
-  struct ReadBuffer *next;
-} ReadBuffer;
+  struct Read_Buffer *next;
+} Read_Buffer;
 
 typedef struct Console_Timer_Ctx {
   PTP_TIMER timer;
@@ -2786,10 +2786,10 @@ typedef struct Console_Timer_Ctx {
 } Console_Timer_Ctx;
 
 typedef struct Instance {
-  OverlappedContext ovl_ctx;
+  Overlapped_Context ovl_ctx;
   HANDLE pipe;
-  ReadBuffer *buf_head;
-  ReadBuffer *buf_tail;
+  Read_Buffer *buf_head;
+  Read_Buffer *buf_tail;
   STARTUPINFOW si;
   PROCESS_INFORMATION pi;
   HWND window;
@@ -2802,7 +2802,7 @@ typedef struct Instance {
   cache_node_struct_members(Instance);
 } Instance;
 
-cache_define(Write_Cache, OverlappedWrite);
+cache_define(Write_Cache, Overlapped_Write);
 cache_define(Instance_Cache, Instance);
 
 static struct {
@@ -2869,7 +2869,7 @@ static bool overlap_read(Instance *instance) {
 #define CIN_WRITE_CMD_2ARG (CIN_WRITE_CMD_LEFT CIN_WRITE_CMD_MID CIN_WRITE_CMD_MID CIN_WRITE_CMD_RIGHT)
 
 static bool overlap_write(Instance *instance, MPV_Packet type, const char *cmd, const char *arg1, const char *arg2) {
-  OverlappedWrite *write = NULL;
+  Overlapped_Write *write = NULL;
   cache_get_zero(&io_arena, &cin_io.writes, write);
   write->ovl_ctx.type = type;
   int64_t request_id = (int64_t)(uintptr_t)write;
@@ -2987,8 +2987,8 @@ static inline void mpv_kill(Instance *instance) {
   assert(instance->pipe);
   assert(instance->playlist);
   --instance->playlist->targets;
-  ReadBuffer *buf_head = instance->buf_head;
-  ReadBuffer *buf_tail = instance->buf_tail;
+  Read_Buffer *buf_head = instance->buf_head;
+  Read_Buffer *buf_tail = instance->buf_tail;
   Instance *next = instance->next;
   ZeroMemory(instance, sizeof(Instance));
   playlist_set_default(instance);
@@ -3033,7 +3033,7 @@ static inline void iocp_parse(Instance *instance, const char *buf_start, size_t 
     assert(cin_isnum(*p));
     int64_t req_id = *p - '0';
     while (cin_isnum(*++p)) req_id = (req_id * 10) + (*p - '0');
-    OverlappedWrite *write = (OverlappedWrite *)(uintptr_t)req_id;
+    Overlapped_Write *write = (Overlapped_Write *)(uintptr_t)req_id;
     assert(write);
     assert(write->bytes);
     log_message(LOG_DEBUG, "Recovered original write: %p (%zu bytes)", write, write->bytes);
@@ -3076,9 +3076,9 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
       // break;
     }
     Instance *instance = (Instance *)completion_key;
-    OverlappedContext *ctx = (OverlappedContext *)ovl;
+    Overlapped_Context *ctx = (Overlapped_Context *)ovl;
     if (ctx->type != MPV_READ) {
-      OverlappedWrite *write = (OverlappedWrite *)ctx;
+      Overlapped_Write *write = (Overlapped_Write *)ctx;
       if (write->bytes != bytes) {
         log_message(LOG_ERROR, "Expected '%zu' bytes but received '%zu'", write->bytes, bytes);
         // TODO: when observed, resolve instead of break
@@ -3097,13 +3097,13 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
           char *buf = instance->buf_head->buf;
           size_t len = instance->buf_head->bytes;
           if (multi) {
-            for (ReadBuffer *b = instance->buf_head->next; b; b = b->next) {
+            for (Read_Buffer *b = instance->buf_head->next; b; b = b->next) {
               assert(!memchr(b->buf, '\0', b->bytes));
               len += b->bytes;
             }
             char *contiguous_buf = arena_bump_T(&iocp_thread_arena, char, (uint32_t)len);
             size_t offset = 0;
-            for (ReadBuffer *b = instance->buf_head; b != instance->buf_tail; b = b->next) {
+            for (Read_Buffer *b = instance->buf_head; b != instance->buf_tail; b = b->next) {
               assert(b);
               memcpy(contiguous_buf + offset, b->buf, b->bytes);
               offset += b->bytes;
@@ -3135,7 +3135,7 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
           if (multi) arena_free_pos(&iocp_thread_arena, (uint8_t *)buf, (uint32_t)len);
         } else {
           if (instance->buf_tail->next) instance->buf_tail->next->bytes = 0;
-          else instance->buf_tail->next = arena_bump_T1(&iocp_thread_arena, ReadBuffer);
+          else instance->buf_tail->next = arena_bump_T1(&iocp_thread_arena, Read_Buffer);
           instance->buf_tail = instance->buf_tail->next;
         }
       }
@@ -3382,16 +3382,16 @@ static inline bool init_timers(void) {
 #define COMMAND_NUMBERS_CAP 8
 #define COMMAND_ERROR_WMESSAGE L"ERROR: "
 
-typedef PatriciaNode *cmd_trie;
+typedef Patricia_Node *cmd_trie;
 typedef patricia_fn cmd_validator;
 typedef patricia_fn cmd_executor;
 typedef wchar_t *cmd_unicode;
 typedef Cin_Layout *cmd_layout;
-typedef TagItems *cmd_tag;
+typedef Tag_Items *cmd_tag;
 
-array_define(CommandNumbers, size_t);
-array_define(CommandHelp, wchar_t);
-array_define(CommandTargets, wchar_t);
+array_define(Command_Numbers, size_t);
+array_define(Command_Help, wchar_t);
+array_define(Command_Targets, wchar_t);
 
 static struct CommandContext {
   cmd_trie trie;
@@ -3399,10 +3399,10 @@ static struct CommandContext {
   cmd_layout queued_layout;
   cmd_tag tag;
   cmd_executor executor;
-  CommandNumbers numbers;
+  Command_Numbers numbers;
   cmd_unicode unicode;
-  CommandTargets targets;
-  CommandHelp help;
+  Command_Targets targets;
+  Command_Help help;
 } cmd_ctx = {0};
 
 static inline void set_preview(bool success, const wchar_t *format, ...) {
@@ -3523,7 +3523,7 @@ static void mpv_spawn(Instance *instance, size_t index) {
   assert(ok_pipe);
   bool ok_iocp = CreateIoCompletionPort(instance->pipe, cin_io.iocp, (ULONG_PTR)instance, 0) != NULL;
   assert(ok_iocp);
-  instance->buf_head = arena_bump_T1(&io_arena, ReadBuffer);
+  instance->buf_head = arena_bump_T1(&io_arena, Read_Buffer);
   instance->buf_tail = instance->buf_head;
   bool ok_read = overlap_read(instance);
   assert(ok_read);
@@ -3620,7 +3620,7 @@ static void cmd_tag_executor(void) {
 #pragma omp task priority(8)
 #endif
       {
-        TagDirectories *directories = cmd_ctx.tag->directories;
+        Tag_Directories *directories = cmd_ctx.tag->directories;
         directory_k = deduplicate_i32(arena1, directories->items, directories->count);
         Robin_Hood_Table duplicates = {0};
         table_init(arena1, &duplicates, CIN_DIRECTORIES_CAP);
@@ -3628,7 +3628,7 @@ static void cmd_tag_executor(void) {
         for (size_t i = 0; i < directory_k; ++i) {
           size_t node_index = (size_t)directories->items[i];
           assert(node_index < directory_nodes.count);
-          DirectoryNode *start = &directory_nodes.items[node_index];
+          Directory_Node *start = &directory_nodes.items[node_index];
           table_key_t *start_str = directory_strings.items + start->str_offset;
           size_t start_len = strlen((char *)start_str);
           Table_Key key = {.strings = strings, .pos = start->str_offset, .len = (table_key_len)start_len + 1};
@@ -3637,7 +3637,7 @@ static void cmd_tag_executor(void) {
           log_message(LOG_TRACE, "Tag directory: %s (%zu)", start_str, start_len);
           array_extend(arena1, playlist, start->items, start->count);
           for (size_t j = ++node_index; j < directory_nodes.count; ++j) {
-            DirectoryNode *node = &directory_nodes.items[j];
+            Directory_Node *node = &directory_nodes.items[j];
             if (!node->count) continue;
             table_key_t *str = directory_strings.items + node->str_offset;
             if (strncmp((char *)str, (char *)start_str, start_len) != 0) break;
@@ -3658,7 +3658,7 @@ static void cmd_tag_executor(void) {
 #pragma omp task priority(4)
 #endif
       {
-        TagPatternItems *patterns = cmd_ctx.tag->pattern_items;
+        Tag_Pattern_Items *patterns = cmd_ctx.tag->pattern_items;
         pattern_k = deduplicate_i32(arena2, patterns->items, patterns->count);
       }
     }
@@ -3667,7 +3667,7 @@ static void cmd_tag_executor(void) {
 #pragma omp task priority(2)
 #endif
       {
-        TagUrlItems *urls = cmd_ctx.tag->url_items;
+        Tag_Url_Items *urls = cmd_ctx.tag->url_items;
         url_k = deduplicate_i32(arena3, urls->items, urls->count);
       }
     }
