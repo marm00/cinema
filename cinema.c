@@ -3382,25 +3382,21 @@ static inline bool init_timers(void) {
 #define COMMAND_NUMBERS_CAP 8
 #define COMMAND_ERROR_WMESSAGE L"ERROR: "
 
-typedef Patricia_Node *cmd_trie;
-typedef patricia_fn cmd_validator;
-typedef patricia_fn cmd_executor;
-typedef wchar_t *cmd_unicode;
-typedef Cin_Layout *cmd_layout;
-typedef Tag_Items *cmd_tag;
+typedef void (*cmd_validator)(void);
+typedef void (*cmd_executor)(void);
 
 array_define(Command_Numbers, size_t);
 array_define(Command_Help, wchar_t);
 array_define(Command_Targets, wchar_t);
 
 static struct CommandContext {
-  cmd_trie trie;
-  cmd_layout layout;
-  cmd_layout queued_layout;
-  cmd_tag tag;
+  Patricia_Node *trie;
+  Cin_Layout *layout;
+  Cin_Layout *queued_layout;
+  Tag_Items *tag;
   cmd_executor executor;
   Command_Numbers numbers;
-  cmd_unicode unicode;
+  wchar_t *unicode;
   Command_Targets targets;
   Command_Help help;
 } cmd_ctx = {0};
@@ -3720,7 +3716,7 @@ static void cmd_tag_validator(void) {
   assert(tag_name);
   utf8_to_utf16_raw((char *)tag_name);
   set_preview(true, L"tag '%s' %s", utf16_buf_raw.items, cmd_ctx.targets.items);
-  cmd_ctx.tag = (cmd_tag)tag;
+  cmd_ctx.tag = (Tag_Items *)tag;
   cmd_ctx.executor = cmd_tag_executor;
 }
 
@@ -3964,7 +3960,7 @@ static void cmd_lock_validator(void) {
 }
 
 static void cmd_store_executor(void) {
-  cmd_layout layout = cmd_ctx.queued_layout;
+  Cin_Layout *layout = cmd_ctx.queued_layout;
   char *name = NULL;
   bool try_overwrite = layout != NULL;
   if (try_overwrite) {
@@ -4133,13 +4129,13 @@ static void cmd_store_validator(void) {
       set_preview(true, L"store new layout: '%s'", cmd_ctx.unicode);
     }
   } else {
-    cmd_layout curr = cmd_ctx.layout;
+    Cin_Layout *curr = cmd_ctx.layout;
     char *curr_name = (char *)layout_strings.items + curr->offset;
     utf8_to_utf16_nraw(curr_name, (int32_t)curr->len);
     set_preview(true, L"store layout '%s' (overwrite current)", utf16_buf_raw.items);
     layout = curr;
   }
-  cmd_ctx.queued_layout = (cmd_layout)layout;
+  cmd_ctx.queued_layout = (Cin_Layout *)layout;
   cmd_ctx.executor = cmd_store_executor;
 }
 
@@ -4286,13 +4282,13 @@ static void cmd_layout_validator(void) {
     assert(layout_name);
     set_preview(true, L"change layout to '%s'", utf16_buf_raw.items);
   } else {
-    cmd_layout curr = cmd_ctx.layout;
+    Cin_Layout *curr = cmd_ctx.layout;
     char *curr_name = (char *)layout_strings.items + curr->offset;
     utf8_to_utf16_nraw(curr_name, (int32_t)curr->len);
     set_preview(true, L"reset layout '%s'", utf16_buf_raw.items);
     layout = curr;
   }
-  cmd_ctx.queued_layout = (cmd_layout)layout;
+  cmd_ctx.queued_layout = (Cin_Layout *)layout;
   cmd_ctx.executor = cmd_layout_executor;
 }
 
@@ -4314,7 +4310,7 @@ static bool init_commands(void) {
     log_message(LOG_ERROR, "No layouts found in config file");
     return false;
   }
-  cmd_ctx.layout = (cmd_layout)layout_v;
+  cmd_ctx.layout = (Cin_Layout *)layout_v;
   cmd_ctx.queued_layout = cmd_ctx.layout;
   cmd_ctx.trie = patricia_node(NULL, 0);
   array_init(&console_arena, &cmd_ctx.numbers, COMMAND_NUMBERS_CAP);
