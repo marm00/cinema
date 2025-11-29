@@ -3467,6 +3467,53 @@ static inline bool validate_screens(void) {
   return true;
 }
 
+static wchar_t exe_path_mpv[CIN_MAX_PATH] = {0};
+static wchar_t exe_path_chatterino[CIN_MAX_PATH] = {0};
+
+static bool find_exe(const wchar_t *dir, const wchar_t *exe, wchar_t *buf) {
+  if (SearchPathW(NULL, exe, L".exe", CIN_MAX_PATH, buf, NULL)) return true;
+  const wchar_t *paths[] = {
+      L"C:\\Program Files\\",
+      L"C:\\Program Files (x86)\\",
+      L"%LOCALAPPDATA%\\Programs\\",
+      NULL};
+  size_t dir_len = wcslen(dir);
+  size_t exe_len = wcslen(exe);
+  wchar_t exe_expanded[CIN_MAX_PATH] = {0};
+  wchar_t extension[] = L".exe";
+  for (size_t i = 0; paths[i]; ++i) {
+    size_t buf_offset = 0;
+    DWORD path_len = ExpandEnvironmentStringsW(paths[i], exe_expanded, CIN_MAX_PATH);
+    assert(path_len > 1);
+    if (path_len <= 1) continue;
+    --path_len;
+    wmemcpy(buf + buf_offset, exe_expanded, path_len);
+    buf_offset += path_len;
+    wmemcpy(buf + buf_offset, dir, dir_len);
+    buf_offset += dir_len;
+    buf[buf_offset++] = L'\\';
+    wmemcpy(buf + buf_offset, exe, exe_len);
+    buf_offset += exe_len;
+    wmemcpy(buf + buf_offset, extension, cin_strlen(extension));
+    buf_offset += cin_strlen(extension);
+    buf[buf_offset] = L'\0';
+    DWORD attrs = GetFileAttributesW(buf);
+    if (attrs != INVALID_FILE_ATTRIBUTES) return true;
+  }
+  log_wmessage(LOG_ERROR, L"Failed to find executable '%s'."
+                          L"Please install it or add it to your environment variables.",
+               exe);
+  wmemset(buf, L'\0', CIN_MAX_PATH);
+  return false;
+}
+
+static bool init_executables(void) {
+  if (!find_exe(L"mpv", L"mpv", exe_path_mpv)) return false;
+  find_exe(L"Chatterino", L"chatterino", exe_path_chatterino);
+  // NOTE: See for ytdl: https://mpv.io/manual/stable/#options-ytdl-path
+  return true;
+}
+
 #define CIN_MPVCALL_START L"mpv --idle --config-dir=./ --input-ipc-server="
 #define CIN_MPVCALL_START_LEN cin_strlen(CIN_MPVCALL_START)
 #define CIN_MPVCALL_PIPE L"\\\\.\\pipe\\cinema_mpv_"
@@ -4428,7 +4475,6 @@ static void update_preview(void) {
     validator_fn();
   }
 }
-
 int main(int argc, char **argv) {
   (void)argc;
   (void)argv;
@@ -4439,11 +4485,12 @@ int main(int argc, char **argv) {
   if (!init_os()) exit(1);
   if (!init_repl()) exit(1);
   if (!InitializeCriticalSectionAndSpinCount(&log_lock, 0)) exit(1);
-  if (!init_timers()) exit(1);
   if (!init_config(CIN_CONF_FILENAME)) exit(1);
   if (!init_commands()) exit(1);
+  if (!init_executables()) exit(1);
   if (!init_documents()) exit(1);
   if (!init_mpv()) exit(1);
+  if (!init_timers()) exit(1);
   mpv_lock();
   mpv_spawn(cin_io.instances.head, 0);
   cmd_reroll_validator();
