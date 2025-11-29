@@ -3471,7 +3471,8 @@ static wchar_t exe_path_mpv[CIN_MAX_PATH] = {0};
 static wchar_t exe_path_chatterino[CIN_MAX_PATH] = {0};
 
 static bool find_exe(const wchar_t *dir, const wchar_t *exe, wchar_t *buf) {
-  if (SearchPathW(NULL, exe, L".exe", CIN_MAX_PATH, buf, NULL)) return true;
+  const wchar_t extension[] = L".exe";
+  if (SearchPathW(NULL, exe, extension, CIN_MAX_PATH, buf, NULL)) return true;
   const wchar_t *paths[] = {
       L"C:\\Program Files\\",
       L"C:\\Program Files (x86)\\",
@@ -3480,7 +3481,6 @@ static bool find_exe(const wchar_t *dir, const wchar_t *exe, wchar_t *buf) {
   size_t dir_len = wcslen(dir);
   size_t exe_len = wcslen(exe);
   wchar_t exe_expanded[CIN_MAX_PATH] = {0};
-  wchar_t extension[] = L".exe";
   for (size_t i = 0; paths[i]; ++i) {
     size_t buf_offset = 0;
     DWORD path_len = ExpandEnvironmentStringsW(paths[i], exe_expanded, CIN_MAX_PATH);
@@ -3549,13 +3549,11 @@ static void mpv_spawn(Instance *instance, size_t index) {
   STARTUPINFOW si = {0};
   si.cb = sizeof(si);
   PROCESS_INFORMATION pi = {0};
-  if (!CreateProcessW(NULL, mpv_command, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+  if (!CreateProcessW(exe_path_mpv, mpv_command, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
     if (GetLastError() == ERROR_FILE_NOT_FOUND) {
-      // TODO: link to somewhere to get the binary
-      // TODO: check for yt-dlp binary for streams
-      log_last_error("Failed to find mpv binary");
+      log_last_error("Failed to find mpv executable");
     } else {
-      log_last_error("Failed to start mpv even though it was found");
+      log_last_error("Failed to start mpv executable even though it was found");
     }
     assert(false);
   }
