@@ -997,6 +997,15 @@ static inline bool cin_wisnum_1based(wchar_t c) {
   return c <= L'9' && c >= L'1';
 }
 
+static inline void cin_getnum(const char **p, int64_t *out) {
+  *out = 0;
+  while (cin_isnum(**p)) {
+    *out *= 10;
+    *out += **p - '0';
+    ++*p;
+  }
+}
+
 static void log_preview(void) {
   if (!preview.count) return;
   DWORD msg_len = preview.count;
@@ -2169,6 +2178,11 @@ struct Media {
   Hidden_Table hidden_table;
 } media = {0};
 
+struct Chatterino {
+  HWND window;
+  RECT rect;
+} chatterino = {0};
+
 typedef struct Tag_Items {
   Playlist *playlist;
   Tag_Directories *directories;
@@ -2182,10 +2196,11 @@ typedef struct Cin_Screen {
 } Cin_Screen;
 
 typedef struct Cin_Layout {
+  RECT chat_rect;
   size_t scope_line;
   array_struct_members(Cin_Screen);
-  uint32_t offset;
-  uint32_t len;
+  uint32_t name_offset;
+  uint32_t name_len;
 } Cin_Layout;
 
 static struct {
@@ -2432,6 +2447,35 @@ static inline void setup_tag(const char *tag, Tag_Items *tag_items) {
   radix_insert(tag_tree, utf8_buf.items, (size_t)len_utf8, tag_items);
 }
 
+static inline bool setup_chat(const char *geometry, uint32_t len, Cin_Layout *layout) {
+  if (len <= 1) return true;
+  const char *p = geometry;
+  int64_t width, height, x, y;
+  cin_getnum(&p, &width);
+  if (*p != 'x') return false;
+  ++p;
+  cin_getnum(&p, &height);
+  bool positive;
+  if (*p == '-') positive = false;
+  else if (*p == '+') positive = true;
+  else return false;
+  ++p;
+  cin_getnum(&p, &x);
+  if (!positive) x = -x;
+  if (*p == '-') positive = false;
+  else if (*p == '+') positive = true;
+  else return false;
+  ++p;
+  cin_getnum(&p, &y);
+  if (*p && !isspace(*p)) return false;
+  if (!positive) y = -y;
+  layout->chat_rect.right = (LONG)width;
+  layout->chat_rect.bottom = (LONG)height;
+  layout->chat_rect.left = (LONG)x;
+  layout->chat_rect.top = (LONG)y;
+  return true;
+}
+
 static inline void setup_screen(const char *geometry, uint32_t bytes, Cin_Layout *layout) {
   Cin_Screen screen = {.offset = screen_strings.count, .len = bytes};
   array_extend(&console_arena, &screen_strings, geometry, bytes);
@@ -2444,8 +2488,8 @@ static inline void setup_layout(const char *name, Cin_Layout *layout) {
   int32_t len_utf8 = utf16_to_utf8(utf16_buf_norm.items);
   assert(len_utf8 > 1);
   uint32_t len_utf8_u32 = (uint32_t)len_utf8;
-  layout->offset = layout_strings.count;
-  layout->len = len_utf8_u32;
+  layout->name_offset = layout_strings.count;
+  layout->name_len = len_utf8_u32;
   array_extend(&console_arena, &layout_strings, utf8_buf.items, len_utf8_u32);
   radix_insert(layout_tree, utf8_buf.items, len_utf8_u32, layout);
 }
@@ -2490,6 +2534,12 @@ static bool init_config(const char *filename) {
         return false;
       }
       Cin_Layout *layout = arena_bump_T1(&console_arena, Cin_Layout);
+      if (!setup_chat(scope->layout.chat.items, scope->layout.chat.count, layout)) {
+        log_message(LOG_ERROR, "Layout at [scope] number %zu does not have a valid chat"
+                               " key, please fix as: 'chat = 0x0+0+0'",
+                    i);
+        return false;
+      }
       layout->scope_line = scope->line;
       array_init(&console_arena, layout, CIN_LAYOUT_SCREENS_CAP);
       log_message(LOG_DEBUG, "Name: %s", scope->layout.name.items);
@@ -2500,6 +2550,7 @@ static bool init_config(const char *filename) {
       setup_layout(scope->layout.name.items, layout);
       array_free_items(&console_arena, &scope->layout.name);
       array_free_items(&console_arena, &scope->layout.screen);
+      array_free_items(&console_arena, &scope->layout.chat);
     } break;
     case CONF_SCOPE_MEDIA: {
       Tag_Items *tag_items = NULL;
@@ -4010,7 +4061,7 @@ static void cmd_store_executor(void) {
   bool try_overwrite = layout != NULL;
   if (try_overwrite) {
     layout->count = 0;
-    name = (char *)layout_strings.items + layout->offset;
+    name = (char *)layout_strings.items + layout->name_offset;
   } else {
     layout = arena_bump_T1(&console_arena, Cin_Layout);
     assert(cmd_ctx.unicode);
@@ -4048,7 +4099,7 @@ static void cmd_store_executor(void) {
   const char fstr_screen[] = "screen = %s" CRLF;
   if (!try_overwrite) goto append;
   size_t scope_line = layout->scope_line;
-  uint32_t name_len = layout->len - 1;
+  uint32_t name_len = layout->name_len - 1;
   err = fopen_s(&file, CIN_CONF_FILENAME, "rb");
   if (err) {
     log_fopen_error(CIN_CONF_FILENAME, err);
@@ -4175,8 +4226,8 @@ static void cmd_store_validator(void) {
     }
   } else {
     Cin_Layout *curr = cmd_ctx.layout;
-    char *curr_name = (char *)layout_strings.items + curr->offset;
-    utf8_to_utf16_nraw(curr_name, (int32_t)curr->len);
+    char *curr_name = (char *)layout_strings.items + curr->name_offset;
+    utf8_to_utf16_nraw(curr_name, (int32_t)curr->name_len);
     set_preview(true, L"store layout '%s' (overwrite current)", utf16_buf_raw.items);
     layout = curr;
   }
@@ -4328,8 +4379,8 @@ static void cmd_layout_validator(void) {
     set_preview(true, L"change layout to '%s'", utf16_buf_raw.items);
   } else {
     Cin_Layout *curr = cmd_ctx.layout;
-    char *curr_name = (char *)layout_strings.items + curr->offset;
-    utf8_to_utf16_nraw(curr_name, (int32_t)curr->len);
+    char *curr_name = (char *)layout_strings.items + curr->name_offset;
+    utf8_to_utf16_nraw(curr_name, (int32_t)curr->name_len);
     set_preview(true, L"reset layout '%s'", utf16_buf_raw.items);
     layout = curr;
   }
