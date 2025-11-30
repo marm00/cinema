@@ -2178,11 +2178,6 @@ struct Media {
   Hidden_Table hidden_table;
 } media = {0};
 
-struct Chatterino {
-  HWND window;
-  RECT rect;
-} chatterino = {0};
-
 typedef struct Tag_Items {
   Playlist *playlist;
   Tag_Directories *directories;
@@ -2448,7 +2443,13 @@ static inline void setup_tag(const char *tag, Tag_Items *tag_items) {
 }
 
 static inline bool setup_chat(const char *geometry, uint32_t len, Cin_Layout *layout) {
-  if (len <= 1) return true;
+  if (len == 0) {
+    layout->chat_rect.right = LONG_MIN;
+    layout->chat_rect.bottom = LONG_MIN;
+    layout->chat_rect.left = LONG_MIN;
+    layout->chat_rect.top = LONG_MIN;
+    return true;
+  }
   const char *p = geometry;
   int64_t width, height, x, y;
   cin_getnum(&p, &width);
@@ -2535,10 +2536,9 @@ static bool init_config(const char *filename) {
       }
       Cin_Layout *layout = arena_bump_T1(&console_arena, Cin_Layout);
       if (!setup_chat(scope->layout.chat.items, scope->layout.chat.count, layout)) {
-        log_message(LOG_ERROR, "Layout at [scope] number %zu does not have a valid chat"
-                               " key, please fix as: 'chat = 0x0+0+0'",
+        log_message(LOG_WARNING, "Layout at [scope] number %zu does not have a valid chat"
+                                 " key, please fix as: 'chat = 0x0±0±0'",
                     i);
-        return false;
       }
       layout->scope_line = scope->line;
       array_init(&console_arena, layout, CIN_LAYOUT_SCREENS_CAP);
@@ -3565,6 +3565,23 @@ static bool init_executables(void) {
   return true;
 }
 
+struct Chat {
+  HWND window;
+  RECT rect;
+} chat = {0};
+
+static inline void chat_reposition(Cin_Layout *layout) {
+  RECT chat_rect = layout->chat_rect;
+  if (chat_rect.bottom != LONG_MIN) {
+    STARTUPINFOW si = {0};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi = {0};
+    CreateProcessW(exe_path_chatterino, L"chatterino", NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
+    // TODO: reposition
+  }
+}
+
+
 #define CIN_MPVCALL_START L"mpv --idle --config-dir=./ --input-ipc-server="
 #define CIN_MPVCALL_START_LEN cin_strlen(CIN_MPVCALL_START)
 #define CIN_MPVCALL_PIPE L"\\\\.\\pipe\\cinema_mpv_"
@@ -4333,9 +4350,10 @@ static void cmd_quit_validator(void) {
 }
 
 static void cmd_layout_executor(void) {
-  size_t next_count = cmd_ctx.queued_layout->count;
-  cmd_ctx.layout = cmd_ctx.queued_layout;
-  size_t screen = 0;
+  Cin_Layout *layout = cmd_ctx.queued_layout;
+  cmd_ctx.layout = layout;
+  uint32_t next_count = layout->count;
+  uint32_t screen = 0;
   // TODO: bring terminal to foreground above mpv 'ontop=yes'
   mpv_lock();
   cache_foreach(&cin_io.instances, Instance, i, old) {
@@ -4344,7 +4362,7 @@ static void cmd_layout_executor(void) {
     } else if (old->pipe) {
       log_message(LOG_INFO, "i=%u, screen=%zu", i);
       assert(IsWindow(old->window));
-      const char *geometry = (char *)screen_strings.items + cmd_ctx.layout->items[screen].offset;
+      const char *geometry = (char *)screen_strings.items + layout->items[screen].offset;
       overlap_write(old, MPV_WRITE, "set_property", "geometry", geometry);
       if (old->full_screen) {
         old->full_screen = false;
@@ -4360,6 +4378,7 @@ static void cmd_layout_executor(void) {
     playlist_set_default(next);
     mpv_spawn(next, screen);
   }
+  chat_reposition(layout);
   if (!mpv_demand) mpv_unlock();
 }
 
