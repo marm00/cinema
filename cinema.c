@@ -3565,22 +3565,78 @@ static bool init_executables(void) {
   return true;
 }
 
+typedef struct Window_Data {
+  DWORD pid;
+  HWND hwnd;
+} Window_Data;
+
+static BOOL CALLBACK enum_windows_proc(HWND hwnd, LPARAM lParam) {
+  Window_Data *data = (Window_Data *)lParam;
+  DWORD pid;
+  GetWindowThreadProcessId(hwnd, &pid);
+  if (pid == data->pid && IsWindow(hwnd)) {
+    data->hwnd = hwnd;
+    return FALSE;
+  }
+  return TRUE;
+}
+
+static HWND find_window(DWORD pid) {
+  Window_Data data = {.pid = pid};
+  EnumWindows(enum_windows_proc, (LPARAM)&data);
+  return data.hwnd;
+}
+
 struct Chat {
+  STARTUPINFOW si;
+  PROCESS_INFORMATION pi;
   HWND window;
-  RECT rect;
 } chat = {0};
 
 static inline void chat_reposition(Cin_Layout *layout) {
   RECT chat_rect = layout->chat_rect;
-  if (chat_rect.bottom != LONG_MIN) {
-    STARTUPINFOW si = {0};
-    si.cb = sizeof(si);
-    PROCESS_INFORMATION pi = {0};
-    CreateProcessW(exe_path_chatterino, L"chatterino", NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
-    // TODO: reposition
+  int32_t x = (int32_t)chat_rect.left;
+  int32_t y = (int32_t)chat_rect.top;
+  int32_t cx = (int32_t)chat_rect.right;
+  int32_t cy = (int32_t)chat_rect.bottom;
+  bool should_show = chat_rect.bottom != LONG_MIN;
+  bool is_showing = IsWindow(chat.window);
+  if (should_show) {
+    if (is_showing) {
+      SetWindowPos(chat.window, HWND_TOPMOST, x, y, cx, cy, SWP_SHOWWINDOW);
+    } else {
+      STARTUPINFOW *si = &chat.si;
+      PROCESS_INFORMATION *pi = &chat.pi;
+      si->dwFlags = STARTF_USEPOSITION | STARTF_USESIZE | STARTF_USESHOWWINDOW;
+      si->wShowWindow = SW_NORMAL;
+      si->dwX = (DWORD)x;
+      si->dwXSize = (DWORD)cx;
+      si->dwY = (DWORD)y;
+      si->dwYSize = (DWORD)cy;
+      si->cb = sizeof(*si);
+      if (!CreateProcessW(exe_path_chatterino, L"chatterino", NULL, NULL, FALSE, 0, NULL, NULL, si, pi)) {
+        if (GetLastError() == ERROR_FILE_NOT_FOUND) {
+          log_last_error("Failed to find chatterino executable");
+        } else {
+          log_last_error("Failed to start chatterino executable even though it was found");
+        }
+      }
+      // since STARTUPINFOW is ignored, manually reposition
+      static const size_t CHAT_REPOSITION_TRIES = 100ULL;
+      static const DWORD CHAT_REPOSITION_DELAY = 20UL;
+      for (size_t i = 0LL; i < CHAT_REPOSITION_TRIES; ++i) {
+        chat.window = find_window(pi->dwProcessId);
+        if (IsWindowVisible(chat.window)) {
+          SetWindowPos(chat.window, HWND_TOPMOST, x, y, cx, cy, SWP_SHOWWINDOW);
+          break;
+        }
+        Sleep(CHAT_REPOSITION_DELAY);
+      }
+    }
+  } else if (is_showing) {
+    PostMessageW(chat.window, WM_CLOSE, 0, 0);
   }
 }
-
 
 #define CIN_MPVCALL_START L"mpv --idle --config-dir=./ --input-ipc-server="
 #define CIN_MPVCALL_START_LEN cin_strlen(CIN_MPVCALL_START)
@@ -4335,6 +4391,7 @@ static void cmd_clear_validator(void) {
 }
 
 static void cmd_quit_executor(void) {
+  PostMessageW(chat.window, WM_CLOSE, 0, 0);
   cache_foreach(&cin_io.instances, Instance, i, instance) {
     log_message(LOG_DEBUG, "Closing PID=%lu", instance->pi.dwProcessId);
     overlap_write(instance, MPV_QUIT, "quit", NULL, NULL);
@@ -4356,6 +4413,7 @@ static void cmd_layout_executor(void) {
   uint32_t screen = 0;
   // TODO: bring terminal to foreground above mpv 'ontop=yes'
   mpv_lock();
+  chat_reposition(layout);
   cache_foreach(&cin_io.instances, Instance, i, old) {
     if (screen >= next_count) {
       if (old->pipe) overlap_write(old, MPV_QUIT, "quit", NULL, NULL);
@@ -4378,7 +4436,6 @@ static void cmd_layout_executor(void) {
     playlist_set_default(next);
     mpv_spawn(next, screen);
   }
-  chat_reposition(layout);
   if (!mpv_demand) mpv_unlock();
 }
 
