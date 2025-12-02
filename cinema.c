@@ -104,7 +104,7 @@ static inline bool init_os(void) {
 #define megabytes(n) ((n) << 20)
 #define gigabytes(n) ((n) << 30)
 #define CIN_ARENA_CAP megabytes(2)
-#define CIN_ARENA_BYTES align(sizeof(Arena), 64ULL)
+#define CIN_ARENA_BYTES align(sizeof(Arena), 64)
 
 static inline uint32_t log2_floor(uint32_t n) {
   assert(n > 0U && "0 is undefined behavior");
@@ -1773,11 +1773,11 @@ static inline table_value table_find(Robin_Hood_Table *table, Table_Key *key) {
         return bucket.value;
       }
     }
-    if (dist > bucket.dist) return -1LL;
+    if (dist > bucket.dist) return -1;
     i = (i + 1) & table->mask;
     ++dist;
   }
-  return -1LL;
+  return -1;
 }
 
 static inline table_value table_insert(Arena *arena, Robin_Hood_Table *table,
@@ -1827,7 +1827,7 @@ static inline table_value table_insert(Arena *arena, Robin_Hood_Table *table,
   }
   assert(value >= 0);
   assert(table_find(table, key) >= 0);
-  return -1LL;
+  return -1;
 }
 
 static inline table_value table_delete(Robin_Hood_Table *table, Table_Key *key) {
@@ -1845,7 +1845,7 @@ static inline table_value table_delete(Robin_Hood_Table *table, Table_Key *key) 
     i = (i + 1) & table->mask;
   }
   assert(false && "tried to delete a key that does not exist");
-  return -1LL;
+  return -1;
 }
 
 static inline void table_free_items(Arena *arena, Robin_Hood_Table *table) {
@@ -2290,7 +2290,7 @@ static void setup_directory(const char *path, Tag_Directories *tag_dirs) {
       array_push(&console_arena, tag_dirs, (int32_t)node_tail);
     }
     table_value inserted = table_insert(&console_arena, &dir_table, &key, (table_value)node_tail);
-    assert(inserted == -1LL);
+    assert(inserted == -1);
     do {
       if (data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
         continue; // skip junction
@@ -3622,9 +3622,9 @@ static inline void chat_reposition(Cin_Layout *layout) {
         }
       }
       // since STARTUPINFOW is ignored, manually reposition
-      static const size_t CHAT_REPOSITION_TRIES = 100ULL;
-      static const DWORD CHAT_REPOSITION_DELAY = 20UL;
-      for (size_t i = 0LL; i < CHAT_REPOSITION_TRIES; ++i) {
+      static const size_t CHAT_REPOSITION_TRIES = 100;
+      static const DWORD CHAT_REPOSITION_DELAY = 20;
+      for (size_t i = 0; i < CHAT_REPOSITION_TRIES; ++i) {
         chat.window = find_window(pi->dwProcessId);
         if (IsWindowVisible(chat.window)) {
           SetWindowPos(chat.window, HWND_TOPMOST, x, y, cx, cy, SWP_SHOWWINDOW);
@@ -4106,7 +4106,7 @@ static void cmd_autoplay_validator(void) {
     }
     if (*p) {
       ptrdiff_t pos = p - cmd_ctx.unicode;
-      set_preview(false, L"unexpected character '%c' at position %lld in argument", *p, pos + 1LL);
+      set_preview(false, L"unexpected character '%c' at position %lld in argument", *p, pos + 1);
       return;
     }
   }
