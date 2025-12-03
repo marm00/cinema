@@ -3599,6 +3599,7 @@ static HWND find_window(DWORD pid) {
 struct Chat {
   STARTUPINFOW si;
   PROCESS_INFORMATION pi;
+  RECT rect;
   HWND window;
 } chat = {0};
 
@@ -4137,6 +4138,14 @@ static void cmd_lock_validator(void) {
   cmd_ctx.executor = cmd_lock_executor;
 }
 
+#define FSTR_RECT "%ldx%ld%+ld%+ld"
+#define FSTR_NAME "name = %s" CRLF
+#define FSTR_SCREEN "screen = %s" CRLF
+#define FSTR_CHAT "chat = " FSTR_RECT CRLF
+#define FSTR_RECT_ARGS(rect) \
+  ((rect).right - (rect).left), ((rect).bottom - (rect).top), ((rect).left), ((rect).top)
+#define FSTR_CHAT_ARGS FSTR_RECT_ARGS(chat.rect)
+
 static void cmd_store_executor(void) {
   Cin_Layout *layout = cmd_ctx.queued_layout;
   char *name = NULL;
@@ -4154,19 +4163,14 @@ static void cmd_store_executor(void) {
   geometry_buf.count = 0;
   cache_foreach(&cin_io.instances, Instance, i, instance) {
     if (instance->pipe && IsWindow(instance->window)) {
-      const char fstr_rect[] = "%ldx%ld%+ld%+ld";
       GetWindowRect(instance->window, &instance->rect);
-      LONG width = instance->rect.right - instance->rect.left;
-      LONG height = instance->rect.bottom - instance->rect.top;
-      LONG x = instance->rect.left;
-      LONG y = instance->rect.top;
-      int32_t bytes = snprintf(NULL, 0, fstr_rect, width, height, x, y) + 1;
+      int32_t bytes = snprintf(NULL, 0, FSTR_RECT, FSTR_RECT_ARGS(instance->rect)) + 1;
       assert(bytes > 1);
       uint32_t bytes_u32 = (uint32_t)bytes;
       uint32_t offset = geometry_buf.count;
       array_grow(&console_arena, &geometry_buf, bytes_u32);
       char *pos = geometry_buf.items + offset;
-      snprintf(pos, bytes_u32, fstr_rect, width, height, x, y);
+      snprintf(pos, bytes_u32, FSTR_RECT, FSTR_RECT_ARGS(instance->rect));
       setup_screen(pos, bytes_u32, layout);
       assert(geometry_buf.items[geometry_buf.count - 1] == '\0');
       geometry_buf.items[geometry_buf.count - 1] = ',';
@@ -4177,8 +4181,11 @@ static void cmd_store_executor(void) {
   int32_t err = 0;
   char *buf = NULL;
   uint32_t buf_bytes = 0;
-  const char fstr_name[] = "name = %s" CRLF;
-  const char fstr_screen[] = "screen = %s" CRLF;
+  bool has_chat = IsWindow(chat.window);
+  if (has_chat) {
+    GetWindowRect(chat.window, &chat.rect);
+    layout->chat_rect = chat.rect;
+  }
   if (!try_overwrite) goto append;
   size_t scope_line = layout->scope_line;
   uint32_t name_len = layout->name_len - 1;
@@ -4190,9 +4197,10 @@ static void cmd_store_executor(void) {
     assert(ftell(file) > 0);
     buf_bytes = (uint32_t)ftell(file);
     rewind(file);
-    buf = arena_bump_T(&console_arena, char, buf_bytes);
-    fread(buf, 1, buf_bytes, file);
+    buf = arena_bump_T(&console_arena, char, buf_bytes + 1U);
+    fread(buf, sizeof(char), buf_bytes, file);
     fclose(file);
+    buf[buf_bytes] = '\0';
     const char *p = buf;
     const char *tail = buf + buf_bytes;
     size_t bottom_line = 1;
@@ -4200,75 +4208,92 @@ static void cmd_store_executor(void) {
       ++p;
       ++bottom_line;
     }
+    if (strncmp(p, "[layout]", cin_strlen("[layout]")) != 0) goto append;
+    p += cin_strlen("[layout]");
     const char *overwrite_start = p;
-    if (!p || memcmp(p, "[layout]", cin_strlen("[layout]")) != 0) goto append;
-    do p = memchr(p, '\n', (size_t)(tail - p));
-    while (p && memcmp(++p, "name", cin_strlen("name")) != 0);
-    if (!p) goto append;
-    p += cin_strlen("name");
-    while (*p == ' ') ++p;
-    if (*p != '=') goto append;
-    ++p;
-    while (*p == ' ') ++p;
-    if (memcmp(p, name, name_len) != 0) goto append;
-    p += name_len;
-    if (*p && *p != '\r') goto append;
-    while (*p && *p != '[') ++p;
-    const char *overwrite_end = p;
-    size_t leftover_bytes = (size_t)(tail - overwrite_end);
-    size_t overwrite_bytes = (size_t)(overwrite_end - overwrite_start);
-    p = memchr(overwrite_start, '\n', overwrite_bytes);
-    int32_t name_bytes = sprintf((char *)++p, fstr_name, name);
-    p += name_bytes;
-    ptrdiff_t remainder = overwrite_end - p;
-    int32_t screen_bytes = snprintf(NULL, 0, fstr_screen, geometry_buf.items) + 1;
-    uint32_t required_bytes = buf_bytes;
-    uint32_t extra_newlines = 0;
-    char *p2 = (char *)p;
-    while ((p2 = memchr(p2, '\n', (size_t)(overwrite_end - p2)))) {
-      ++extra_newlines;
-      ++p2;
+    const char *overwrite_end = overwrite_start;
+    const char *last_name = NULL;
+    size_t line_breaks = 0;
+    while ((p = memchr(p, '\n', (size_t)(tail - p)))) {
+      ++line_breaks;
+      overwrite_end = ++p;
+      if (*p == '[') break;
+      if (strncmp(p, "name", cin_strlen("name")) == 0) last_name = p;
     }
-    uint32_t insert_bytes = (uint32_t)screen_bytes + (extra_newlines * 2);
-    if (remainder >= (ptrdiff_t)insert_bytes) {
-      snprintf((char *)p, (size_t)screen_bytes, fstr_screen, geometry_buf.items);
-      p += screen_bytes - 1;
-      p2 = (char *)p;
-      for (uint32_t i = 1U; i < extra_newlines; ++i) {
-        *p2++ = '\r';
-        *p2++ = '\n';
+    if (!last_name) goto append;
+    last_name += cin_strlen("name");
+    while (*last_name == ' ') ++last_name;
+    if (*last_name != '=') goto append;
+    else ++last_name;
+    while (*last_name == ' ') ++last_name;
+    if (strncmp(last_name, name, name_len) != 0) goto append;
+    size_t available_bytes = (size_t)(overwrite_end - overwrite_start);
+    size_t needed_chat_bytes = 0;
+    char *overwrite = (char *)overwrite_start;
+    int32_t name_bytes = sprintf(overwrite, CRLF FSTR_NAME, name);
+    overwrite += (size_t)name_bytes;
+    available_bytes -= (size_t)name_bytes;
+    if (has_chat) {
+      int32_t bytes = snprintf(NULL, 0, FSTR_CHAT, FSTR_CHAT_ARGS);
+      assert(bytes > 0);
+      size_t bytes_size = (size_t)bytes;
+      if (bytes_size > available_bytes) {
+        needed_chat_bytes = bytes_size;
+      } else {
+        snprintf(overwrite, bytes_size + 1U, FSTR_CHAT, FSTR_CHAT_ARGS);
+        overwrite += bytes_size;
+        available_bytes -= bytes_size;
       }
-      p = p2;
-      memmove((char *)p, overwrite_end, leftover_bytes);
+    }
+    int32_t screen_bytes = snprintf(NULL, 0, FSTR_SCREEN CRLF, geometry_buf.items);
+    assert(screen_bytes > 0);
+    size_t screen_bytes_size = (size_t)screen_bytes;
+    if (needed_chat_bytes || screen_bytes_size > available_bytes) {
+      size_t needed_bytes = needed_chat_bytes + screen_bytes_size;
+      size_t growth_bytes = needed_bytes - available_bytes;
+      size_t new_buf_bytes = buf_bytes + growth_bytes;
+      size_t overwrite_pos = (size_t)(overwrite - buf);
+      const char *prev_buf = buf;
+      buf = arena_bump_T(&console_arena, char, (uint32_t)new_buf_bytes + 1U);
+      memcpy(buf, prev_buf, overwrite_pos);
+      size_t new_overwrite_end = overwrite_pos + growth_bytes;
+      size_t leftover_bytes = (size_t)(tail - overwrite_end);
+      memcpy(buf + new_overwrite_end, overwrite_end, leftover_bytes);
+      arena_free_pos(&console_arena, (uint8_t *)prev_buf, buf_bytes);
+      available_bytes += growth_bytes;
+      overwrite = buf + overwrite_pos;
+      overwrite_end = buf + new_overwrite_end;
+      tail = buf + new_buf_bytes;
+      buf_bytes = (uint32_t)new_buf_bytes;
+    }
+    if (needed_chat_bytes) {
+      snprintf(overwrite, needed_chat_bytes + 1U, FSTR_CHAT, FSTR_CHAT_ARGS);
+      overwrite += needed_chat_bytes;
+      available_bytes -= needed_chat_bytes;
+    }
+    available_bytes -= screen_bytes_size;
+    if (available_bytes) {
+      snprintf(overwrite, screen_bytes_size + 1U, FSTR_SCREEN CRLF, geometry_buf.items);
+      overwrite += screen_bytes_size;
+      size_t end_bytes = (size_t)(tail - overwrite_end);
+      memmove(overwrite, overwrite_end, end_bytes);
+      tail -= available_bytes;
     } else {
-      size_t p_pos = (size_t)(p - buf);
-      uint32_t diff = (uint32_t)insert_bytes - (uint32_t)remainder;
-      required_bytes = buf_bytes + diff;
-      const char *prev = buf;
-      buf = arena_bump_T(&console_arena, char, required_bytes);
-      memcpy(buf, prev, p_pos);
-      p = buf + p_pos;
-      snprintf((char *)p, (size_t)screen_bytes, fstr_screen, geometry_buf.items);
-      p += screen_bytes - 1;
-      p2 = (char *)p;
-      for (uint32_t i = 1U; i < extra_newlines; ++i) {
-        *p2++ = '\r';
-        *p2++ = '\n';
-      }
-      p = p2;
-      memmove((char *)p, overwrite_end, leftover_bytes);
-      arena_free_pos(&console_arena, (uint8_t *)prev, buf_bytes);
+      snprintf(overwrite, screen_bytes_size + 1U, FSTR_SCREEN "\r", geometry_buf.items);
+      overwrite += screen_bytes_size - 1U;
+      assert(*overwrite == '\0');
+      *overwrite++ = '\n';
     }
-    p += leftover_bytes;
-    size_t total_bytes = (size_t)(p - buf);
+    size_t used_bytes = (size_t)(tail - buf);
     err = fopen_s(&file, CIN_CONF_FILENAME, "wb");
     if (err) {
       log_fopen_error(CIN_CONF_FILENAME, err);
     } else {
-      fwrite(buf, 1, total_bytes, file);
+      fwrite(buf, 1, used_bytes, file);
       fclose(file);
     }
-    arena_free_pos(&console_arena, (uint8_t *)buf, required_bytes);
+    arena_free_pos(&console_arena, (uint8_t *)buf, buf_bytes);
+    // TODO: update layouts scope lines
     return;
   }
 append:
@@ -4283,9 +4308,10 @@ append:
     while ((c = fgetc(file)) != EOF)
       if (c == '\n') ++scope_line;
     layout->scope_line = scope_line;
-    fprintf(file, "[layout]" CRLF);
-    fprintf(file, fstr_name, name);
-    fprintf(file, fstr_screen, geometry_buf.items);
+    fprintf(file, CRLF "[layout]" CRLF);
+    fprintf(file, FSTR_NAME, name);
+    fprintf(file, FSTR_SCREEN, geometry_buf.items);
+    if (has_chat) fprintf(file, FSTR_CHAT, FSTR_CHAT_ARGS);
     fclose(file);
   }
   return;
