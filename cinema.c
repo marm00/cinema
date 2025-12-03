@@ -2063,6 +2063,15 @@ static bool parse_config(const char *filename) {
         goto end;
       }
       conf_parser.v = p;
+      size_t curr_pos = (size_t)(p - conf_parser.buf.items + 1);
+      size_t remainder = conf_parser.len - curr_pos;
+      char *comment = memchr(p, '#', remainder);
+      if (comment) {
+        size_t dist = (size_t)(comment - p);
+        size_t comment_len = remainder - dist;
+        conf_parser.len -= comment_len;
+        if (conf_parser.len && *(comment - 1) == ' ') --conf_parser.len;
+      }
       if (!conf_keyget()) {
         conf_parser.buf.items[conf_parser.k_len] = '\0';
         log_message(LOG_ERROR, "Unknown key '%s' on line %zu, please check for typos",
