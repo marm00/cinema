@@ -4279,7 +4279,7 @@ static void cmd_store_executor(void) {
       memmove(overwrite, overwrite_end, end_bytes);
       tail -= available_bytes;
     } else {
-      snprintf(overwrite, screen_bytes_size + 1U, FSTR_SCREEN "\r", geometry_buf.items);
+      snprintf(overwrite, screen_bytes_size + 1U, FSTR_SCREEN CR, geometry_buf.items);
       overwrite += screen_bytes_size - 1U;
       assert(*overwrite == '\0');
       *overwrite++ = '\n';
@@ -4294,6 +4294,9 @@ static void cmd_store_executor(void) {
     }
     arena_free_pos(&console_arena, (uint8_t *)buf, buf_bytes);
     // TODO: update layouts scope lines
+    // TODO: traverse layout tree and displace elements whose
+    // scope_line is greater than the original scope line of the
+    // stored layout
     return;
   }
 append:
