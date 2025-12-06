@@ -1603,25 +1603,21 @@ static inline void radix_insert(Radix_Tree *tree, const uint8_t *key, size_t len
     tree->root = (Radix_Node *)radix_leaf(key, len, v);
     return;
   }
-  Radix_Node **parent = &tree->root;
   Radix_Node *node = tree->root;
   while (node->type == RADIX_INTERNAL) {
     Radix_Internal *internal = (Radix_Internal *)node;
     int32_t bit = radix_bit(key, len, internal->critical, internal->bitmask);
-    parent = &internal->child[bit];
-    node = internal->child[bit];
-    if (!node) {
-      *parent = (Radix_Node *)radix_leaf(key, len, v);
+    Radix_Node *next = internal->child[bit];
+    if (!next) {
+      internal->child[bit] = (Radix_Node *)radix_leaf(key, len, v);
       radix_update(internal);
-      Radix_Node *curr = tree->root;
-      if (curr && curr->type == RADIX_INTERNAL) {
-        // set lexicographical minimum
-        radix_update((Radix_Internal *)curr);
+      if (tree->root->type == RADIX_INTERNAL) {
+        radix_update((Radix_Internal *)tree->root);
       }
       return;
     }
+    node = next;
   }
-  // split leaf node
   Radix_Leaf *leaf = (Radix_Leaf *)node;
   if (len == leaf->len && memcmp(key, leaf->key, len) == 0) {
     leaf->base.v = v;
@@ -1630,12 +1626,24 @@ static inline void radix_insert(Radix_Tree *tree, const uint8_t *key, size_t len
   size_t critical;
   uint8_t bitmask;
   radix_critical(key, len, leaf->key, leaf->len, &critical, &bitmask);
+  Radix_Node **parent = &tree->root;
+  node = tree->root;
+  while (node->type == RADIX_INTERNAL) {
+    Radix_Internal *internal = (Radix_Internal *)node;
+    if (internal->critical > critical ||
+        (internal->critical == critical && internal->bitmask < bitmask)) {
+      break;
+    }
+    int32_t bit = radix_bit(key, len, internal->critical, internal->bitmask);
+    parent = &internal->child[bit];
+    node = internal->child[bit];
+    if (!node) break;
+  }
   Radix_Internal *new_internal = radix_internal(critical, bitmask);
   int32_t new_bit = radix_bit(key, len, critical, bitmask);
-  int32_t old_bit = radix_bit(leaf->key, leaf->len, critical, bitmask);
   Radix_Leaf *new_leaf = radix_leaf(key, len, v);
   new_internal->child[new_bit] = (Radix_Node *)new_leaf;
-  new_internal->child[old_bit] = (Radix_Node *)leaf;
+  new_internal->child[new_bit ^ 1] = *parent;
   radix_update(new_internal);
   *parent = (Radix_Node *)new_internal;
 }
