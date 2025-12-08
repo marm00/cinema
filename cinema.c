@@ -4289,7 +4289,7 @@ static void cmd_store_executor(void) {
       const char *prev_buf = buf;
       buf = arena_bump_T(&console_arena, char, (uint32_t)new_buf_bytes + 1U);
       memcpy(buf, prev_buf, overwrite_pos);
-      size_t new_overwrite_end = overwrite_pos + growth_bytes;
+      size_t new_overwrite_end = overwrite_pos + screen_bytes_size;
       size_t leftover_bytes = (size_t)(tail - overwrite_end);
       memcpy(buf + new_overwrite_end, overwrite_end, leftover_bytes);
       arena_free_pos(&console_arena, (uint8_t *)prev_buf, buf_bytes);
@@ -4342,7 +4342,7 @@ static void cmd_store_executor(void) {
   }
 append:
   if (buf) arena_free_pos(&console_arena, (uint8_t *)buf, buf_bytes + 1U);
-  scope_line = 1;
+  scope_line = 2;
   err = fopen_s(&file, CIN_CONF_FILENAME, "ab+");
   if (err) {
     log_fopen_error(CIN_CONF_FILENAME, err);
