@@ -1668,6 +1668,31 @@ static inline radix_v radix_query(Radix_Tree *tree, const uint8_t *pattern, size
   return NULL;
 }
 
+static inline Radix_Leaf *radix_leftmost(Radix_Node *node) {
+  if (!node) return NULL;
+  while (node->type == RADIX_INTERNAL) {
+    Radix_Internal *internal = (Radix_Internal *)node;
+    node = internal->child[0] ? internal->child[0] : internal->child[1];
+  }
+  return (Radix_Leaf *)node;
+}
+
+static inline Radix_Leaf *radix_next(Radix_Tree *tree, Radix_Leaf *current) {
+  assert(current);
+  assert(tree->root);
+  const uint8_t *key = current->key;
+  size_t len = current->len;
+  Radix_Node *node = tree->root;
+  Radix_Node *candidate = NULL;
+  while (node && node->type == RADIX_INTERNAL) {
+    Radix_Internal *internal = (Radix_Internal *)node;
+    int32_t bit = radix_bit(key, len, internal->critical, internal->bitmask);
+    if (bit == 0 && internal->child[1]) candidate = internal->child[1];
+    node = internal->child[bit];
+  }
+  return radix_leftmost(candidate);
+}
+
 static inline uint32_t rand_between(uint32_t min, uint32_t max) {
   assert(max >= min);
   uint32_t range = max - min + 1;
@@ -1892,7 +1917,7 @@ typedef struct Conf_Scope {
     Conf_Media media;
     Conf_Layout layout;
   };
-  size_t line;
+  int32_t line;
 } Conf_Scope;
 
 array_define(Conf_Scopes, Conf_Scope);
@@ -1900,11 +1925,11 @@ array_define(Conf_Buf, char);
 
 static struct {
   Conf_Scopes scopes;
-  size_t line;
   Conf_Buf buf;
   size_t len;
   size_t k_len;
   char *v;
+  int32_t line;
   bool error;
 } conf_parser = {0};
 
@@ -1950,11 +1975,11 @@ static inline bool conf_keycmp(char *k, Conf_Scope_Type type, Conf_Key *out, boo
       break;
     }
     conf_parser.buf.items[conf_parser.k_len] = '\0';
-    log_message(LOG_ERROR, "Unexpected key on line %zu: '%s' is not allowed %s",
+    log_message(LOG_ERROR, "Unexpected key on line %d: '%s' is not allowed %s",
                 conf_parser.line, conf_parser.buf.items, scope_msg);
   } else if (unique) {
     if (out->count > 0) {
-      log_message(LOG_WARNING, "Overwriting existing value on line %zu for key '%s': %s => %s",
+      log_message(LOG_WARNING, "Overwriting existing value on line %d for key '%s': %s => %s",
                   conf_parser.line, k, out->items, conf_parser.v);
     }
     array_set(&console_arena, out, conf_parser.v, v_len);
@@ -2057,7 +2082,7 @@ static bool parse_config(const char *filename) {
       conf_parser.k_len = (size_t)(p - conf_parser.buf.items);
       while (*p == ' ') ++p;
       if (*p != '=') {
-        log_message(LOG_ERROR, "Token on line %zu at position %zu must be '=', not '%c'",
+        log_message(LOG_ERROR, "Token on line %d at position %zu must be '=', not '%c'",
                     conf_parser.line, (size_t)(p - conf_parser.buf.items) + 1, *p);
         goto end;
       }
@@ -2065,7 +2090,7 @@ static bool parse_config(const char *filename) {
       while (*p == ' ') ++p;
       if (!*p) {
         conf_parser.buf.items[conf_parser.k_len] = '\0';
-        log_message(LOG_ERROR, "Token on line %zu at position %zu must not be empty."
+        log_message(LOG_ERROR, "Token on line %d at position %zu must not be empty."
                                " Set the value for key '%s = ...'",
                     conf_parser.line, (size_t)(p - conf_parser.buf.items), conf_parser.buf.items);
         goto end;
@@ -2082,7 +2107,7 @@ static bool parse_config(const char *filename) {
       }
       if (!conf_keyget()) {
         conf_parser.buf.items[conf_parser.k_len] = '\0';
-        log_message(LOG_ERROR, "Unknown key '%s' on line %zu, please check for typos",
+        log_message(LOG_ERROR, "Unknown key '%s' on line %d, please check for typos",
                     conf_parser.buf.items, conf_parser.line);
         goto end;
       } else if (conf_parser.error) {
@@ -2096,14 +2121,14 @@ static bool parse_config(const char *filename) {
       conf_parser.k_len = (size_t)(p - conf_parser.buf.items) - 1;
       if (*p != ']') {
         conf_parser.buf.items[conf_parser.k_len + 1] = '\0';
-        log_message(LOG_ERROR, "Line %zu wrongly creates a new scope '%s',"
+        log_message(LOG_ERROR, "Line %d wrongly creates a new scope '%s',"
                                " close it with ']' at position %zu",
                     conf_parser.line, conf_parser.buf.items, conf_parser.k_len + 2);
         goto end;
       }
       if (!conf_scopeget()) {
         conf_parser.buf.items[conf_parser.k_len + 2] = '\0';
-        log_message(LOG_ERROR, "Scope '%s' at line %zu is unknown, please check for typos",
+        log_message(LOG_ERROR, "Scope '%s' at line %d is unknown, please check for typos",
                     conf_parser.buf.items, conf_parser.line);
         goto end;
       }
@@ -2113,7 +2138,7 @@ static bool parse_config(const char *filename) {
     case '\0':
       break;
     default:
-      log_message(LOG_ERROR, "Line %zu starts with unexpected token '%d'. Only letters,"
+      log_message(LOG_ERROR, "Line %d starts with unexpected token '%d'. Only letters,"
                              " #, [, and empty lines are allowed here.",
                   conf_parser.line, conf_parser.buf.items[0]);
       goto end;
@@ -2209,7 +2234,7 @@ typedef struct Cin_Screen {
 
 typedef struct Cin_Layout {
   RECT chat_rect;
-  size_t scope_line;
+  int32_t scope_line;
   array_struct_members(Cin_Screen);
   uint32_t name_offset;
   uint32_t name_len;
@@ -4195,7 +4220,7 @@ static void cmd_store_executor(void) {
     layout->chat_rect = chat.rect;
   }
   if (!try_overwrite) goto append;
-  size_t scope_line = layout->scope_line;
+  int32_t scope_line = layout->scope_line;
   uint32_t name_len = layout->name_len - 1;
   err = fopen_s(&file, CIN_CONF_FILENAME, "rb");
   if (err) {
@@ -4211,7 +4236,7 @@ static void cmd_store_executor(void) {
     buf[buf_bytes] = '\0';
     const char *p = buf;
     const char *tail = buf + buf_bytes;
-    size_t bottom_line = 1;
+    int32_t bottom_line = 1;
     while (bottom_line < scope_line && (p = memchr(p, '\n', (size_t)(tail - p)))) {
       ++p;
       ++bottom_line;
@@ -4221,7 +4246,7 @@ static void cmd_store_executor(void) {
     const char *overwrite_start = p;
     const char *overwrite_end = overwrite_start;
     const char *last_name = NULL;
-    size_t line_breaks = 0;
+    int32_t line_breaks = 0;
     while ((p = memchr(p, '\n', (size_t)(tail - p)))) {
       ++line_breaks;
       overwrite_end = ++p;
@@ -4301,10 +4326,18 @@ static void cmd_store_executor(void) {
       fclose(file);
     }
     arena_free_pos(&console_arena, (uint8_t *)buf, buf_bytes);
-    // TODO: update layouts scope lines
-    // TODO: traverse layout tree and displace elements whose
-    // scope_line is greater than the original scope line of the
-    // stored layout
+    int32_t written_lines = has_chat ? 5 : 4;
+    int32_t line_shift = written_lines - line_breaks;
+    if (line_shift) {
+      Radix_Leaf *next = radix_leftmost(layout_tree->root);
+      while (next) {
+        Cin_Layout *next_layout = (Cin_Layout *)next->base.v;
+        if (next_layout->scope_line > scope_line) {
+          next_layout->scope_line += line_shift;
+        }
+        next = radix_next(layout_tree, next);
+      }
+    }
     return;
   }
 append:
