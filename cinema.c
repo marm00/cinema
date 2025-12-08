@@ -4139,9 +4139,13 @@ static void cmd_autoplay_executor(void) {
 
 static void cmd_autoplay_validator(void) {
   if (!validate_screens()) return;
-  LONGLONG seconds = 0;
+  LONGLONG seconds = -1;
   if (cmd_ctx.unicode) {
     wchar_t *p = cmd_ctx.unicode;
+    if (cin_wisnum(*p)) {
+      seconds = *p - L'0';
+      ++p;
+    }
     while (cin_wisnum(*p)) {
       seconds *= 10;
       seconds += *p - L'0';
@@ -4153,8 +4157,9 @@ static void cmd_autoplay_validator(void) {
       return;
     }
   }
-  if (seconds) set_preview(true, L"autoplay with '%lld' second delay %s", seconds, cmd_ctx.targets.items);
-  else set_preview(true, L"autoplay when media ends %s", cmd_ctx.targets.items);
+  if (seconds < 0) set_preview(true, L"autoplay when media ends %s", cmd_ctx.targets.items);
+  else if (seconds == 0) set_preview(true, L"turn off autoplay %s", cmd_ctx.targets.items);
+  else set_preview(true, L"autoplay with '%lld' second delay %s", seconds, cmd_ctx.targets.items);
   cmd_ctx.executor = cmd_autoplay_executor;
 }
 
