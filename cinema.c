@@ -2850,6 +2850,7 @@ typedef enum {
   MPV_WRITE,
   MPV_LOADFILE,
   MPV_WINDOW_ID,
+  MPV_SET_GEOMETRY,
   MPV_QUIT
 } MPV_Packet;
 
@@ -3100,7 +3101,7 @@ static inline void mpv_lock(void) {
   LockSetForegroundWindow(LSFW_LOCK);
 }
 
-static inline void mpv_return_focus(void) {
+static inline void mpv_restore_focus(void) {
   SetWindowPos(GetConsoleWindow(), HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
 }
 
@@ -3124,8 +3125,8 @@ static inline void iocp_parse(Instance *instance, const char *buf_start, size_t 
       }
     } else if (CIN_MPVVAL(p, "file-loaded")) {
       if (instance->autoplay_mpv) playlist_insert(instance);
-    } else if (CIN_MPVVAL(p, "playback-restart")) {
-      mpv_return_focus();
+    } else if (CIN_MPVVAL(p, "video-reconfig")) {
+      mpv_restore_focus();
     }
   } else if ((p = strstr(buf, CIN_MPVKEY_REQUEST))) {
     p += cin_strlen(CIN_MPVKEY_REQUEST);
@@ -3155,6 +3156,9 @@ static inline void iocp_parse(Instance *instance, const char *buf_start, size_t 
     } break;
     case MPV_QUIT:
       mpv_kill(instance);
+      break;
+    case MPV_SET_GEOMETRY:
+      mpv_restore_focus();
       break;
     default:
       break;
@@ -4420,8 +4424,8 @@ static void cmd_swap_executor(void) {
   if (first_screen && second_screen) {
     const char *first_geometry = (char *)screen_strings.items + first_screen->offset;
     const char *second_geometry = (char *)screen_strings.items + second_screen->offset;
-    overlap_write(first_instance, MPV_WRITE, "set_property", "geometry", second_geometry);
-    overlap_write(second_instance, MPV_WRITE, "set_property", "geometry", first_geometry);
+    overlap_write(first_instance, MPV_SET_GEOMETRY, "set_property", "geometry", second_geometry);
+    overlap_write(second_instance, MPV_SET_GEOMETRY, "set_property", "geometry", first_geometry);
     Cin_Screen tmp = *second_screen;
     *second_screen = *first_screen;
     *first_screen = tmp;
@@ -4511,7 +4515,7 @@ static void cmd_layout_executor(void) {
       log_message(LOG_INFO, "i=%u, screen=%zu", i);
       assert(IsWindow(old->window));
       const char *geometry = (char *)screen_strings.items + layout->items[screen].offset;
-      overlap_write(old, MPV_WRITE, "set_property", "geometry", geometry);
+      overlap_write(old, MPV_SET_GEOMETRY, "set_property", "geometry", geometry);
       if (old->full_screen) {
         old->full_screen = false;
         overlap_write(old, MPV_WRITE, "set_property", "fullscreen", "no");
