@@ -3106,7 +3106,6 @@ static inline void mpv_return_focus(void) {
 
 static inline void mpv_unlock(void) {
   LockSetForegroundWindow(LSFW_UNLOCK);
-  mpv_return_focus();
 }
 
 static inline void iocp_parse(Instance *instance, const char *buf_start, size_t buf_offset) {
@@ -3123,8 +3122,10 @@ static inline void iocp_parse(Instance *instance, const char *buf_start, size_t 
         ++p;
         if (CIN_MPVVAL(p, "quit")) mpv_kill(instance);
       }
-    } else if (instance->autoplay_mpv && CIN_MPVVAL(p, "file-loaded")) {
-      playlist_insert(instance);
+    } else if (CIN_MPVVAL(p, "file-loaded")) {
+      if (instance->autoplay_mpv) playlist_insert(instance);
+    } else if (CIN_MPVVAL(p, "playback-restart")) {
+      mpv_return_focus();
     }
   } else if ((p = strstr(buf, CIN_MPVKEY_REQUEST))) {
     p += cin_strlen(CIN_MPVKEY_REQUEST);
@@ -4689,6 +4690,13 @@ static void update_preview(void) {
     validator_fn();
   }
 }
+
+static void launch_default_layout(void) {
+  cmd_ctx.queued_layout = (Cin_Layout *)radix_leftmost(layout_tree->root)->base.v;
+  cmd_layout_executor();
+  cmd_reroll_validator();
+}
+
 int main(int argc, char **argv) {
   (void)argc;
   (void)argv;
@@ -4703,11 +4711,9 @@ int main(int argc, char **argv) {
   if (!init_commands()) exit(1);
   if (!init_executables()) exit(1);
   if (!init_documents()) exit(1);
-  if (!init_mpv()) exit(1);
   if (!init_timers()) exit(1);
-  mpv_lock();
-  mpv_spawn(cin_io.instances.head, 0);
-  cmd_reroll_validator();
+  if (!init_mpv()) exit(1);
+  launch_default_layout();
   // NOTE: It seems impossible to reach outside the bounds of the viewport
   // within Windows Terminal using a custom ReadConsoleInput approach. Virtual
   // terminal sequences and related APIs are bound to the viewport. So,
