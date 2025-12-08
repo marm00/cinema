@@ -3100,8 +3100,13 @@ static inline void mpv_lock(void) {
   LockSetForegroundWindow(LSFW_LOCK);
 }
 
+static inline void mpv_return_focus(void) {
+  SetWindowPos(GetConsoleWindow(), HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+}
+
 static inline void mpv_unlock(void) {
   LockSetForegroundWindow(LSFW_UNLOCK);
+  mpv_return_focus();
 }
 
 static inline void iocp_parse(Instance *instance, const char *buf_start, size_t buf_offset) {
@@ -3143,6 +3148,7 @@ static inline void iocp_parse(Instance *instance, const char *buf_start, size_t 
       intptr_t window_id = 0;
       for (; cin_isnum(*data); ++data) window_id = (window_id * 10) + *data - '0';
       assert(IsWindow((HWND)window_id));
+      assert(IsWindowVisible((HWND)window_id));
       instance->window = (HWND)window_id;
       GetWindowRect(instance->window, &instance->rect);
     } break;
@@ -4495,7 +4501,6 @@ static void cmd_layout_executor(void) {
   cmd_ctx.layout = layout;
   uint32_t next_count = layout->count;
   uint32_t screen = 0;
-  // TODO: bring terminal to foreground above mpv 'ontop=yes'
   mpv_lock();
   chat_reposition(layout);
   cache_foreach(&cin_io.instances, Instance, i, old) {
