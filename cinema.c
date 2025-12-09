@@ -1904,10 +1904,15 @@ typedef struct Conf_Layout {
   Conf_Key chat;
 } Conf_Layout;
 
+typedef struct Conf_Macro {
+  Conf_Key name;
+} Conf_Macro;
+
 typedef enum {
   CONF_SCOPE_ROOT,
   CONF_SCOPE_MEDIA,
-  CONF_SCOPE_LAYOUT
+  CONF_SCOPE_LAYOUT,
+  CONF_SCOPE_MACRO
 } Conf_Scope_Type;
 
 typedef struct Conf_Scope {
@@ -1916,6 +1921,7 @@ typedef struct Conf_Scope {
     Conf_Root root;
     Conf_Media media;
     Conf_Layout layout;
+    Conf_Macro macro;
   };
   int32_t line;
 } Conf_Scope;
@@ -1970,6 +1976,9 @@ static inline bool conf_keycmp(char *k, Conf_Scope_Type type, Conf_Key *out, boo
     case CONF_SCOPE_MEDIA:
       scope_msg = "under a [media] table";
       break;
+    case CONF_SCOPE_MACRO:
+      scope_msg = "under a [macro] table";
+      break;
     default:
       assert(false && "Unexpected type");
       break;
@@ -1995,7 +2004,6 @@ static inline bool conf_keycmp(char *k, Conf_Scope_Type type, Conf_Key *out, boo
 }
 
 static inline bool conf_keyget(void) {
-  // TODO: chatterino
   switch (conf_parser.k_len) {
   case 11:
     if (conf_keycmp("directories", CONF_SCOPE_MEDIA, &conf_scope()->media.directories, false)) return true;
@@ -2009,8 +2017,12 @@ static inline bool conf_keyget(void) {
   case 4:
     if (conf_keycmp("urls", CONF_SCOPE_MEDIA, &conf_scope()->media.urls, false)) return true;
     if (conf_keycmp("tags", CONF_SCOPE_MEDIA, &conf_scope()->media.tags, false)) return true;
-    if (conf_keycmp("name", CONF_SCOPE_LAYOUT, &conf_scope()->layout.name, true)) return true;
     if (conf_keycmp("chat", CONF_SCOPE_LAYOUT, &conf_scope()->layout.chat, true)) return true;
+    if (conf_scope()->type == CONF_SCOPE_MACRO) {
+      if (conf_keycmp("name", CONF_SCOPE_MACRO, &conf_scope()->macro.name, true)) return true;
+    } else {
+      if (conf_keycmp("name", CONF_SCOPE_LAYOUT, &conf_scope()->layout.name, true)) return true;
+    }
     break;
   default:
     break;
@@ -2031,6 +2043,7 @@ static inline bool conf_scopeget(void) {
     break;
   case 5:
     if (conf_scopecmp("media", CONF_SCOPE_MEDIA)) return true;
+    if (conf_scopecmp("macro", CONF_SCOPE_MACRO)) return true;
     break;
   default:
     break;
@@ -2645,6 +2658,16 @@ static bool init_config(const char *filename) {
       array_free_items(&console_arena, &scope->media.patterns);
       array_free_items(&console_arena, &scope->media.urls);
       array_free_items(&console_arena, &scope->media.tags);
+    } break;
+    case CONF_SCOPE_MACRO: {
+      if (!scope->macro.name.count) {
+        log_message(LOG_ERROR, "Macro at [scope] number %zu does not have a name key,"
+                               " please supply it: 'name = value'",
+                    i);
+        return false;
+      }
+      log_message(LOG_DEBUG, "Name: %s", scope->macro.name.items);
+      array_free_items(&console_arena, &scope->layout.name);
     } break;
     default:
       assert(false && "Unexpected scope");
