@@ -2945,7 +2945,7 @@ static bool overlap_read(Instance *instance) {
   ZeroMemory(&instance->ovl_ctx.ovl, sizeof(OVERLAPPED));
   char *start = instance->buf_tail->buf + instance->buf_tail->bytes;
   DWORD to_read = (DWORD)(sizeof(instance->buf_tail->buf) - instance->buf_tail->bytes);
-  if (!ReadFile(instance->pipe, start, to_read, NULL, &instance->ovl_ctx.ovl)) {
+  if (instance->pipe && !ReadFile(instance->pipe, start, to_read, NULL, &instance->ovl_ctx.ovl)) {
     if (GetLastError() != ERROR_IO_PENDING) {
       log_last_error("Failed to initialize read");
       return false;
@@ -2976,7 +2976,7 @@ static bool overlap_write(Instance *instance, MPV_Packet type, const char *cmd, 
   write->bytes = (size_t)bytes;
   log_message(LOG_DEBUG, "Writing message (PID %lu) (%zu bytes): %.*s",
               instance->pi.dwProcessId, write->bytes, write->bytes - 1, write->buf);
-  if (!WriteFile(instance->pipe, write->buf, (DWORD)write->bytes, NULL, &write->ovl_ctx.ovl)) {
+  if (instance->pipe && !WriteFile(instance->pipe, write->buf, (DWORD)write->bytes, NULL, &write->ovl_ctx.ovl)) {
     switch (GetLastError()) {
     case ERROR_IO_PENDING:
       // iocp will free write
@@ -3078,7 +3078,6 @@ static inline void playlist_insert(Instance *instance) {
 #define CIN_MPVKEY_REASON CIN_MPVKEY("reason")
 
 static inline void mpv_kill(Instance *instance) {
-  assert(instance->pipe);
   assert(instance->playlist);
   --instance->playlist->targets;
   Read_Buffer *buf_head = instance->buf_head;
@@ -3089,7 +3088,6 @@ static inline void mpv_kill(Instance *instance) {
   instance->buf_head = buf_head;
   instance->buf_tail = buf_tail;
   instance->next = next;
-  assert(!instance->pipe);
 }
 
 static size_t mpv_supply = 0;
