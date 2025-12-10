@@ -2565,14 +2565,14 @@ static inline void setup_macro(const char *name, Cin_Macro *macro) {
   int32_t len_utf8 = utf16_to_utf8(utf16_buf_norm.items);
   assert(len_utf8 > 1);
   uint32_t len_utf8_u32 = (uint32_t)len_utf8;
-  radix_insert(layout_tree, utf8_buf.items, len_utf8_u32, macro);
+  radix_insert(macro_tree, utf8_buf.items, len_utf8_u32, macro);
 }
 
 static inline void setup_macro_command(const char *command, Cin_Macro *macro) {
   int32_t len = utf8_to_utf16_norm(command);
   assert(len > 1);
   uint32_t len_u32 = (uint32_t)len;
-  array_extend(&console_arena, macro, utf16_buf_norm.items, len_u32);
+  array_wextend(&console_arena, macro, utf16_buf_norm.items, len_u32);
 }
 
 #define FOREACH_PART(k, part, bytes)                                                                   \
@@ -3556,6 +3556,7 @@ static struct CommandContext {
   wchar_t *unicode;
   Command_Targets targets;
   Command_Help help;
+  Cin_Macro *macro;
 } cmd_ctx = {0};
 
 static inline void set_preview(bool success, const wchar_t *format, ...) {
@@ -3869,6 +3870,102 @@ static void cmd_reroll_validator(void) {
   if (!validate_screens()) return;
   set_preview(true, L"reroll %s", cmd_ctx.targets.items);
   cmd_ctx.executor = cmd_reroll_executor;
+}
+
+static cmd_validator parse_command(const wchar_t *command) {
+  // Grammar rules:
+  // 1. First character must be either empty or in L'a'..L'z' (letter) or in L'1'..L'9' (digit)
+  // 2. Empty (whitespace*\0) is a command
+  // 3. Letter must precede one of: 'letter', 'space', '\0';
+  // 3a. 'letter' concatenates a string character
+  // 3b. 'space' finishes the string to setup (possible) command 'letter+'
+  // 3c. '\0' is (possibly) a command comprised of 'letter+'
+  // 4. Digit must precede one of: 'digit', '\0', 'space', 'letter'.
+  // 4a. 'digit' concatenates a decimal number
+  // 4b. '\0' is a command: consumes the number (array)
+  // 4c. 'space' pushes decimal number onto the numbers array
+  // 4d. 'letter' finishes the number array for command 'letter+' consumption
+  // 5. Command 'letter+' with 'space' (3b) may precede 'unicode*'
+  // 5a. 'unicode*' string is finished with '\0'
+  cmd_ctx.executor = NULL;
+  cmd_ctx.numbers.count = 0;
+  cmd_ctx.unicode = NULL;
+  const wchar_t *p = command;
+  while (iswspace(*p)) ++p;
+  size_t number = 0;
+  for (; *p; ++p) {
+    if (cin_wisnum_1based(*p)) {
+      // 4a. build decimal number
+      number *= 10;
+      number += *p - L'0';
+    } else if (*p == ' ') {
+      if (number) {
+        // 4c. push decimal number onto array
+        array_push(&console_arena, &cmd_ctx.numbers, number);
+      }
+      number = 0;
+    } else if (cin_wisloweralpha(*p)) {
+      // if numbers array empty and number, push
+      if (number) {
+        array_push(&console_arena, &cmd_ctx.numbers, number);
+        number = 0;
+      }
+      break;
+    } else {
+      intptr_t pos = p - command;
+      assert(pos >= 0);
+      set_preview(false, L"unexpected character '%c' at position %zd,"
+                         L" expected: alphanumeric, space, enter",
+                  *p, pos + 1);
+      return NULL;
+    }
+  }
+  if (!*p) {
+    // 2/4b. command
+    if (number) {
+      array_push(&console_arena, &cmd_ctx.numbers, number);
+    }
+    return cmd_reroll_validator;
+  }
+  const wchar_t *start = p;
+  ++p;
+  while (cin_wisloweralpha(*p)) ++p;
+  // 3/3a. letter+, command begins at start, ends at p
+  if (!*p) {
+    // 3c. possible command
+    cmd_validator validator = patricia_query(cmd_ctx.trie, start);
+    if (!validator) {
+      set_preview(false, L"'%s' is not a valid command", start);
+    }
+    return validator;
+  }
+  if (*p != L' ') {
+    intptr_t pos = p - command;
+    assert(pos >= 0);
+    set_preview(false, L"unexpected character '%c' at position %zd,"
+                       L" expected: letter, space, enter",
+                *p, pos + 1);
+    return NULL;
+  }
+  *(wchar_t *)p = L'\0';
+  cmd_validator validator = patricia_query(cmd_ctx.trie, start);
+  if (!validator) {
+    set_preview(false, L"'%s' is not a valid command", start);
+  }
+  *(wchar_t *)p = L' ';
+  ++p;
+  // 5a. unicode starts at p ends at \0
+  cmd_ctx.unicode = (wchar_t *)p;
+  return validator;
+}
+
+static void update_preview(void) {
+  array_reserve(&console_arena, repl.msg, 1);
+  repl.msg->items[repl.msg->count] = L'\0';
+  cmd_validator validator_fn = parse_command(repl.msg->items);
+  if (validator_fn) {
+    validator_fn();
+  }
 }
 
 static void cmd_tag_executor(void) {
@@ -4538,6 +4635,51 @@ static void cmd_clear_validator(void) {
   cmd_ctx.executor = cmd_clear_executor;
 }
 
+static void cmd_macro_executor(void) {
+  Cin_Macro *macro = cmd_ctx.macro;
+  if (macro) {
+    const wchar_t *p = macro->items;
+    const wchar_t *tail = macro->items + macro->count - 1;
+    do {
+      cmd_ctx.executor = NULL;
+      cmd_validator validator_fn = parse_command(p);
+      if (validator_fn) {
+        validator_fn();
+        if (cmd_ctx.executor) {
+          cmd_ctx.executor();
+        } else {
+          log_wmessage(LOG_ERROR, L"Failed to validate macro command '%s': %s", p, preview.items);
+          return;
+        }
+      } else {
+        log_wmessage(LOG_ERROR, L"Failed to parse macro command '%s': %s", p, preview.items);
+        return;
+      }
+    } while ((p = wmemchr(p, L'\0', (size_t)(tail - p))) && *++p);
+  }
+}
+
+static void cmd_macro_validator(void) {
+  radix_v macro = NULL;
+  const uint8_t *macro_name = NULL;
+  if (cmd_ctx.unicode) {
+    int32_t len = utf16_to_utf8(cmd_ctx.unicode);
+    macro = radix_query(macro_tree, utf8_buf.items, (size_t)len - 1, &macro_name);
+    if (!macro) {
+      set_preview(false, L"macro does not exist: '%s'", cmd_ctx.unicode);
+      return;
+    }
+    utf8_to_utf16_raw((char *)macro_name);
+    assert(macro);
+    assert(macro_name);
+    set_preview(true, L"execute macro '%s'", utf16_buf_raw.items);
+  } else {
+    set_preview(true, L"execute macro '' (nothing)");
+  }
+  cmd_ctx.macro = (Cin_Macro *)macro;
+  cmd_ctx.executor = cmd_macro_executor;
+}
+
 static void cmd_quit_executor(void) {
   PostMessageW(chat.window, WM_CLOSE, 0, 0);
   cache_foreach(&cin_io.instances, Instance, i, instance) {
@@ -4648,104 +4790,9 @@ static bool init_commands(void) {
   register_cmd(L"maximize", L"Maximize and close others [(1) maximize]", cmd_maximize_validator);
   register_cmd(L"swap", L"Swap screen contents [(1 2) swap]", cmd_swap_validator);
   register_cmd(L"clear", L"Clear tag/term [(1 2) clear]", cmd_clear_validator);
+  register_cmd(L"macro", L"Execute macro [macro (name)]", cmd_macro_validator);
   register_cmd(L"quit", L"Close screens and quit Cinema", cmd_quit_validator);
   return true;
-}
-
-static cmd_validator parse_repl(void) {
-  // Grammar rules:
-  // 1. First character must be either empty or in L'a'..L'z' (letter) or in L'1'..L'9' (digit)
-  // 2. Empty (whitespace*\0) is a command
-  // 3. Letter must precede one of: 'letter', 'space', '\0';
-  // 3a. 'letter' concatenates a string character
-  // 3b. 'space' finishes the string to setup (possible) command 'letter+'
-  // 3c. '\0' is (possibly) a command comprised of 'letter+'
-  // 4. Digit must precede one of: 'digit', '\0', 'space', 'letter'.
-  // 4a. 'digit' concatenates a decimal number
-  // 4b. '\0' is a command: consumes the number (array)
-  // 4c. 'space' pushes decimal number onto the numbers array
-  // 4d. 'letter' finishes the number array for command 'letter+' consumption
-  // 5. Command 'letter+' with 'space' (3b) may precede 'unicode*'
-  // 5a. 'unicode*' string is finished with '\0'
-  cmd_ctx.executor = NULL;
-  cmd_ctx.numbers.count = 0;
-  cmd_ctx.unicode = NULL;
-  array_reserve(&console_arena, repl.msg, 1);
-  repl.msg->items[repl.msg->count] = L'\0';
-  wchar_t *p = repl.msg->items;
-  while (iswspace(*p)) ++p;
-  size_t number = 0;
-  for (; *p; ++p) {
-    if (cin_wisnum_1based(*p)) {
-      // 4a. build decimal number
-      number *= 10;
-      number += *p - L'0';
-    } else if (*p == ' ') {
-      if (number) {
-        // 4c. push decimal number onto array
-        array_push(&console_arena, &cmd_ctx.numbers, number);
-      }
-      number = 0;
-    } else if (cin_wisloweralpha(*p)) {
-      // if numbers array empty and number, push
-      if (number) {
-        array_push(&console_arena, &cmd_ctx.numbers, number);
-        number = 0;
-      }
-      break;
-    } else {
-      int64_t pos = p - repl.msg->items;
-      assert(pos >= 0);
-      set_preview(false, L"unexpected character '%lc' at position %lld,"
-                         L" expected: alphanumeric, space, enter",
-                  *p, pos + 1);
-      return NULL;
-    }
-  }
-  if (!*p) {
-    // 2/4b. command
-    if (number) {
-      array_push(&console_arena, &cmd_ctx.numbers, number);
-    }
-    return cmd_reroll_validator;
-  }
-  wchar_t *start = p;
-  ++p;
-  while (cin_wisloweralpha(*p)) ++p;
-  // 3/3a. letter+, command begins at start, ends at p
-  if (!*p) {
-    // 3c. possible command
-    cmd_validator validator = patricia_query(cmd_ctx.trie, start);
-    if (!validator) {
-      set_preview(false, L"'%ls' is not a valid command", start);
-    }
-    return validator;
-  }
-  if (*p != L' ') {
-    int64_t pos = p - repl.msg->items;
-    assert(pos >= 0);
-    set_preview(false, L"unexpected character '%lc' at position %lld,"
-                       L" expected: letter, space, enter",
-                *p, pos + 1);
-    return NULL;
-  }
-  *p = L'\0';
-  cmd_validator validator = patricia_query(cmd_ctx.trie, start);
-  if (!validator) {
-    set_preview(false, L"'%ls' is not a valid command", start);
-  }
-  *p = L' ';
-  ++p;
-  // 5a. unicode starts at p ends at \0
-  cmd_ctx.unicode = p;
-  return validator;
-}
-
-static void update_preview(void) {
-  cmd_validator validator_fn = parse_repl();
-  if (validator_fn) {
-    validator_fn();
-  }
 }
 
 static void launch_default_layout(void) {
