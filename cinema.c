@@ -1906,6 +1906,7 @@ typedef struct Conf_Layout {
 
 typedef struct Conf_Macro {
   Conf_Key name;
+  Conf_Key command;
 } Conf_Macro;
 
 typedef enum {
@@ -2010,6 +2011,9 @@ static inline bool conf_keyget(void) {
     break;
   case 8:
     if (conf_keycmp("patterns", CONF_SCOPE_MEDIA, &conf_scope()->media.patterns, false)) return true;
+    break;
+  case 7:
+    if (conf_keycmp("command", CONF_SCOPE_MACRO, &conf_scope()->macro.command, false)) return true;
     break;
   case 6:
     if (conf_keycmp("screen", CONF_SCOPE_LAYOUT, &conf_scope()->layout.screen, false)) return true;
@@ -2253,6 +2257,10 @@ typedef struct Cin_Layout {
   uint32_t name_len;
 } Cin_Layout;
 
+typedef struct Cin_Macro {
+  array_struct_members(wchar_t);
+} Cin_Macro;
+
 static struct {
   array_struct_members(Directory_Path);
   uint32_t abs_count;
@@ -2277,6 +2285,7 @@ static Robin_Hood_Table pat_table = {0};
 static Robin_Hood_Table url_table = {0};
 static Radix_Tree *tag_tree = NULL;
 static Radix_Tree *layout_tree = NULL;
+static Radix_Tree *macro_tree = NULL;
 
 static void setup_directory(const char *path, Tag_Directories *tag_dirs) {
   int32_t len_utf16 = utf8_to_utf16_norm(path);
@@ -2550,6 +2559,22 @@ static inline void setup_layout(const char *name, Cin_Layout *layout) {
   radix_insert(layout_tree, utf8_buf.items, len_utf8_u32, layout);
 }
 
+static inline void setup_macro(const char *name, Cin_Macro *macro) {
+  int32_t len_utf16 = utf8_to_utf16_norm(name);
+  assert(len_utf16 > 1);
+  int32_t len_utf8 = utf16_to_utf8(utf16_buf_norm.items);
+  assert(len_utf8 > 1);
+  uint32_t len_utf8_u32 = (uint32_t)len_utf8;
+  radix_insert(layout_tree, utf8_buf.items, len_utf8_u32, macro);
+}
+
+static inline void setup_macro_command(const char *command, Cin_Macro *macro) {
+  int32_t len = utf8_to_utf16_norm(command);
+  assert(len > 1);
+  uint32_t len_u32 = (uint32_t)len;
+  array_extend(&console_arena, macro, utf16_buf_norm.items, len_u32);
+}
+
 #define FOREACH_PART(k, part, bytes)                                                                   \
   for (char *_left = (k)->items, *_right = (k)->items + (k)->count, *part = _left, *_comma = NULL;     \
        _left < _right;                                                                                 \
@@ -2570,6 +2595,7 @@ static bool init_config(const char *filename) {
   array_init(&console_arena, &geometry_buf, CIN_LAYOUT_SCREENS_CAP);
   tag_tree = radix_tree();
   layout_tree = radix_tree();
+  macro_tree = radix_tree();
   Conf_Root *root = &conf_parser.scopes.items[0].root;
   uint32_t bytes;
   for (size_t i = 1; i < conf_parser.scopes.count; ++i) {
@@ -2666,8 +2692,14 @@ static bool init_config(const char *filename) {
                     i);
         return false;
       }
+      Cin_Macro *macro = arena_bump_T1(&console_arena, Cin_Macro);
       log_message(LOG_DEBUG, "Name: %s", scope->macro.name.items);
+      FOREACH_PART(&scope->macro.command, part, bytes) {
+        setup_macro_command(part, macro);
+      }
+      setup_macro(scope->macro.name.items, macro);
       array_free_items(&console_arena, &scope->layout.name);
+      array_free_items(&console_arena, &scope->macro.command);
     } break;
     default:
       assert(false && "Unexpected scope");
