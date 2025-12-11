@@ -2541,7 +2541,8 @@ static inline bool setup_chat(const char *geometry, uint32_t len, Cin_Layout *la
   return true;
 }
 
-static inline void setup_screen(const char *geometry, uint32_t bytes, Cin_Layout *layout) {
+static inline void setup_screen(const char *geometry, Cin_Layout *layout) {
+  uint32_t bytes = (uint32_t)strlen(geometry) + 1U;
   Cin_Screen screen = {.offset = screen_strings.count, .len = bytes};
   array_extend(&console_arena, &screen_strings, geometry, bytes);
   array_push(&console_arena, layout, screen);
@@ -2575,13 +2576,14 @@ static inline void setup_macro_command(const char *command, Cin_Macro *macro) {
   array_wextend(&console_arena, macro, utf16_buf_norm.items, len_u32);
 }
 
-#define FOREACH_PART(k, part, bytes)                                                                   \
-  for (char *_left = (k)->items, *_right = (k)->items + (k)->count, *part = _left, *_comma = NULL;     \
-       _left < _right;                                                                                 \
-       _left = _comma ? _comma + 1 : _right, _left += _comma ? strspn(_left, " \t") : 0, part = _left) \
-    if ((_comma = memchr(_left, ',', (uint32_t)(_right - _left))),                                     \
-        (bytes = _comma ? (uint32_t)(_comma - _left + 1) : (uint32_t)(_right - _left)),                \
-        (bytes > 1) && (_comma ? (_comma[0] = '\0', 1) : (_left[bytes - 1] = '\0', 1), 1))
+#define FOREACH_PART(str, part)                                                     \
+  for (char *part = (str)->items, *_right = part, *_tail = part + (str)->count - 1; \
+       part && part < _tail;                                                        \
+       part = _right ? ++_right : NULL)                                             \
+    if ((part += strspn(part, " \t,")),                                             \
+        (_right = memchr(part, ',', (size_t)(_tail - part))),                       \
+        (_right = _right ? (*_right = '\0', _right) : NULL),                        \
+        *part)
 
 static bool init_config(const char *filename) {
   if (!parse_config(filename)) return false;
@@ -2597,7 +2599,6 @@ static bool init_config(const char *filename) {
   layout_tree = radix_tree();
   macro_tree = radix_tree();
   Conf_Root *root = &conf_parser.scopes.items[0].root;
-  uint32_t bytes;
   for (size_t i = 1; i < conf_parser.scopes.count; ++i) {
     Conf_Scope *scope = &conf_parser.scopes.items[i];
     log_message(LOG_DEBUG, "[Scope %zu: %zu]", i, scope->type);
@@ -2624,9 +2625,9 @@ static bool init_config(const char *filename) {
       layout->scope_line = scope->line;
       array_init(&console_arena, layout, CIN_LAYOUT_SCREENS_CAP);
       log_message(LOG_DEBUG, "Name: %s", scope->layout.name.items);
-      FOREACH_PART(&scope->layout.screen, part, bytes) {
-        log_message(LOG_DEBUG, "Screen: %s, len=%d", part, bytes);
-        setup_screen(part, bytes, layout);
+      FOREACH_PART(&scope->layout.screen, part) {
+        log_message(LOG_DEBUG, "Screen: %s", part);
+        setup_screen(part, layout);
       }
       setup_layout(scope->layout.name.items, layout);
       array_free_items(&console_arena, &scope->layout.name);
@@ -2656,19 +2657,19 @@ static bool init_config(const char *filename) {
           tag_url_items = tag_items->url_items;
         }
       }
-      FOREACH_PART(&scope->media.directories, part, bytes) {
+      FOREACH_PART(&scope->media.directories, part) {
         log_message(LOG_DEBUG, "Directory: %s", part);
         setup_directory(part, tag_directories);
       }
-      FOREACH_PART(&scope->media.patterns, part, bytes) {
+      FOREACH_PART(&scope->media.patterns, part) {
         log_message(LOG_DEBUG, "Pattern: %s", part);
         setup_pattern(part, tag_pattern_items);
       }
-      FOREACH_PART(&scope->media.urls, part, bytes) {
+      FOREACH_PART(&scope->media.urls, part) {
         log_message(LOG_DEBUG, "URL: %s", part);
         setup_url(part, tag_url_items);
       }
-      FOREACH_PART(&scope->media.tags, part, bytes) {
+      FOREACH_PART(&scope->media.tags, part) {
         log_message(LOG_DEBUG, "Tag: %s", part);
         setup_tag(part, tag_items);
       }
@@ -2694,7 +2695,8 @@ static bool init_config(const char *filename) {
       }
       Cin_Macro *macro = arena_bump_T1(&console_arena, Cin_Macro);
       log_message(LOG_DEBUG, "Name: %s", scope->macro.name.items);
-      FOREACH_PART(&scope->macro.command, part, bytes) {
+      FOREACH_PART(&scope->macro.command, part) {
+        log_message(LOG_DEBUG, "Macro: %s", part);
         setup_macro_command(part, macro);
       }
       setup_macro(scope->macro.name.items, macro);
@@ -4370,7 +4372,7 @@ static void cmd_store_executor(void) {
       array_grow(&console_arena, &geometry_buf, bytes_u32);
       char *pos = geometry_buf.items + offset;
       snprintf(pos, bytes_u32, FSTR_RECT, FSTR_RECT_ARGS(instance->rect));
-      setup_screen(pos, bytes_u32, layout);
+      setup_screen(pos, layout);
       assert(geometry_buf.items[geometry_buf.count - 1] == '\0');
       geometry_buf.items[geometry_buf.count - 1] = ',';
     }
