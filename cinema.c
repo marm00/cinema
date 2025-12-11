@@ -2077,18 +2077,22 @@ static bool parse_config(const char *filename) {
     assert(conf_parser.buf.capacity > 1);
     if (conf_parser.buf.items[conf_parser.len - 1] == '\n') {
       conf_parser.buf.items[conf_parser.len - 1] = '\0';
-    } else if (!feof(file)) {
+      assert(conf_parser.buf.items[conf_parser.len] == '\0');
+    } else if (feof(file)) {
+      ++conf_parser.len;
+      assert(conf_parser.buf.items[conf_parser.len - 1] == '\0');
+    } else {
       // buffer too small, collect remainder and grow
       assert(conf_parser.buf.items[conf_parser.len] == '\0');
-      conf_parser.buf.count = (uint32_t)conf_parser.len;
+      array_grow(&console_arena, &conf_parser.buf, (uint32_t)conf_parser.len);
       int32_t c;
       while ((c = fgetc(file)) != '\n' && c != EOF) {
         array_push(&console_arena, &conf_parser.buf, (char)c);
       }
       array_push(&console_arena, &conf_parser.buf, '\0');
       conf_parser.len = conf_parser.buf.count - 1;
+      assert(conf_parser.buf.items[conf_parser.len] == '\0');
     }
-    assert(conf_parser.buf.items[conf_parser.len] == '\0');
     assert(conf_parser.buf.items[conf_parser.len - 1] != '\n');
     char first = cin_lower_isalpha(&conf_parser.buf.items[0]) ? 'a' : conf_parser.buf.items[0];
     switch (first) {
