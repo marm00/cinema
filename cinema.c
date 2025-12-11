@@ -1907,6 +1907,7 @@ typedef struct Conf_Layout {
 typedef struct Conf_Macro {
   Conf_Key name;
   Conf_Key command;
+  Conf_Key startup;
 } Conf_Macro;
 
 typedef enum {
@@ -2014,6 +2015,7 @@ static inline bool conf_keyget(void) {
     break;
   case 7:
     if (conf_keycmp("command", CONF_SCOPE_MACRO, &conf_scope()->macro.command, false)) return true;
+    if (conf_keycmp("startup", CONF_SCOPE_MACRO, &conf_scope()->macro.startup, true)) return true;
     break;
   case 6:
     if (conf_keycmp("screen", CONF_SCOPE_LAYOUT, &conf_scope()->layout.screen, false)) return true;
@@ -2275,6 +2277,7 @@ static array_struct(Directory_Node) directory_nodes = {0};
 static array_struct(uint8_t) layout_strings = {0};
 static array_struct(uint8_t) screen_strings = {0};
 static array_struct(char) geometry_buf = {0};
+static array_struct(Cin_Macro *) startup_macros = {0};
 
 #define CIN_DIRECTORIES_CAP 64
 #define CIN_DIRECTORY_ITEMS_CAP 64
@@ -2564,13 +2567,14 @@ static inline void setup_layout(const char *name, Cin_Layout *layout) {
   radix_insert(layout_tree, utf8_buf.items, len_utf8_u32, layout);
 }
 
-static inline void setup_macro(const char *name, Cin_Macro *macro) {
+static inline void setup_macro(const char *name, Cin_Macro *macro, bool startup) {
   int32_t len_utf16 = utf8_to_utf16_norm(name);
   assert(len_utf16 > 1);
   int32_t len_utf8 = utf16_to_utf8(utf16_buf_norm.items);
   assert(len_utf8 > 1);
   uint32_t len_utf8_u32 = (uint32_t)len_utf8;
   radix_insert(macro_tree, utf8_buf.items, len_utf8_u32, macro);
+  if (startup) array_push(&console_arena, &startup_macros, macro);
 }
 
 static inline void setup_macro_command(const char *command, Cin_Macro *macro) {
@@ -2703,9 +2707,11 @@ static bool init_config(const char *filename) {
         log_message(LOG_DEBUG, "Macro: %s", part);
         setup_macro_command(part, macro);
       }
-      setup_macro(scope->macro.name.items, macro);
-      array_free_items(&console_arena, &scope->layout.name);
+      bool startup = strcmp("yes", scope->macro.startup.items) == 0;
+      setup_macro(scope->macro.name.items, macro, startup);
+      array_free_items(&console_arena, &scope->macro.name);
       array_free_items(&console_arena, &scope->macro.command);
+      array_free_items(&console_arena, &scope->macro.startup);
     } break;
     default:
       assert(false && "Unexpected scope");
@@ -4801,10 +4807,11 @@ static bool init_commands(void) {
   return true;
 }
 
-static void launch_default_layout(void) {
-  cmd_ctx.queued_layout = (Cin_Layout *)radix_leftmost(layout_tree->root)->base.v;
-  cmd_layout_executor();
-  cmd_reroll_validator();
+static void execute_startup_macros(void) {
+  array_foreach(&startup_macros, Cin_Macro *, i, macro) {
+    cmd_ctx.macro = macro;
+    cmd_macro_executor();
+  }
 }
 
 int main(int argc, char **argv) {
@@ -4823,7 +4830,7 @@ int main(int argc, char **argv) {
   if (!init_documents()) exit(1);
   if (!init_timers()) exit(1);
   if (!init_mpv()) exit(1);
-  launch_default_layout();
+  execute_startup_macros();
   // NOTE: It seems impossible to reach outside the bounds of the viewport
   // within Windows Terminal using a custom ReadConsoleInput approach. Virtual
   // terminal sequences and related APIs are bound to the viewport. So,
