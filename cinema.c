@@ -4694,7 +4694,7 @@ static void cmd_macro_validator(void) {
 
 #define TWITCH_CHANNEL_MAX_CHARS 25
 #define TWITCH_PREFIX "https://www.twitch.tv/"
-#define TWITCH_BUF_SIZE (cin_strlen(TWITCH_PREFIX) + TWITCH_CHANNEL_MAX_CHARS)
+#define TWITCH_BUF_SIZE (cin_strlen(TWITCH_PREFIX) + TWITCH_CHANNEL_MAX_CHARS + 1)
 
 static void cmd_twitch_executor(void) {
   if (!cmd_ctx.unicode) return;
@@ -4710,6 +4710,10 @@ static void cmd_twitch_executor(void) {
 
 static void cmd_twitch_validator(void) {
   if (!validate_screens()) return;
+  if (cmd_ctx.unicode && wcslen(cmd_ctx.unicode) > TWITCH_CHANNEL_MAX_CHARS) {
+    set_preview(false, L"twitch channel name is too long (max is %d characters)", TWITCH_CHANNEL_MAX_CHARS);
+    return;
+  }
   set_preview(true, L"" TWITCH_PREFIX "%s %s", cmd_ctx.unicode ? cmd_ctx.unicode : L"", cmd_ctx.targets.items);
   cmd_ctx.executor = cmd_twitch_executor;
 }
