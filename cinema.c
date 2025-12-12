@@ -4692,6 +4692,28 @@ static void cmd_macro_validator(void) {
   cmd_ctx.executor = cmd_macro_executor;
 }
 
+#define TWITCH_CHANNEL_MAX_CHARS 25
+#define TWITCH_PREFIX "https://www.twitch.tv/"
+#define TWITCH_BUF_SIZE (cin_strlen(TWITCH_PREFIX) + TWITCH_CHANNEL_MAX_CHARS)
+
+static void cmd_twitch_executor(void) {
+  if (!cmd_ctx.unicode) return;
+  static char twitch_buf[TWITCH_BUF_SIZE] = {TWITCH_PREFIX};
+  int32_t len = utf16_to_utf8(cmd_ctx.unicode);
+  assert(len >= 0);
+  const char *channel = (const char *)utf8_buf.items;
+  memcpy(twitch_buf + cin_strlen(TWITCH_PREFIX), channel, (size_t)len);
+  mpv_target_foreach(i, instance) {
+    overlap_write(instance, MPV_LOADFILE, "loadfile", twitch_buf, NULL);
+  }
+}
+
+static void cmd_twitch_validator(void) {
+  if (!validate_screens()) return;
+  set_preview(true, L"" TWITCH_PREFIX "%s %s", cmd_ctx.unicode ? cmd_ctx.unicode : L"", cmd_ctx.targets.items);
+  cmd_ctx.executor = cmd_twitch_executor;
+}
+
 static void cmd_quit_executor(void) {
   PostMessageW(chat.window, WM_CLOSE, 0, 0);
   cache_foreach(&cin_io.instances, Instance, i, instance) {
@@ -4795,6 +4817,7 @@ static bool init_commands(void) {
   register_cmd(L"reroll", L"Shuffle media [(1 2 ..) (reroll)]", cmd_reroll_validator);
   register_cmd(L"tag", L"Limit media to tag [(1 2 ..) tag (name)]", cmd_tag_validator);
   register_cmd(L"search", L"Limit media to term [(1 2 ..) search (term)]", cmd_search_validator);
+  register_cmd(L"twitch", L"Set media to twitch url [(1 2 ..) twitch (channel)]", cmd_twitch_validator);
   register_cmd(L"hide", L"Hide media with term [hide term]", cmd_hide_validator);
   register_cmd(L"autoplay", L"Autoplay media [(1 2 ..) autoplay (seconds)]", cmd_autoplay_validator);
   register_cmd(L"lock", L"Lock/unlock screen contents [(1 2 ..) lock]", cmd_lock_validator);
@@ -4812,6 +4835,7 @@ static void execute_startup_macros(void) {
     cmd_ctx.macro = macro;
     cmd_macro_executor();
   }
+  cmd_reroll_validator();
 }
 
 int main(int argc, char **argv) {
