@@ -4794,6 +4794,38 @@ static void cmd_copy_validator(void) {
   cmd_ctx.executor = cmd_copy_executor;
 }
 
+#define CIN_LIST_TAGS_PREFIX CR "Tags: "
+#define CIN_LIST_TAGS_PREFIX_LEN cin_strlen(CIN_LIST_TAGS_PREFIX)
+
+static void cmd_list_executor(void) {
+  Radix_Leaf *next = radix_leftmost(tag_tree->root);
+  array_struct(char) output = {0};
+  array_set(&console_arena, &output, CIN_LIST_TAGS_PREFIX, CIN_LIST_TAGS_PREFIX_LEN);
+  size_t start_count = output.count;
+  while (next) {
+    assert(next->len);
+    const char *key = (char *)next->key;
+    uint32_t len = (uint32_t)next->len - 1U;
+    array_extend(&console_arena, &output, key, len);
+    array_push(&console_arena, &output, ',');
+    array_push(&console_arena, &output, ' ');
+    next = radix_next(tag_tree, next);
+  }
+  if (output.count > start_count) {
+    array_pop(&output);
+    output.items[output.count - 1] = '\0';
+  }
+  int32_t len = utf8_to_utf16_nraw(output.items, (int32_t)output.count);
+  assert(len);
+  wwrite_safe(utf16_buf_raw.items, (DWORD)len);
+  array_free_items(&console_arena, &output);
+}
+
+static void cmd_list_validator(void) {
+  set_preview(true, L"list all tags");
+  cmd_ctx.executor = cmd_list_executor;
+}
+
 static void cmd_quit_executor(void) {
   PostMessageW(chat.window, WM_CLOSE, 0, 0);
   cache_foreach(&cin_io.instances, Instance, i, instance) {
@@ -4906,6 +4938,7 @@ static bool init_commands(void) {
   register_cmd(L"swap", L"Swap screen contents [(1 2) swap]", cmd_swap_validator);
   register_cmd(L"clear", L"Clear tag/term [(1 2 ..) clear]", cmd_clear_validator);
   register_cmd(L"copy", L"Copy url(s) to clipboard [(1 2 ..) copy]", cmd_copy_validator);
+  register_cmd(L"list", L"Show all tags", cmd_list_validator);
   register_cmd(L"macro", L"Execute macro [macro (name)]", cmd_macro_validator);
   register_cmd(L"quit", L"Close screens and quit Cinema", cmd_quit_validator);
   return true;
