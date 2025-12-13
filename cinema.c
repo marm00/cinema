@@ -2707,7 +2707,7 @@ static bool init_config(const char *filename) {
         log_message(LOG_DEBUG, "Macro: %s", part);
         setup_macro_command(part, macro);
       }
-      bool startup = strcmp("yes", scope->macro.startup.items) == 0;
+      bool startup = scope->macro.startup.items && strcmp("yes", scope->macro.startup.items) == 0;
       setup_macro(scope->macro.name.items, macro, startup);
       array_free_items(&console_arena, &scope->macro.name);
       array_free_items(&console_arena, &scope->macro.command);
