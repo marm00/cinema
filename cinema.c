@@ -2278,6 +2278,7 @@ static array_struct(uint8_t) layout_strings = {0};
 static array_struct(uint8_t) screen_strings = {0};
 static array_struct(char) geometry_buf = {0};
 static array_struct(Cin_Macro *) startup_macros = {0};
+static array_struct(wchar_t) clipboard = {0};
 
 #define CIN_DIRECTORIES_CAP 64
 #define CIN_DIRECTORY_ITEMS_CAP 64
@@ -2956,6 +2957,7 @@ typedef struct Instance {
   HWND window;
   RECT rect;
   Playlist *playlist;
+  char *url;
   Console_Timer_Ctx *timer;
   bool full_screen;
   bool autoplay_mpv;
@@ -3120,8 +3122,9 @@ static inline void playlist_play_core(Instance *instance, const char *arg) {
   assert(instance->playlist);
   Playlist *playlist = instance->playlist;
   uint32_t index = instance->playlist->next_index;
-  overlap_write(instance, MPV_LOADFILE, "loadfile",
-                (char *)docs.items + playlist->items[index], arg);
+  char *url = (char *)docs.items + playlist->items[index];
+  overlap_write(instance, MPV_LOADFILE, "loadfile", url, arg);
+  instance->url = url;
   if (++instance->playlist->next_index == instance->playlist->count) {
     playlist_shuffle(instance->playlist);
   }
@@ -3812,8 +3815,10 @@ static void mpv_spawn(Instance *instance, size_t index) {
   instance->buf_tail = instance->buf_head;
   bool ok_read = overlap_read(instance);
   assert(ok_read);
-  overlap_write(instance, MPV_LOADFILE, "loadfile",
-                (char *)docs.items + docs.suffix_to_doc[(0 + (int32_t)index) % docs.doc_count], NULL);
+  // TODO: playlist instead
+  char *url = (char *)docs.items + docs.suffix_to_doc[(0 + (int32_t)index) % docs.doc_count];
+  overlap_write(instance, MPV_LOADFILE, "loadfile", url, NULL);
+  instance->url = url;
   overlap_write(instance, MPV_WINDOW_ID, "get_property", "window-id", NULL);
   ++mpv_demand;
 }
@@ -4705,6 +4710,7 @@ static void cmd_twitch_executor(void) {
   memcpy(twitch_buf + cin_strlen(TWITCH_PREFIX), channel, (size_t)len);
   mpv_target_foreach(i, instance) {
     overlap_write(instance, MPV_LOADFILE, "loadfile", twitch_buf, NULL);
+    instance->url = twitch_buf;
   }
 }
 
@@ -4716,6 +4722,52 @@ static void cmd_twitch_validator(void) {
   }
   set_preview(true, L"" TWITCH_PREFIX "%s %s", cmd_ctx.unicode ? cmd_ctx.unicode : L"", cmd_ctx.targets.items);
   cmd_ctx.executor = cmd_twitch_executor;
+}
+
+// NOTE: voidtools Everything supports pipe '|' as search separator and '"' for spaces
+#define CIN_CLIPBOARD_SEPARATOR L'|'
+#define CIN_CLIPBOARD_ENCLOSER L'"'
+
+static void cmd_copy_executor(void) {
+  clipboard.count = 0;
+  mpv_target_foreach(i, instance) {
+    array_push(&console_arena, &clipboard, CIN_CLIPBOARD_ENCLOSER);
+    char *url = instance->url;
+    int32_t len = utf8_to_utf16_raw(url);
+    assert(len > 0);
+    wchar_t *url_utf16 = utf16_buf_raw.items;
+    array_wextend(&console_arena, &clipboard, url_utf16, (uint32_t)len);
+    assert(clipboard.items[clipboard.count - 1] == L'\0');
+    clipboard.items[clipboard.count - 1] = CIN_CLIPBOARD_ENCLOSER;
+    array_push(&console_arena, &clipboard, CIN_CLIPBOARD_SEPARATOR);
+  }
+  if (clipboard.count) clipboard.items[clipboard.count - 1] = L'\0';
+  array_foreach(&clipboard, wchar_t, i, wc) {
+    if (wc == '/') clipboard.items[i] = '\\';
+  }
+  if (!OpenClipboard(NULL)) {
+    log_last_error("Failed to open clipboard");
+    return;
+  }
+  EmptyClipboard();
+  HGLOBAL hglb = GlobalAlloc(GMEM_MOVEABLE, array_bytes(&clipboard));
+  if (!hglb) {
+    log_last_error("Failed to allocate global memory for clipboard");
+    CloseClipboard();
+    return;
+  }
+  LPWSTR lpstr = GlobalLock(hglb);
+  wmemcpy(lpstr, clipboard.items, clipboard.count);
+  GlobalUnlock(hglb);
+  SetClipboardData(CF_UNICODETEXT, hglb);
+  CloseClipboard();
+  return;
+}
+
+static void cmd_copy_validator(void) {
+  if (!validate_screens()) return;
+  set_preview(true, L"copy to clipboard %s", cmd_ctx.targets.items);
+  cmd_ctx.executor = cmd_copy_executor;
 }
 
 static void cmd_quit_executor(void) {
@@ -4828,7 +4880,8 @@ static bool init_commands(void) {
   register_cmd(L"store", L"Store layout in cinema.conf [store (layout)]", cmd_store_validator);
   register_cmd(L"maximize", L"Maximize and close others [(1) maximize]", cmd_maximize_validator);
   register_cmd(L"swap", L"Swap screen contents [(1 2) swap]", cmd_swap_validator);
-  register_cmd(L"clear", L"Clear tag/term [(1 2) clear]", cmd_clear_validator);
+  register_cmd(L"clear", L"Clear tag/term [(1 2 ..) clear]", cmd_clear_validator);
+  register_cmd(L"copy", L"Copy url(s) to clipboard [(1 2 ..) copy]", cmd_copy_validator);
   register_cmd(L"macro", L"Execute macro [macro (name)]", cmd_macro_validator);
   register_cmd(L"quit", L"Close screens and quit Cinema", cmd_quit_validator);
   return true;
