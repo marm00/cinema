@@ -3253,7 +3253,6 @@ static inline void iocp_parse(Instance *instance, const char *buf_start, size_t 
       wchar_t prev = L'\0';
       for (uint32_t i = 0; i < len_u32; ++i) {
         wchar_t curr = url_utf16[i];
-        assert(curr != L'/' && "did not expect forward slash");
         if (prev != L'\\' || curr != L'\\') {
           array_push(&iocp_thread_arena, &clipboard, curr);
         }
@@ -4924,23 +4923,23 @@ static bool init_commands(void) {
   array_wsextend(&console_arena, &cmd_ctx.help,
                  WCR L"Available commands:" WCRLF L"  "
                      L"Note: optional arguments before/after in brackets []" WCRLF);
-  register_cmd(L"help", L"Show all commands", cmd_help_validator);
-  register_cmd(L"layout", L"Change layout to name [layout (name)]", cmd_layout_validator);
-  register_cmd(L"reroll", L"Shuffle media [(1 2 ..) (reroll)]", cmd_reroll_validator);
-  register_cmd(L"tag", L"Limit media to tag [(1 2 ..) tag (name)]", cmd_tag_validator);
-  register_cmd(L"search", L"Limit media to term [(1 2 ..) search (term)]", cmd_search_validator);
-  register_cmd(L"twitch", L"Set media to twitch url [(1 2 ..) twitch (channel)]", cmd_twitch_validator);
-  register_cmd(L"hide", L"Hide media with term [hide term]", cmd_hide_validator);
   register_cmd(L"autoplay", L"Autoplay media [(1 2 ..) autoplay (seconds)]", cmd_autoplay_validator);
-  register_cmd(L"lock", L"Lock/unlock screen contents [(1 2 ..) lock]", cmd_lock_validator);
-  register_cmd(L"store", L"Store layout in cinema.conf [store (layout)]", cmd_store_validator);
-  register_cmd(L"maximize", L"Maximize and close others [(1) maximize]", cmd_maximize_validator);
-  register_cmd(L"swap", L"Swap screen contents [(1 2) swap]", cmd_swap_validator);
   register_cmd(L"clear", L"Clear tag/term [(1 2 ..) clear]", cmd_clear_validator);
   register_cmd(L"copy", L"Copy url(s) to clipboard [(1 2 ..) copy]", cmd_copy_validator);
+  register_cmd(L"help", L"Show all commands", cmd_help_validator);
+  register_cmd(L"hide", L"Hide media with term [hide term]", cmd_hide_validator);
+  register_cmd(L"layout", L"Change layout to name [layout (name)]", cmd_layout_validator);
   register_cmd(L"list", L"Show all tags", cmd_list_validator);
+  register_cmd(L"lock", L"Lock/unlock screen contents [(1 2 ..) lock]", cmd_lock_validator);
   register_cmd(L"macro", L"Execute macro [macro (name)]", cmd_macro_validator);
+  register_cmd(L"maximize", L"Maximize and close others [(1) maximize]", cmd_maximize_validator);
   register_cmd(L"quit", L"Close screens and quit Cinema", cmd_quit_validator);
+  register_cmd(L"reroll", L"Shuffle media [(1 2 ..) (reroll)]", cmd_reroll_validator);
+  register_cmd(L"search", L"Limit media to term [(1 2 ..) search (term)]", cmd_search_validator);
+  register_cmd(L"store", L"Store layout in cinema.conf [store (layout)]", cmd_store_validator);
+  register_cmd(L"swap", L"Swap screen contents [(1 2) swap]", cmd_swap_validator);
+  register_cmd(L"tag", L"Limit media to tag [(1 2 ..) tag (name)]", cmd_tag_validator);
+  register_cmd(L"twitch", L"Set media to twitch url [(1 2 ..) twitch (channel)]", cmd_twitch_validator);
   return true;
 }
 
