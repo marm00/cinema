@@ -2272,13 +2272,18 @@ static struct {
   uint32_t abs_count;
 } dir_stack = {0};
 
+static struct {
+  array_struct_members(wchar_t);
+  size_t supply;
+  size_t demand;
+} clipboard = {0};
+
 static array_struct(uint8_t) directory_strings = {0};
 static array_struct(Directory_Node) directory_nodes = {0};
 static array_struct(uint8_t) layout_strings = {0};
 static array_struct(uint8_t) screen_strings = {0};
 static array_struct(char) geometry_buf = {0};
 static array_struct(Cin_Macro *) startup_macros = {0};
-static array_struct(wchar_t) clipboard = {0};
 
 #define CIN_DIRECTORIES_CAP 64
 #define CIN_DIRECTORY_ITEMS_CAP 64
@@ -2919,6 +2924,7 @@ typedef enum {
   MPV_LOADFILE,
   MPV_WINDOW_ID,
   MPV_SET_GEOMETRY,
+  MPV_GET_PATH,
   MPV_QUIT
 } MPV_Packet;
 
@@ -2957,7 +2963,6 @@ typedef struct Instance {
   HWND window;
   RECT rect;
   Playlist *playlist;
-  char *url;
   Console_Timer_Ctx *timer;
   bool full_screen;
   bool autoplay_mpv;
@@ -3124,7 +3129,6 @@ static inline void playlist_play_core(Instance *instance, const char *arg) {
   uint32_t index = instance->playlist->next_index;
   char *url = (char *)docs.items + playlist->items[index];
   overlap_write(instance, MPV_LOADFILE, "loadfile", url, arg);
-  instance->url = url;
   if (++instance->playlist->next_index == instance->playlist->count) {
     playlist_shuffle(instance->playlist);
   }
@@ -3177,6 +3181,10 @@ static inline void mpv_unlock(void) {
   LockSetForegroundWindow(LSFW_UNLOCK);
 }
 
+// NOTE: voidtools Everything supports pipe '|' as search separator and '"' for spaces
+#define CIN_CLIPBOARD_SEPARATOR L'|'
+#define CIN_CLIPBOARD_ENCLOSER L'"'
+
 static inline void iocp_parse(Instance *instance, const char *buf_start, size_t buf_offset) {
   const char *buf = buf_start + buf_offset;
   char *p = NULL;
@@ -3228,6 +3236,53 @@ static inline void iocp_parse(Instance *instance, const char *buf_start, size_t 
     case MPV_SET_GEOMETRY:
       mpv_restore_focus();
       break;
+    case MPV_GET_PATH: {
+      char *data = strstr(buf, CIN_MPVKEY_DATA);
+      assert(data);
+      data += cin_strlen(CIN_MPVKEY_DATA);
+      assert(*data == '"');
+      ++data;
+      char *tail = strchr(data, '"');
+      assert(tail);
+      int32_t len_utf8 = (int32_t)(tail - data);
+      int32_t len = utf8_to_utf16_nraw(data, len_utf8);
+      assert(len > 0);
+      uint32_t len_u32 = (uint32_t)len;
+      wchar_t *url_utf16 = utf16_buf_raw.items;
+      array_push(&iocp_thread_arena, &clipboard, CIN_CLIPBOARD_ENCLOSER);
+      wchar_t prev = L'\0';
+      for (uint32_t i = 0; i < len_u32; ++i) {
+        wchar_t curr = url_utf16[i];
+        assert(curr != L'/' && "did not expect forward slash");
+        if (prev != L'\\' || curr != L'\\') {
+          array_push(&iocp_thread_arena, &clipboard, curr);
+        }
+        prev = curr;
+      }
+      array_push(&iocp_thread_arena, &clipboard, CIN_CLIPBOARD_ENCLOSER);
+      array_push(&iocp_thread_arena, &clipboard, CIN_CLIPBOARD_SEPARATOR);
+      if (++clipboard.supply == clipboard.demand) {
+        clipboard.supply = 0;
+        clipboard.demand = 0;
+        if (clipboard.count) clipboard.items[clipboard.count - 1] = L'\0';
+        if (!OpenClipboard(NULL)) {
+          log_last_error("Failed to open clipboard");
+          return;
+        }
+        EmptyClipboard();
+        HGLOBAL hglb = GlobalAlloc(GMEM_MOVEABLE, array_bytes(&clipboard));
+        if (!hglb) {
+          log_last_error("Failed to allocate global memory for clipboard");
+          CloseClipboard();
+          return;
+        }
+        LPWSTR lpstr = GlobalLock(hglb);
+        wmemcpy(lpstr, clipboard.items, clipboard.count);
+        GlobalUnlock(hglb);
+        SetClipboardData(CF_UNICODETEXT, hglb);
+        CloseClipboard();
+      }
+    } break;
     default:
       break;
     }
@@ -3818,7 +3873,6 @@ static void mpv_spawn(Instance *instance, size_t index) {
   // TODO: playlist instead
   char *url = (char *)docs.items + docs.suffix_to_doc[(0 + (int32_t)index) % docs.doc_count];
   overlap_write(instance, MPV_LOADFILE, "loadfile", url, NULL);
-  instance->url = url;
   overlap_write(instance, MPV_WINDOW_ID, "get_property", "window-id", NULL);
   ++mpv_demand;
 }
@@ -4710,7 +4764,6 @@ static void cmd_twitch_executor(void) {
   memcpy(twitch_buf + cin_strlen(TWITCH_PREFIX), channel, (size_t)len);
   mpv_target_foreach(i, instance) {
     overlap_write(instance, MPV_LOADFILE, "loadfile", twitch_buf, NULL);
-    instance->url = twitch_buf;
   }
 }
 
@@ -4724,43 +4777,14 @@ static void cmd_twitch_validator(void) {
   cmd_ctx.executor = cmd_twitch_executor;
 }
 
-// NOTE: voidtools Everything supports pipe '|' as search separator and '"' for spaces
-#define CIN_CLIPBOARD_SEPARATOR L'|'
-#define CIN_CLIPBOARD_ENCLOSER L'"'
-
 static void cmd_copy_executor(void) {
   clipboard.count = 0;
+  clipboard.supply = 0;
+  clipboard.demand = 0;
   mpv_target_foreach(i, instance) {
-    array_push(&console_arena, &clipboard, CIN_CLIPBOARD_ENCLOSER);
-    char *url = instance->url;
-    int32_t len = utf8_to_utf16_raw(url);
-    assert(len > 0);
-    wchar_t *url_utf16 = utf16_buf_raw.items;
-    array_wextend(&console_arena, &clipboard, url_utf16, (uint32_t)len);
-    assert(clipboard.items[clipboard.count - 1] == L'\0');
-    clipboard.items[clipboard.count - 1] = CIN_CLIPBOARD_ENCLOSER;
-    array_push(&console_arena, &clipboard, CIN_CLIPBOARD_SEPARATOR);
+    ++clipboard.demand;
+    overlap_write(instance, MPV_GET_PATH, "get_property", "path", NULL);
   }
-  if (clipboard.count) clipboard.items[clipboard.count - 1] = L'\0';
-  array_foreach(&clipboard, wchar_t, i, wc) {
-    if (wc == '/') clipboard.items[i] = '\\';
-  }
-  if (!OpenClipboard(NULL)) {
-    log_last_error("Failed to open clipboard");
-    return;
-  }
-  EmptyClipboard();
-  HGLOBAL hglb = GlobalAlloc(GMEM_MOVEABLE, array_bytes(&clipboard));
-  if (!hglb) {
-    log_last_error("Failed to allocate global memory for clipboard");
-    CloseClipboard();
-    return;
-  }
-  LPWSTR lpstr = GlobalLock(hglb);
-  wmemcpy(lpstr, clipboard.items, clipboard.count);
-  GlobalUnlock(hglb);
-  SetClipboardData(CF_UNICODETEXT, hglb);
-  CloseClipboard();
   return;
 }
 
