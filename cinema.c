@@ -1956,11 +1956,6 @@ static inline void conf_enter_scope(Conf_Scope_Type type) {
   array_push(&console_arena, &conf_parser.scopes, scope);
 }
 
-static inline void conf_error_log(size_t row, size_t col, const char *allowed) {
-  // TODO: replace with log
-  writef("Skipping line %zu due to unexpected token at position %zu. Allowed: %s.\r\n", row + 1, col + 1, allowed);
-}
-
 static inline bool conf_keycmp(char *k, Conf_Scope_Type type, Conf_Key *out, bool unique) {
   if (memcmp(k, conf_parser.buf.items, conf_parser.k_len) != 0) return false;
   assert(&conf_scope()->type);
@@ -3275,8 +3270,8 @@ static inline void iocp_parse(Instance *instance, const char *buf_start, size_t 
           CloseClipboard();
           return;
         }
-        LPWSTR lpstr = GlobalLock(hglb);
-        wmemcpy(lpstr, clipboard.items, clipboard.count);
+        LPWSTR lpwstr = GlobalLock(hglb);
+        wmemcpy(lpwstr, clipboard.items, clipboard.count);
         GlobalUnlock(hglb);
         SetClipboardData(CF_UNICODETEXT, hglb);
         CloseClipboard();
@@ -3556,9 +3551,6 @@ cleanup:
   return false;
 }
 
-static inline bool evaluate_input(void) {
-  return true;
-}
 typedef enum {
   CIN_TIMER_RESIZE,
   _CIN_TIMER_END
