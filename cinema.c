@@ -4390,6 +4390,9 @@ static void cmd_lock_executor(void) {
   mpv_target_foreach(i, instance) {
     instance->locked = !instance->locked;
     if (!instance->locked) playlist_play(instance);
+    instance->timer = NULL;
+    if (instance->autoplay_mpv) overlap_write(instance, MPV_WRITE, "set_property", "loop", "inf");
+    instance->autoplay_mpv = false;
   }
 }
 
@@ -4992,6 +4995,7 @@ int main(int argc, char **argv) {
       continue;
     }
     switch (vk) {
+    case VK_TAB:
     case VK_RETURN: {
       clear_full();
       cursor_home();
@@ -5162,8 +5166,6 @@ int main(int argc, char **argv) {
         }
         cursor_curr();
       }
-      continue;
-    case VK_TAB:
       continue;
     default:
       if (!c || c == PREFIX_TOKEN) continue;
