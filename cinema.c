@@ -4804,6 +4804,30 @@ static void cmd_extra_validator(void) {
   cmd_ctx.executor = cmd_extra_executor;
 }
 
+static void cmd_chat_executor(void) {
+  Cin_Layout *layout = cmd_ctx.layout;
+  bool layout_chat = layout->chat_rect.bottom != LONG_MIN;
+  if (!layout_chat) {
+    LONG default_width = 400;
+    LONG default_height = 600;
+    LONG default_x = 0;
+    LONG default_y = 0;
+    layout->chat_rect.right = default_width;
+    layout->chat_rect.bottom = default_height;
+    layout->chat_rect.left = default_x;
+    layout->chat_rect.top = default_y;
+  }
+  mpv_lock();
+  chat_reposition(layout);
+  mpv_unlock();
+}
+
+static void cmd_chat_validator(void) {
+  bool is_showing = IsWindow(chat.window);
+  set_preview(true, L"%s chat", is_showing ? L"hide" : L"show");
+  cmd_ctx.executor = cmd_chat_executor;
+}
+
 #define CIN_LIST_TAGS_PREFIX CR "Tags: "
 #define CIN_LIST_TAGS_PREFIX_LEN cin_strlen(CIN_LIST_TAGS_PREFIX)
 
@@ -4935,9 +4959,10 @@ static bool init_commands(void) {
                  WCR L"Available commands:" WCRLF L"  "
                      L"Note: optional arguments before/after in brackets []" WCRLF);
   register_cmd(L"autoplay", L"Autoplay media [(1 2 ..) autoplay (seconds)]", cmd_autoplay_validator);
+  register_cmd(L"chat", L"Show/hide chat (see store command)", cmd_chat_validator);
   register_cmd(L"clear", L"Clear tag/term [(1 2 ..) clear]", cmd_clear_validator);
   register_cmd(L"copy", L"Copy url(s) to clipboard [(1 2 ..) copy]", cmd_copy_validator);
-  register_cmd(L"extra", L"Adds an extra screen", cmd_extra_validator);
+  register_cmd(L"extra", L"Adds an extra screen (see store command)", cmd_extra_validator);
   register_cmd(L"help", L"Show all commands", cmd_help_validator);
   register_cmd(L"hide", L"Hide media with term [hide term]", cmd_hide_validator);
   register_cmd(L"layout", L"Change layout to name [layout (name)]", cmd_layout_validator);
