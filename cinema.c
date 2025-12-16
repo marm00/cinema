@@ -3640,7 +3640,7 @@ static inline void set_preview(bool success, const wchar_t *format, ...) {
 }
 
 #define CIN_SCREEN_SEPARATOR L", "
-#define CIN_SCREEN_SEPARATOR_LEN sizeof(CIN_SCREEN_SEPARATOR) / sizeof(*CIN_SCREEN_SEPARATOR) - 1
+#define CIN_SCREEN_SEPARATOR_LEN (sizeof(CIN_SCREEN_SEPARATOR) / sizeof(*CIN_SCREEN_SEPARATOR) - 1)
 
 static inline bool validate_screens(void) {
   size_t n_count = cmd_ctx.numbers.count;
@@ -3819,6 +3819,8 @@ static inline void chat_reposition(Cin_Layout *layout) {
 
 static void mpv_spawn(Instance *instance, size_t index) {
   static wchar_t mpv_command[CIN_MPVCALL_BUF] = {CIN_MPVCALL};
+  bool extra = index == SIZE_MAX;
+  if (extra) index = cmd_ctx.layout->count;
   instance->ovl_ctx.type = MPV_READ;
   size_t right = CIN_MPVCALL_LEN + CIN_MPVCALL_DIGITS;
   size_t left = right;
@@ -3829,7 +3831,8 @@ static void mpv_spawn(Instance *instance, size_t index) {
   } while (j);
   size_t digits = right - left++;
   for (; j < digits; ++j) mpv_command[CIN_MPVCALL_LEN + j] = mpv_command[left + j];
-  Cin_Screen screen = cmd_ctx.layout->items[index];
+  Cin_Screen screen = cmd_ctx.layout->items[extra ? 0 : index];
+  if (extra) array_push(&console_arena, cmd_ctx.layout, screen);
   // screen.len actually includes null-terminator
   int32_t len = utf8_to_utf16_nraw((char *)screen_strings.items + screen.offset, (int32_t)screen.len);
   if (len > (int32_t)CIN_MPVCALL_GEOMETRY_LEN) {
@@ -4788,6 +4791,19 @@ static void cmd_copy_validator(void) {
   cmd_ctx.executor = cmd_copy_executor;
 }
 
+static void cmd_extra_executor(void) {
+  Instance *extra = NULL;
+  cache_get(&io_arena, &cin_io.instances, extra);
+  playlist_set_default(extra);
+  mpv_lock();
+  mpv_spawn(extra, SIZE_MAX);
+}
+
+static void cmd_extra_validator(void) {
+  set_preview(true, L"add extra screen");
+  cmd_ctx.executor = cmd_extra_executor;
+}
+
 #define CIN_LIST_TAGS_PREFIX CR "Tags: "
 #define CIN_LIST_TAGS_PREFIX_LEN cin_strlen(CIN_LIST_TAGS_PREFIX)
 
@@ -4921,6 +4937,7 @@ static bool init_commands(void) {
   register_cmd(L"autoplay", L"Autoplay media [(1 2 ..) autoplay (seconds)]", cmd_autoplay_validator);
   register_cmd(L"clear", L"Clear tag/term [(1 2 ..) clear]", cmd_clear_validator);
   register_cmd(L"copy", L"Copy url(s) to clipboard [(1 2 ..) copy]", cmd_copy_validator);
+  register_cmd(L"extra", L"Adds an extra screen", cmd_extra_validator);
   register_cmd(L"help", L"Show all commands", cmd_help_validator);
   register_cmd(L"hide", L"Hide media with term [hide term]", cmd_hide_validator);
   register_cmd(L"layout", L"Change layout to name [layout (name)]", cmd_layout_validator);
