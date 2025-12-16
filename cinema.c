@@ -4824,7 +4824,7 @@ static void cmd_chat_executor(void) {
 
 static void cmd_chat_validator(void) {
   bool is_showing = IsWindow(chat.window);
-  set_preview(true, L"%s chat", is_showing ? L"hide" : L"show");
+  set_preview(true, L"%s chat", is_showing ? L"reposition" : L"show");
   cmd_ctx.executor = cmd_chat_executor;
 }
 
@@ -4959,7 +4959,7 @@ static bool init_commands(void) {
                  WCR L"Available commands:" WCRLF L"  "
                      L"Note: optional arguments before/after in brackets []" WCRLF);
   register_cmd(L"autoplay", L"Autoplay media [(1 2 ..) autoplay (seconds)]", cmd_autoplay_validator);
-  register_cmd(L"chat", L"Show/hide chat (see store command)", cmd_chat_validator);
+  register_cmd(L"chat", L"Show chat (see store command)", cmd_chat_validator);
   register_cmd(L"clear", L"Clear tag/term [(1 2 ..) clear]", cmd_clear_validator);
   register_cmd(L"copy", L"Copy url(s) to clipboard [(1 2 ..) copy]", cmd_copy_validator);
   register_cmd(L"extra", L"Adds an extra screen (see store command)", cmd_extra_validator);
