@@ -936,29 +936,10 @@ static inline BOOL GetConsoleScreenBufferInfo_safe(HANDLE hConsoleOutput, PCONSO
   return TRUE;
 }
 
-// TODO: probably change to byte-by-byte
-static int32_t lcps(const uint8_t *a, const uint8_t *b) {
-  static const int32_t CHUNK_SIZE = 1 << 3;
-  const uint8_t *start = a;
-  while ((((uintptr_t)a & 7) != 0 || ((uintptr_t)b & 7) != 0) &&
-         *a == *b && *a != '\0') {
-    a++;
-    b++;
-  }
-  while (((uintptr_t)a & 7) == 0 && ((uintptr_t)b & 7) == 0) {
-    uint64_t wa = *(const uint64_t *)a;
-    uint64_t wb = *(const uint64_t *)b;
-    if (wa != wb || (wa - 0x0101010101010101ULL) & (~wa & 0x8080808080808080ULL)) {
-      break;
-    }
-    a += CHUNK_SIZE;
-    b += CHUNK_SIZE;
-  }
-  while (*a == *b && *a != '\0') {
-    a++;
-    b++;
-  }
-  return (int32_t)(a - start);
+static inline int32_t lcps(const uint8_t *a, const uint8_t *b) {
+  int32_t matching = 0;
+  while (*a && *b && *(a++) == *(b++)) ++matching;
+  return matching;
 }
 
 static inline bool cin_isloweralpha(char *c) {
