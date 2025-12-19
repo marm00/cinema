@@ -3921,9 +3921,72 @@ static void cmd_help_validator(void) {
   cmd_ctx.executor = cmd_help_executor;
 }
 
+static void cmd_layout_executor(void) {
+  Cin_Layout *layout = cmd_ctx.queued_layout;
+  cmd_ctx.layout = layout;
+  uint32_t next_count = layout->count;
+  uint32_t screen = 0;
+  mpv_lock();
+  chat_reposition(layout);
+  cache_foreach(&cin_io.instances, Instance, i, old) {
+    if (screen >= next_count) {
+      if (old->pipe) overlap_write(old, MPV_QUIT, "quit", NULL, NULL);
+    } else if (old->pipe) {
+      log_message(LOG_INFO, "i=%u, screen=%zu", i);
+      assert(IsWindow(old->window));
+      const char *geometry = (char *)screen_strings.items + layout->items[screen].offset;
+      overlap_write(old, MPV_SET_GEOMETRY, "set_property", "geometry", geometry);
+      if (old->full_screen) {
+        old->full_screen = false;
+        overlap_write(old, MPV_WRITE, "set_property", "fullscreen", "no");
+      }
+    } else {
+      mpv_spawn(old, screen);
+    }
+    ++screen;
+  }
+  for (Instance *next = NULL; screen < next_count; ++screen) {
+    cache_get(&io_arena, &cin_io.instances, next);
+    playlist_set_default(next);
+    mpv_spawn(next, screen);
+  }
+  if (!mpv_demand) mpv_unlock();
+}
+
+static void cmd_layout_validator(void) {
+  radix_v layout = NULL;
+  const uint8_t *layout_name = NULL;
+  if (cmd_ctx.unicode) {
+    int32_t len = utf16_to_utf8(cmd_ctx.unicode);
+    layout = radix_query(layout_tree, utf8_buf.items, (size_t)len - 1, &layout_name);
+    if (!layout) {
+      set_preview(false, L"layout does not exist: '%ls'", cmd_ctx.unicode);
+      return;
+    }
+    utf8_to_utf16_raw((char *)layout_name);
+    assert(layout);
+    assert(layout_name);
+    set_preview(true, L"change layout to '%s'", utf16_buf_raw.items);
+  } else {
+    Cin_Layout *curr = cmd_ctx.layout;
+    char *curr_name = (char *)layout_strings.items + curr->name_offset;
+    utf8_to_utf16_nraw(curr_name, (int32_t)curr->name_len);
+    set_preview(true, L"reset layout '%s'", utf16_buf_raw.items);
+    layout = curr;
+  }
+  cmd_ctx.queued_layout = (Cin_Layout *)layout;
+  cmd_ctx.executor = cmd_layout_executor;
+}
+
 static void cmd_reroll_executor(void) {
+  size_t count = 0;
   mpv_target_foreach(i, instance) {
     playlist_play(instance);
+    ++count;
+  }
+  if (count == 0) {
+    cmd_ctx.queued_layout = cmd_ctx.layout;
+    cmd_layout_executor();
   }
 }
 
@@ -4872,63 +4935,6 @@ static void cmd_quit_executor(void) {
 static void cmd_quit_validator(void) {
   set_preview(true, L"quit (also closes screens)");
   cmd_ctx.executor = cmd_quit_executor;
-}
-
-static void cmd_layout_executor(void) {
-  Cin_Layout *layout = cmd_ctx.queued_layout;
-  cmd_ctx.layout = layout;
-  uint32_t next_count = layout->count;
-  uint32_t screen = 0;
-  mpv_lock();
-  chat_reposition(layout);
-  cache_foreach(&cin_io.instances, Instance, i, old) {
-    if (screen >= next_count) {
-      if (old->pipe) overlap_write(old, MPV_QUIT, "quit", NULL, NULL);
-    } else if (old->pipe) {
-      log_message(LOG_INFO, "i=%u, screen=%zu", i);
-      assert(IsWindow(old->window));
-      const char *geometry = (char *)screen_strings.items + layout->items[screen].offset;
-      overlap_write(old, MPV_SET_GEOMETRY, "set_property", "geometry", geometry);
-      if (old->full_screen) {
-        old->full_screen = false;
-        overlap_write(old, MPV_WRITE, "set_property", "fullscreen", "no");
-      }
-    } else {
-      mpv_spawn(old, screen);
-    }
-    ++screen;
-  }
-  for (Instance *next = NULL; screen < next_count; ++screen) {
-    cache_get(&io_arena, &cin_io.instances, next);
-    playlist_set_default(next);
-    mpv_spawn(next, screen);
-  }
-  if (!mpv_demand) mpv_unlock();
-}
-
-static void cmd_layout_validator(void) {
-  radix_v layout = NULL;
-  const uint8_t *layout_name = NULL;
-  if (cmd_ctx.unicode) {
-    int32_t len = utf16_to_utf8(cmd_ctx.unicode);
-    layout = radix_query(layout_tree, utf8_buf.items, (size_t)len - 1, &layout_name);
-    if (!layout) {
-      set_preview(false, L"layout does not exist: '%ls'", cmd_ctx.unicode);
-      return;
-    }
-    utf8_to_utf16_raw((char *)layout_name);
-    assert(layout);
-    assert(layout_name);
-    set_preview(true, L"change layout to '%s'", utf16_buf_raw.items);
-  } else {
-    Cin_Layout *curr = cmd_ctx.layout;
-    char *curr_name = (char *)layout_strings.items + curr->name_offset;
-    utf8_to_utf16_nraw(curr_name, (int32_t)curr->name_len);
-    set_preview(true, L"reset layout '%s'", utf16_buf_raw.items);
-    layout = curr;
-  }
-  cmd_ctx.queued_layout = (Cin_Layout *)layout;
-  cmd_ctx.executor = cmd_layout_executor;
 }
 
 static inline void register_cmd(const wchar_t *name, const wchar_t *help, cmd_validator validator) {
