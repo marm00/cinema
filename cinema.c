@@ -1708,12 +1708,12 @@ typedef struct Table_Bucket {
   // key is (char *)strings + pos
   // value is value
   uint64_t hash;
+  table_value value;
   uint32_t dist;
   table_key_pos pos;
-  table_value value;
   bool filled;
   bool deleted;
-  // TODO: free bytes remaining
+  // NOTE: free bytes remaining
 } Table_Bucket;
 
 typedef struct Robin_Hood_Table {
@@ -2047,11 +2047,6 @@ static bool parse_config(const char *filename) {
   conf_parser.line = 1;
   while (fgets(conf_parser.buf.items, (int32_t)conf_parser.buf.capacity, file)) {
     conf_parser.len = strlen(conf_parser.buf.items);
-    if (!conf_parser.len) {
-      // TODO: handle
-      assert(false);
-      goto end;
-    }
     assert(conf_parser.buf.capacity > 1);
     if (conf_parser.buf.items[conf_parser.len - 1] == '\n') {
       conf_parser.buf.items[conf_parser.len - 1] = '\0';
@@ -2174,10 +2169,6 @@ struct Document_Collection {
 static void docs_append(uint8_t *utf8, int32_t len) {
   // NOTE: When using mpv JSON ipc, backslash actually requires 2 bytes to be valid JSON.
   // Instead of appending it, we replace it with forward slash.
-  // TODO: fix cinema.conf so that we treat \, \\, /, the same, there is currently
-  // an issue where the deduplication fails with (nested) directories on mismatch
-  for (int32_t i = 0; i < len; ++i)
-    if (utf8[i] == '\\') utf8[i] = '/';
   array_extend_zero(&docs_arena, &docs, utf8, (uint32_t)len);
   ++docs.doc_count;
 }
@@ -2276,9 +2267,31 @@ static Radix_Tree *tag_tree = NULL;
 static Radix_Tree *layout_tree = NULL;
 static Radix_Tree *macro_tree = NULL;
 
+static inline void setup_file_path(wchar_t *path, int32_t *len) {
+  assert(len);
+  for (wchar_t *p = path; *p; ++p) {
+    if (*p == L'\\') {
+      *p++ = L'/';
+      wchar_t *dups = p;
+      while (*dups == L'\\') ++dups;
+      if (p != dups) {
+        ptrdiff_t removed = dups - p;
+        ptrdiff_t pos = dups - path;
+        assert((size_t)*len >= (size_t)pos);
+        size_t remainder = (size_t)*len - (size_t)pos;
+        wmemcpy(p, dups, remainder);
+        p = dups;
+        *len -= (int32_t)removed;
+      }
+    }
+  }
+  *(path + (size_t)*len) = L'\0';
+}
+
 static void setup_directory(const char *path, Tag_Directories *tag_dirs) {
   int32_t len_utf16 = utf8_to_utf16_norm(path);
   assert(len_utf16);
+  setup_file_path(utf16_buf_norm.items, &len_utf16);
   size_t len = (size_t)len_utf16;
   Directory_Path root_dir = {.len = len};
   wmemcpy(root_dir.path, utf16_buf_norm.items, len);
@@ -2316,7 +2329,7 @@ static void setup_directory(const char *path, Tag_Directories *tag_dirs) {
       log_wmessage(LOG_ERROR, L"Directory name too long: %ls", dir.path);
       continue;
     }
-    dir.path[dir.len++] = L'\\';
+    dir.path[dir.len++] = L'/';
     dir.path[dir.len++] = L'*';
     dir.path[dir.len] = L'\0';
     WIN32_FIND_DATAW data;
@@ -2389,7 +2402,8 @@ static inline void setup_pattern(const char *pattern, Tag_Pattern_Items *tag_pat
   int32_t len_utf16 = utf8_to_utf16_norm(pattern);
   assert(len_utf16);
   assert(utf16_buf_norm.items[len_utf16 - 1] == L'\0');
-  wchar_t *separator = wcsrchr(utf16_buf_norm.items, L'\\');
+  setup_file_path(utf16_buf_norm.items, &len_utf16);
+  wchar_t *separator = wcsrchr(utf16_buf_norm.items, L'/');
   if (separator == NULL || *(separator + 1) == L'\0') {
     log_message(LOG_ERROR, "Not a valid pattern: '%s', end properly with '\\...'", pattern);
     return;
@@ -2403,14 +2417,15 @@ static inline void setup_pattern(const char *pattern, Tag_Pattern_Items *tag_pat
   utf16_buf_norm.items[dir_len] = L'\0';
   static wchar_t abs_buf[CIN_MAX_PATH];
   DWORD abs_len = GetFullPathNameW(utf16_buf_norm.items, CIN_MAX_PATH, abs_buf, NULL);
+  setup_file_path(abs_buf, (int32_t *)&abs_len);
   if (abs_len == 0 || abs_len > CIN_MAX_PATH) {
     log_wmessage(LOG_ERROR, L"Pattern '%ls' full path '%ls' is empty or too long (max=%d)",
                  pattern, abs_buf, CIN_MAX_PATH);
     return;
   }
   log_wmessage(LOG_INFO, L"pattern: %ls", abs_buf);
-  if (abs_buf[abs_len - 1] != L'\\') {
-    abs_buf[abs_len++] = L'\\';
+  if (abs_buf[abs_len - 1] != L'/') {
+    abs_buf[abs_len++] = L'/';
     abs_buf[abs_len] = L'\0';
   }
   utf16_buf_norm.items[dir_len] = prev_tail;
@@ -4142,7 +4157,9 @@ static void cmd_tag_validator(void) {
 static void cmd_search_executor(void) {
   Playlist *playlist = &media.default_playlist;
   int32_t len = 0;
-  if (cmd_ctx.unicode && (len = utf16_to_utf8(cmd_ctx.unicode))) {
+  if (cmd_ctx.unicode && (len = (int32_t)wcslen(cmd_ctx.unicode))) {
+    setup_file_path(cmd_ctx.unicode, &len);
+    len = utf16_to_utf8(cmd_ctx.unicode);
     uint8_t *pattern = utf8_buf.items;
     table_key_len len_u32 = (table_key_len)len;
     log_message(LOG_DEBUG, "Search with pattern: '%s', len: %d", pattern, len);
