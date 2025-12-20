@@ -3860,9 +3860,8 @@ static void mpv_spawn(Instance *instance, size_t index) {
   instance->buf_tail = instance->buf_head;
   bool ok_read = overlap_read(instance);
   assert(ok_read);
-  // TODO: playlist instead
-  char *url = (char *)docs.items + docs.suffix_to_doc[(0 + (int32_t)index) % docs.doc_count];
-  overlap_write(instance, MPV_LOADFILE, "loadfile", url, NULL);
+  assert(instance->playlist);
+  playlist_play(instance);
   overlap_write(instance, MPV_WINDOW_ID, "get_property", "window-id", NULL);
   ++mpv_demand;
 }
