@@ -1920,6 +1920,8 @@ static struct {
   char *v;
   int32_t line;
   bool error;
+  // general flags
+  bool has_patterns;
 } conf_parser = {0};
 
 #define CONF_LINE_CAP 512
@@ -1987,7 +1989,10 @@ static inline bool conf_keyget(void) {
     if (conf_keycmp("directories", CONF_SCOPE_MEDIA, &conf_scope()->media.directories, false)) return true;
     break;
   case 8:
-    if (conf_keycmp("patterns", CONF_SCOPE_MEDIA, &conf_scope()->media.patterns, false)) return true;
+    if (conf_keycmp("patterns", CONF_SCOPE_MEDIA, &conf_scope()->media.patterns, false)) {
+      conf_parser.has_patterns = true;
+      return true;
+    }
     break;
   case 7:
     if (conf_keycmp("command", CONF_SCOPE_MACRO, &conf_scope()->macro.command, false)) return true;
@@ -2192,7 +2197,7 @@ typedef struct Playlist {
   uint32_t next_index;
   uint32_t targets;
   bool from_tag;
-  // TODO: search table key not applicable to tag
+  // search table key not applicable to tag playlist
   table_key_pos search_pos;
   table_key_len search_len;
   cache_node_struct_members(Playlist);
@@ -2310,8 +2315,6 @@ static void setup_directory(const char *path, Tag_Directories *tag_dirs) {
     uint32_t str_offset = directory_strings.count;
     memcpy(strings + str_offset, utf8_buf.items, bytes);
     uint32_t node_tail = directory_nodes.count;
-    // TODO: if an unmatched directory is inserted, its next occurence
-    // will think that the current node_tail is correct, when it is not
     Table_Key key = {.strings = strings, .pos = str_offset, .len = bytes};
     table_value dup_index = table_find(&dir_table, &key);
     if (dup_index >= 0) {
@@ -2383,8 +2386,24 @@ static void setup_directory(const char *path, Tag_Directories *tag_dirs) {
       } else {
         wmemcpy(dir.path + dir.len, file, file_len);
         int32_t utf8_len = utf16_to_utf8(dir.path);
-        array_push(&console_arena, node, (int32_t)array_bytes(&docs));
+        table_key_pos tail_offset = array_bytes(&docs);
+        int32_t tail_doc = (int32_t)tail_offset;
         docs_append(utf8_buf.items, utf8_len);
+        if (conf_parser.has_patterns) {
+          // NOTE: With patterns, we want to let the OS evaluate them.
+          // The safest way to deduplicate patterns seems to be file-by-file
+          // comparisons, which can of course degenerate so we check if the
+          // config contains patterns first. We solve the cases where a pattern
+          // was evaluated before this step, and after this step.
+          Table_Key pat_key = {.strings = docs.items, .pos = tail_offset, .len = (table_key_len)utf8_len};
+          table_value dup_doc = table_insert(&console_arena, &pat_table, &pat_key, tail_doc);
+          if (dup_doc >= 0) {
+            array_shrink(&docs, (uint32_t)len);
+            --docs.doc_count;
+            tail_doc = (int32_t)dup_doc;
+          }
+        }
+        array_push(&console_arena, node, tail_doc);
       }
     } while (FindNextFileW(search, &data) != 0);
     if (GetLastError() != ERROR_NO_MORE_FILES) {
@@ -2452,11 +2471,6 @@ static inline void setup_pattern(const char *pattern, Tag_Pattern_Items *tag_pat
     }
     wmemcpy(abs_buf + abs_len, file, file_len);
     int32_t len = utf16_to_utf8(abs_buf);
-    // TODO: Because we sequentially parse the config, it is technically possible
-    // that a directory was setup which contains files that match the current pattern.
-    // This means that the docs array can contain duplicates in that case. While not
-    // a big deal, it can probably be addressed without having to hash every file in
-    // the directory setup, by using some pattern heuristics (e.g., directory hash)
     table_key_pos tail_offset = array_bytes(&docs);
     int32_t tail_doc = (int32_t)tail_offset;
     docs_append(utf8_buf.items, len);
