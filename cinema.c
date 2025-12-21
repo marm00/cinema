@@ -2172,8 +2172,6 @@ struct Document_Collection {
 } docs = {0};
 
 static void docs_append(uint8_t *utf8, int32_t len) {
-  // NOTE: When using mpv JSON ipc, backslash actually requires 2 bytes to be valid JSON.
-  // Instead of appending it, we replace it with forward slash.
   array_extend_zero(&docs_arena, &docs, utf8, (uint32_t)len);
   ++docs.doc_count;
 }
@@ -2802,7 +2800,8 @@ static bool reinit_documents(void) {
         right = mid - 1;
       }
     }
-    docs.suffix_to_doc[i] = docs.suffix_to_doc[left];
+    int32_t doc = docs.suffix_to_doc[left];
+    docs.suffix_to_doc[i] = doc;
   }
   return true;
 }
