@@ -2155,6 +2155,8 @@ end:
 #define CIN_DOCS_ARENA_CAP megabytes(2)
 #define CIN_DOCS_CAP (1 << 13)
 
+array_define(Document_Positions, int32_t);
+
 struct Document_Collection {
   // Each byte represents a UTF-8 unit
   array_struct_members(uint8_t);
@@ -2167,13 +2169,26 @@ struct Document_Collection {
   int32_t doc_count;
   int32_t *gsa;
   int32_t *lcp;
-  int32_t *suffix_to_doc;
+  Document_Positions suffix_to_doc;
   uint16_t *dedup_counters;
 } docs = {0};
 
-static void docs_append(uint8_t *utf8, int32_t len) {
+static inline void docs_push(uint8_t *utf8, int32_t len) {
+  int32_t left = (int32_t)array_bytes(&docs);
+  assert(left == (int32_t)docs.suffix_to_doc.count);
+  int32_t right = left + len;
+  array_grow(&docs_arena, &docs.suffix_to_doc, (uint32_t)len);
+  for (int32_t i = left; i < right; ++i) {
+    docs.suffix_to_doc.items[i] = left;
+  }
   array_extend_zero(&docs_arena, &docs, utf8, (uint32_t)len);
   ++docs.doc_count;
+}
+
+static inline void docs_pop(int32_t len) {
+  array_shrink(&docs.suffix_to_doc, (uint32_t)len);
+  array_shrink(&docs, (uint32_t)len);
+  --docs.doc_count;
 }
 
 typedef struct Directory_Node {
@@ -2386,7 +2401,7 @@ static void setup_directory(const char *path, Tag_Directories *tag_dirs) {
         int32_t utf8_len = utf16_to_utf8(dir.path);
         table_key_pos tail_offset = array_bytes(&docs);
         int32_t tail_doc = (int32_t)tail_offset;
-        docs_append(utf8_buf.items, utf8_len);
+        docs_push(utf8_buf.items, utf8_len);
         if (conf_parser.has_patterns) {
           // NOTE: With patterns, we want to let the OS evaluate them.
           // The safest way to deduplicate patterns seems to be file-by-file
@@ -2396,8 +2411,7 @@ static void setup_directory(const char *path, Tag_Directories *tag_dirs) {
           Table_Key pat_key = {.strings = docs.items, .pos = tail_offset, .len = (table_key_len)utf8_len};
           table_value dup_doc = table_insert(&console_arena, &pat_table, &pat_key, tail_doc);
           if (dup_doc >= 0) {
-            array_shrink(&docs, (uint32_t)len);
-            --docs.doc_count;
+            docs_pop((int32_t)len);
             tail_doc = (int32_t)dup_doc;
           }
         }
@@ -2471,19 +2485,14 @@ static inline void setup_pattern(const char *pattern, Tag_Pattern_Items *tag_pat
     int32_t len = utf16_to_utf8(abs_buf);
     table_key_pos tail_offset = array_bytes(&docs);
     int32_t tail_doc = (int32_t)tail_offset;
-    docs_append(utf8_buf.items, len);
+    docs_push(utf8_buf.items, len);
     Table_Key key = {.strings = docs.items, .pos = tail_offset, .len = (table_key_len)len};
     table_value dup_doc = table_insert(&console_arena, &pat_table, &key, tail_doc);
     if (dup_doc >= 0) {
-      array_shrink(&docs, (uint32_t)len);
-      --docs.doc_count;
-      if (tag_pattern_items) {
-        array_push(&console_arena, tag_pattern_items, (int32_t)dup_doc);
-      }
+      docs_pop(len);
+      if (tag_pattern_items) array_push(&console_arena, tag_pattern_items, (int32_t)dup_doc);
     } else {
-      if (tag_pattern_items) {
-        array_push(&console_arena, tag_pattern_items, tail_doc);
-      }
+      if (tag_pattern_items) array_push(&console_arena, tag_pattern_items, tail_doc);
     }
   } while (FindNextFileW(search, &data) != 0);
   if (GetLastError() != ERROR_NO_MORE_FILES) {
@@ -2498,19 +2507,14 @@ static inline void setup_url(const char *url, Tag_Url_Items *tag_url_items) {
   int32_t len_utf8 = utf16_to_utf8(utf16_buf_raw.items);
   table_key_pos tail_offset = array_bytes(&docs);
   int32_t tail_doc = (int32_t)tail_offset;
-  docs_append(utf8_buf.items, len_utf8);
+  docs_push(utf8_buf.items, len_utf8);
   Table_Key key = {.strings = docs.items, .pos = tail_offset, .len = (table_key_len)len_utf8};
   table_value dup_doc = table_insert(&console_arena, &url_table, &key, tail_doc);
   if (dup_doc >= 0) {
-    array_shrink(&docs, (uint32_t)len_utf8);
-    --docs.doc_count;
-    if (tag_url_items) {
-      array_push(&console_arena, tag_url_items, (int32_t)dup_doc);
-    }
+    docs_pop(len_utf8);
+    if (tag_url_items) array_push(&console_arena, tag_url_items, (int32_t)dup_doc);
   } else {
-    if (tag_url_items) {
-      array_push(&console_arena, tag_url_items, tail_doc);
-    }
+    if (tag_url_items) array_push(&console_arena, tag_url_items, tail_doc);
   }
 }
 
@@ -2760,48 +2764,25 @@ static bool reinit_documents(void) {
     log_message(LOG_ERROR, "Failed to build SA");
     return false;
   }
-  int32_t *plcp = docs.suffix_to_doc;
+  array_struct(int32_t) plcp = {0};
+  array_init_zero(&docs_arena, &plcp, (uint32_t)d_bytes);
 #if defined(LIBSAIS_OPENMP)
-  result = libsais_plcp_gsa_omp(docs.items, docs.gsa, plcp, d_bytes, cin_system.threads);
+  result = libsais_plcp_gsa_omp(docs.items, docs.gsa, plcp.items, d_bytes, cin_system.threads);
 #else
-  result = libsais_plcp_gsa(docs.items, docs.gsa, plcp, d_bytes);
+  result = libsais_plcp_gsa(docs.items, docs.gsa, plcp.items, d_bytes);
 #endif
   if (result != 0) {
     log_message(LOG_ERROR, "Failed to build PLCP array");
     return false;
   }
 #if defined(LIBSAIS_OPENMP)
-  result = libsais_lcp_omp(plcp, docs.gsa, docs.lcp, d_bytes, cin_system.threads);
+  result = libsais_lcp_omp(plcp.items, docs.gsa, docs.lcp, d_bytes, cin_system.threads);
 #else
-  result = libsais_lcp(plcp, docs.gsa, docs.lcp, d_bytes);
+  result = libsais_lcp(plcp.items, docs.gsa, docs.lcp, d_bytes);
 #endif
   if (result != 0) {
     log_message(LOG_ERROR, "Failed to build LCP array");
     return false;
-  }
-  docs.suffix_to_doc[0] = 0;
-  for (int32_t i = 1; i < docs.doc_count; ++i) {
-    docs.suffix_to_doc[i] = docs.gsa[i - 1] + 1;
-  }
-  // TODO: there is probably a faster approach than
-  // binary search, but with omp it is very fast
-#if defined(CIN_OPENMP)
-#pragma omp parallel for if (d_bytes >= (1 << 16))
-#endif
-  for (int32_t i = docs.doc_count; i < d_bytes; ++i) {
-    int32_t left = 0;
-    int32_t right = docs.doc_count - 1;
-    int32_t curr = docs.gsa[i];
-    while (left < right) {
-      int32_t mid = left + ((right - left + 1) >> 1);
-      if (docs.suffix_to_doc[mid] <= curr) {
-        left = mid;
-      } else {
-        right = mid - 1;
-      }
-    }
-    int32_t doc = docs.suffix_to_doc[left];
-    docs.suffix_to_doc[i] = doc;
   }
   return true;
 }
@@ -2809,7 +2790,6 @@ static bool reinit_documents(void) {
 static bool init_documents(void) {
   int32_t d_bytes = (int32_t)array_bytes(&docs);
   docs.gsa = arena_bump_T(&docs_arena, uint8_t, docs.bytes_mul32);
-  docs.suffix_to_doc = arena_bump_T(&docs_arena, uint8_t, docs.bytes_mul32);
   docs.lcp = arena_bump_T(&docs_arena, uint8_t, docs.bytes_mul32);
   docs.dedup_counters = arena_bump_T(&docs_arena, uint16_t, (uint32_t)d_bytes);
   table_init(&docs_arena, &media.search_table, CIN_QUERIES_CAP);
@@ -2891,7 +2871,7 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len, Playli
   array_ensure_capacity_core(&docs_arena, result, (uint32_t)n, false);
   result->count = 0;
   for (int32_t i = l_bound; i <= r_bound; ++i) {
-    int32_t doc = docs.suffix_to_doc[i];
+    int32_t doc = docs.suffix_to_doc.items[i];
     if (docs.dedup_counters[doc] != dedup_counter) {
       docs.dedup_counters[doc] = dedup_counter;
       assert(result->count < result->capacity);
@@ -3886,7 +3866,7 @@ static inline bool init_mpv(void) {
   cache_init_core(&io_arena, &cin_io.instances, 1, false);
   cache_init_core(&docs_arena, &media.playlists, 1, true);
   Playlist *default_playlist = &media.default_playlist;
-  array_set(&docs_arena, default_playlist, docs.suffix_to_doc, (uint32_t)docs.doc_count);
+  array_set(&docs_arena, default_playlist, docs.suffix_to_doc.items, (uint32_t)docs.doc_count);
   array_to_pow1(&docs_arena, default_playlist);
   playlist_setup_shuffle(default_playlist);
   Instance *head_instance = cin_io.instances.head;
