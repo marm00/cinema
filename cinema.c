@@ -2155,8 +2155,6 @@ end:
 #define CIN_DOCS_ARENA_CAP megabytes(2)
 #define CIN_DOCS_CAP (1 << 13)
 
-array_define(Document_Positions, int32_t);
-
 struct Document_Collection {
   // Each byte represents a UTF-8 unit
   array_struct_members(uint8_t);
@@ -2169,24 +2167,16 @@ struct Document_Collection {
   int32_t doc_count;
   int32_t *gsa;
   int32_t *lcp;
-  Document_Positions suffix_to_doc;
+  int32_t *suffix_to_doc;
   uint16_t *dedup_counters;
 } docs = {0};
 
 static inline void docs_push(uint8_t *utf8, int32_t len) {
-  int32_t left = (int32_t)array_bytes(&docs);
-  assert(left == (int32_t)docs.suffix_to_doc.count);
-  int32_t right = left + len;
-  array_grow(&docs_arena, &docs.suffix_to_doc, (uint32_t)len);
-  for (int32_t i = left; i < right; ++i) {
-    docs.suffix_to_doc.items[i] = left;
-  }
   array_extend_zero(&docs_arena, &docs, utf8, (uint32_t)len);
   ++docs.doc_count;
 }
 
 static inline void docs_pop(int32_t len) {
-  array_shrink(&docs.suffix_to_doc, (uint32_t)len);
   array_shrink(&docs, (uint32_t)len);
   --docs.doc_count;
 }
@@ -2764,26 +2754,44 @@ static bool reinit_documents(void) {
     log_message(LOG_ERROR, "Failed to build SA");
     return false;
   }
-  array_struct(int32_t) plcp = {0};
-  array_init_zero(&docs_arena, &plcp, (uint32_t)d_bytes);
+  int32_t *tmp = arena_bump_T(&docs_arena, int32_t, (uint32_t)d_bytes);
 #if defined(LIBSAIS_OPENMP)
-  result = libsais_plcp_gsa_omp(docs.items, docs.gsa, plcp.items, d_bytes, cin_system.threads);
+  result = libsais_plcp_gsa_omp(docs.items, docs.gsa, tmp, d_bytes, cin_system.threads);
 #else
-  result = libsais_plcp_gsa(docs.items, docs.gsa, plcp.items, d_bytes);
+  result = libsais_plcp_gsa(docs.items, docs.gsa, tmp, d_bytes);
 #endif
   if (result != 0) {
     log_message(LOG_ERROR, "Failed to build PLCP array");
     return false;
   }
 #if defined(LIBSAIS_OPENMP)
-  result = libsais_lcp_omp(plcp.items, docs.gsa, docs.lcp, d_bytes, cin_system.threads);
+  result = libsais_lcp_omp(tmp, docs.gsa, docs.lcp, d_bytes, cin_system.threads);
 #else
-  result = libsais_lcp(plcp.items, docs.gsa, docs.lcp, d_bytes);
+  result = libsais_lcp(tmp, docs.gsa, docs.lcp, d_bytes);
 #endif
   if (result != 0) {
     log_message(LOG_ERROR, "Failed to build LCP array");
     return false;
   }
+  Playlist *default_playlist = &media.default_playlist;
+  array_ensure_capacity_core(&docs_arena, default_playlist, (uint32_t)docs.doc_count, false);
+  for (int32_t i = 0, offset = 0; i < d_bytes; ++i) {
+    tmp[i] = offset;
+    if (docs.items[i] == '\0') {
+      uint32_t playlist_pos = default_playlist->count++;
+      default_playlist->items[playlist_pos] = offset;
+      offset = i + 1;
+    }
+  }
+#if defined(CIN_OPENMP)
+#pragma omp parallel for if (d_bytes >= (1 << 19))
+#endif
+  for (int32_t i = 0; i < d_bytes; ++i) {
+    int32_t offset = docs.gsa[i];
+    int32_t doc = tmp[offset];
+    docs.suffix_to_doc[i] = doc;
+  }
+  arena_free_pos(&docs_arena, (uint8_t *)tmp, (uint32_t)d_bytes);
   return true;
 }
 
@@ -2792,6 +2800,7 @@ static bool init_documents(void) {
   docs.gsa = arena_bump_T(&docs_arena, uint8_t, docs.bytes_mul32);
   docs.lcp = arena_bump_T(&docs_arena, uint8_t, docs.bytes_mul32);
   docs.dedup_counters = arena_bump_T(&docs_arena, uint16_t, (uint32_t)d_bytes);
+  docs.suffix_to_doc = arena_bump_T(&docs_arena, int32_t, (uint32_t)d_bytes);
   table_init(&docs_arena, &media.search_table, CIN_QUERIES_CAP);
   return reinit_documents();
 }
@@ -2871,7 +2880,7 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len, Playli
   array_ensure_capacity_core(&docs_arena, result, (uint32_t)n, false);
   result->count = 0;
   for (int32_t i = l_bound; i <= r_bound; ++i) {
-    int32_t doc = docs.suffix_to_doc.items[i];
+    int32_t doc = docs.suffix_to_doc[i];
     if (docs.dedup_counters[doc] != dedup_counter) {
       docs.dedup_counters[doc] = dedup_counter;
       assert(result->count < result->capacity);
@@ -3866,7 +3875,6 @@ static inline bool init_mpv(void) {
   cache_init_core(&io_arena, &cin_io.instances, 1, false);
   cache_init_core(&docs_arena, &media.playlists, 1, true);
   Playlist *default_playlist = &media.default_playlist;
-  array_set(&docs_arena, default_playlist, docs.suffix_to_doc.items, (uint32_t)docs.doc_count);
   array_to_pow1(&docs_arena, default_playlist);
   playlist_setup_shuffle(default_playlist);
   Instance *head_instance = cin_io.instances.head;
