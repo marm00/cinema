@@ -916,13 +916,13 @@ static inline BOOL GetConsoleScreenBufferInfo_safe(HANDLE hConsoleOutput, PCONSO
   if (msg_tail >= max_y) {
     repl.msg_index = 0;
     repl.msg->count = 0;
-    wwritef(L"WARNING: Input message too large (tail at line %hd >= console"
+    wwritef(L"NOTE: Input message too large (tail at line %hd >= console"
             " screen buffer height limit %hd). Cinema resolved this by fully"
             " clearing your input. Your console terminal supports roughly"
             " %lu characters (cells)." WCRLF,
             msg_tail, max_y, max_x * (DWORD)max_y);
   }
-  wwritef(L"WARNING: Console screen buffer height limit reached (%hd>=%hd)."
+  wwritef(L"NOTE: Console screen buffer height limit reached (%hd>=%hd)."
           " Cinema resolved this by activating a fresh buffer. The content of"
           " the previous buffer will be available once Cinema is closed."
           " If you want to prevent this situation in the future, increase"
@@ -3289,19 +3289,17 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
     ULONG_PTR completion_key;
     OVERLAPPED *ovl;
     if (!GetQueuedCompletionStatus(iocp, &bytes, &completion_key, &ovl, INFINITE)) {
-      log_last_error("Failed to dequeue packet");
-      // TODO: when observed, resolve instead of break
       // https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-getqueuedcompletionstatus#remarks
-      // break;
+      log_last_error("Failed to dequeue packet");
+      exit(1);
     }
     Instance *instance = (Instance *)completion_key;
     Overlapped_Context *ctx = (Overlapped_Context *)ovl;
     if (ctx->type != MPV_READ) {
       Overlapped_Write *write = (Overlapped_Write *)ctx;
       if (write->bytes != bytes) {
-        log_message(LOG_ERROR, "Expected '%zu' bytes but received '%zu'", write->bytes, bytes);
-        // TODO: when observed, resolve instead of break
-        break;
+        log_message(LOG_ERROR, "Expected '%zu' bytes but received '%ld'", write->bytes, bytes);
+        exit(1);
       }
     } else {
       if (bytes) {
