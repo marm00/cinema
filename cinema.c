@@ -3829,10 +3829,15 @@ static void mpv_spawn(Instance *instance, size_t index) {
   Cin_Screen screen = cmd_ctx.layout->items[extra ? 0 : index];
   if (extra) array_push(&console_arena, cmd_ctx.layout, screen);
   // screen.len actually includes null-terminator
-  int32_t len = utf8_to_utf16_nraw((char *)screen_strings.items + screen.offset, (int32_t)screen.len);
+  char *screen_utf8 = (char *)screen_strings.items + screen.offset;
+  int32_t len = utf8_to_utf16_nraw(screen_utf8, (int32_t)screen.len);
   if (len > (int32_t)CIN_MPVCALL_GEOMETRY_LEN) {
-    // TODO: error message for user
-    assert(false);
+    char *layout_name = (char *)layout_strings.items + cmd_ctx.layout->name_offset;
+    printf("Cinema crashed because the config value of screen %zu in layout '%s' is "
+           "too large (%d > %u chars): %.*s (first %u shown)",
+           index + 1, layout_name, len, CIN_MPVCALL_GEOMETRY_LEN, CIN_MPVCALL_GEOMETRY_LEN,
+           screen_utf8, CIN_MPVCALL_GEOMETRY_LEN);
+    exit(1);
   }
   swprintf(mpv_command + CIN_MPVCALL_LEN + digits, CIN_MPVCALL_GEOMETRY_LEN, L" --geometry=%.*s",
            len, utf16_buf_raw.items);
