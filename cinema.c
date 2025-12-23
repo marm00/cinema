@@ -3444,12 +3444,11 @@ memory:
 static inline bool resize_console(Console_Timer_Ctx *ctx) {
   (void)ctx;
   static array_struct(CHAR_INFO) console_buffer = {0};
-  // NOTE: There are two important cases for when this event gets triggered:
-  // either the cursor is automatically repositioned to the tail of
-  // the user input / preview, OR it is not. The former seems way more likely,
-  // but to support the latter, we just generalize and assume the latter.
-  // A "benefit" of this is that we can use the preview before starting REPL.
-  // TODO: update note, check types
+  // NOTE: Windows cursor / display is not fully predictable. As such,
+  // we search for a unique token that marks the start of the REPL.
+  // There are probably scenarios where the token (printed by us) is
+  // no longer visible; if this is encountered, probably just fully
+  // redraw the console.
   EnterCriticalSection(&log_lock);
   hide_cursor();
   CONSOLE_SCREEN_BUFFER_INFO buffer_info;
