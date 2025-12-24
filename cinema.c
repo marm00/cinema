@@ -1196,50 +1196,6 @@ static inline void log_fopen_error(const char *filename, int32_t err) {
   log_message(LOG_ERROR, "Failed to open file '%s': %s", filename, err_buf);
 }
 
-typedef struct Hash_Table_I32 {
-  int32_t *keys;
-  int32_t *values;
-  int32_t len;
-  int32_t a;
-  int32_t shift;
-  int32_t universe_len;
-} Hash_Table_I32;
-
-static Hash_Table_I32 *hash_table_i32(const int32_t *universe, int32_t universe_len) {
-  // universal integer hashing with 50% load factor,
-  // open addressing with linear probing
-  Hash_Table_I32 *table = malloc(sizeof(Hash_Table_I32));
-  int32_t len = 1;
-  while (len < universe_len * 2) {
-    len <<= 1;
-  }
-  table->shift = 32 - __builtin_clz((unsigned int)len - 1);
-  table->a = (rand() * 2) | 1;
-  table->keys = malloc((size_t)len * sizeof(int32_t));
-  table->values = malloc((size_t)len * sizeof(int32_t));
-  for (int32_t i = 0; i < len; ++i) {
-    table->keys[i] = -1;
-    table->values[i] = -1;
-  }
-  for (int32_t i = 0; i < universe_len; ++i) {
-    int32_t hash = (table->a * universe[i]) >> table->shift;
-    while (table->keys[hash] != -1) {
-      hash = (hash + 1) & (len - 1);
-    }
-    table->keys[hash] = universe[i];
-  }
-  table->len = len;
-  return table;
-}
-
-static int32_t hash_i32(const Hash_Table_I32 *table, const int32_t value) {
-  int32_t hash = (table->a * value) >> table->shift;
-  while (table->keys[hash] != value) {
-    hash = (hash + 1) & (table->len - 1);
-  }
-  return hash;
-}
-
 #define CIN_INTEGER_HASH 2654435761U
 
 static inline size_t deduplicate_i32(Arena *arena, int32_t *items, size_t len) {
@@ -1278,68 +1234,6 @@ static inline size_t deduplicate_i32(Arena *arena, int32_t *items, size_t len) {
     arena_free_pos(arena, (uint8_t *)set, (uint32_t)hash_n);
     return k;
   }
-}
-
-static int **rmqa(const int *a, const int n) {
-  // sparse table for range minimum query over a
-  int log_n = 32 - __builtin_clz((unsigned int)(n - 1));
-  int *data = malloc((size_t)n * (size_t)log_n * sizeof(int));
-  int **m = malloc((size_t)n * sizeof(int *));
-  for (int i = 0; i < n; ++i) {
-    m[i] = data + i * log_n;
-    m[i][0] = a[i];
-  }
-#if defined(CIN_OPENMP)
-#pragma omp parallel for if (n >= (1 << 16))
-#endif
-  for (int k = 1; k < log_n; ++k) {
-    int step = 1 << (k - 1);
-    int limit = n - (1 << k) + 1;
-    for (int i = 0; i < limit; ++i) {
-      m[i][k] = min(m[i][k - 1], m[i + step][k - 1]);
-    }
-  }
-  return m;
-}
-
-static int rmq(int **m, const int left, const int right) {
-  int length = right - left + 1;
-  int k = 31 - __builtin_clz((unsigned int)length);
-  int right_start = right - (1 << k) + 1;
-  return min(m[left][k], m[right_start][k]);
-}
-
-typedef struct RMQ_Position {
-  int32_t value;
-  int32_t index;
-} RMQ_Position;
-
-static RMQ_Position **rmqa_positional(const int32_t *a, const int32_t n) {
-  RMQ_Position **m = malloc((size_t)n * sizeof(RMQ_Position *));
-  int log_n = 31 - __builtin_clz((unsigned int)n);
-  for (int i = 0; i < n; ++i) {
-    m[i] = malloc((size_t)log_n * sizeof(RMQ_Position));
-  }
-  for (int i = 0; i < n; ++i) {
-    m[i][0] = (RMQ_Position){.value = a[i], .index = i};
-  }
-  for (int k = 1; k < log_n; ++k) {
-    for (int i = 0; i + (1 << k) - 1 < n; ++i) {
-      RMQ_Position left = m[i][k - 1];
-      RMQ_Position right = m[i + (1 << (k - 1))][k - 1];
-      m[i][k] = left.value < right.value ? left : right;
-    }
-  }
-  return m;
-}
-
-static RMQ_Position rmq_positional(RMQ_Position **m, const int left, const int right) {
-  int length = right - left + 1;
-  int k = 31 - __builtin_clz((unsigned int)length);
-  int right_start = right - (1 << k) + 1;
-  RMQ_Position min_left = m[left][k];
-  RMQ_Position min_right = m[right_start][k];
-  return min_left.value < min_right.value ? min_left : min_right;
 }
 
 #define COMMAND_ALPHABET 26
