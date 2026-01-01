@@ -692,6 +692,7 @@ static struct REPL {
   Console_Message *msg;
   HANDLE out;
   HANDLE in;
+  HANDLE window;
   DWORD msg_index;
   COORD home;
   CONSOLE_CURSOR_INFO cursor_info;
@@ -2960,6 +2961,49 @@ static bool overlap_write(Instance *instance, MPV_Packet type, const char *cmd, 
   return true;
 }
 
+typedef struct Window_Data {
+  union {
+    DWORD pid;
+    wchar_t *name;
+  };
+  HWND hwnd;
+} Window_Data;
+
+static BOOL CALLBACK enum_windows_proc_pid(HWND hwnd, LPARAM lParam) {
+  Window_Data *data = (Window_Data *)lParam;
+  DWORD pid;
+  GetWindowThreadProcessId(hwnd, &pid);
+  if (pid == data->pid && IsWindow(hwnd)) {
+    data->hwnd = hwnd;
+    return FALSE;
+  }
+  return TRUE;
+}
+
+static HWND find_window_by_pid(DWORD pid) {
+  Window_Data data = {.pid = pid};
+  EnumWindows(enum_windows_proc_pid, (LPARAM)&data);
+  return data.hwnd;
+}
+
+static BOOL CALLBACK enum_windows_proc_name(HWND hwnd, LPARAM lParam) {
+  Window_Data *data = (Window_Data *)lParam;
+  wchar_t *pattern = data->name;
+  wchar_t query[MAX_CLASS_NAME];
+  GetClassNameW(hwnd, query, sizeof(query));
+  if (wcscmp(pattern, query) == 0) {
+    data->hwnd = hwnd;
+    return FALSE;
+  }
+  return TRUE;
+}
+
+static HWND find_window_by_name(wchar_t *name) {
+  Window_Data data = {.name = name};
+  EnumWindows(enum_windows_proc_name, (LPARAM)&data);
+  return data.hwnd;
+}
+
 static inline void playlist_setup_shuffle(Playlist *playlist) {
   uint32_t n = playlist->count;
   assert(n);
@@ -3061,7 +3105,15 @@ static inline void mpv_lock(void) {
 }
 
 static inline void mpv_restore_focus(void) {
-  SetWindowPos(GetConsoleWindow(), HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+  if (!repl.window) {
+    if (repl.viewport_bound) {
+      repl.window = find_window_by_name(L"CASCADIA_HOSTING_WINDOW_CLASS");
+    } else {
+      repl.window = GetConsoleWindow();
+    }
+    assert(repl.window && "terminal window not found");
+  }
+  SetWindowPos(repl.window, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
 }
 
 static inline void mpv_unlock(void) {
@@ -3622,28 +3674,6 @@ static bool init_executables(void) {
   return true;
 }
 
-typedef struct Window_Data {
-  DWORD pid;
-  HWND hwnd;
-} Window_Data;
-
-static BOOL CALLBACK enum_windows_proc(HWND hwnd, LPARAM lParam) {
-  Window_Data *data = (Window_Data *)lParam;
-  DWORD pid;
-  GetWindowThreadProcessId(hwnd, &pid);
-  if (pid == data->pid && IsWindow(hwnd)) {
-    data->hwnd = hwnd;
-    return FALSE;
-  }
-  return TRUE;
-}
-
-static HWND find_window(DWORD pid) {
-  Window_Data data = {.pid = pid};
-  EnumWindows(enum_windows_proc, (LPARAM)&data);
-  return data.hwnd;
-}
-
 struct Chat {
   STARTUPINFOW si;
   PROCESS_INFORMATION pi;
@@ -3683,7 +3713,7 @@ static inline void chat_reposition(Cin_Layout *layout) {
       static const size_t CHAT_REPOSITION_TRIES = 100;
       static const DWORD CHAT_REPOSITION_DELAY = 20;
       for (size_t i = 0; i < CHAT_REPOSITION_TRIES; ++i) {
-        chat.window = find_window(pi->dwProcessId);
+        chat.window = find_window_by_pid(pi->dwProcessId);
         if (IsWindowVisible(chat.window)) {
           SetWindowPos(chat.window, HWND_TOPMOST, x, y, cx, cy, SWP_SHOWWINDOW);
           break;
