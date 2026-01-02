@@ -923,6 +923,7 @@ static inline BOOL GetConsoleScreenBufferInfo_safe(HANDLE hConsoleOutput, PCONSO
             " %lu characters (cells)." WCRLF,
             msg_tail, max_y, max_x * (DWORD)max_y);
   }
+  // TODO: theoretically can happen infinitely, set upper bound
   wwritef(L"NOTE: Console screen buffer height limit reached (%hd>=%hd)."
           " Cinema resolved this by activating a fresh buffer. The content of"
           " the previous buffer will be available once Cinema is closed."
@@ -4942,8 +4943,6 @@ int main(int argc, char **argv) {
   // the cmd.exe approach using screen clear tricks and partial writes,
   // but even then the scroll space will surely become confusing at some
   // point. We accept the scrollback issues and support relative consoles.
-  // TODO: support bounded viewport (excluding scrollback) maybe VT100
-  // size_t visible_lines = repl.screen_info.srWindow.Bottom - repl.screen_info.srWindow.Top;
   Console_Message *msg_tail = NULL;
   for (;;) {
     show_cursor();
@@ -5207,13 +5206,6 @@ int main(int argc, char **argv) {
   if (!SetConsoleMode(repl.in, repl.in_mode)) {
     log_last_error("Failed to reset in console mode");
     return 1;
-  }
-  if (repl.viewport_bound) {
-    // TODO: enable if using virtual terminal sequences if viewport_bound
-    // if (!SetConsoleMode(repl.out, console_mode_out)) {
-    //   log_last_error( "Failed to reset out console mode");
-    //   return 1;
-    // }
   }
   return 0;
 }
