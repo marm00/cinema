@@ -3106,11 +3106,13 @@ static inline void mpv_lock(void) {
 }
 
 static inline void mpv_restore_focus(void) {
-  if (!repl.window) {
-    if (repl.viewport_bound) {
+  if (!repl.window && (repl.viewport_bound || !(repl.window = GetConsoleWindow()))) {
+    static const size_t MPV_RESTORE_TRIES = 10;
+    static const DWORD MPV_RESTORE_DELAY = 120;
+    for (size_t i = 0; i < MPV_RESTORE_TRIES; ++i) {
       repl.window = find_window_by_name(L"CASCADIA_HOSTING_WINDOW_CLASS");
-    } else {
-      repl.window = GetConsoleWindow();
+      if (repl.window) break;
+      else Sleep(MPV_RESTORE_DELAY);
     }
     assert(repl.window && "terminal window not found");
   }
@@ -3711,8 +3713,8 @@ static inline void chat_reposition(Cin_Layout *layout) {
         }
       }
       // since STARTUPINFOW is ignored, manually reposition
-      static const size_t CHAT_REPOSITION_TRIES = 100;
-      static const DWORD CHAT_REPOSITION_DELAY = 20;
+      static const size_t CHAT_REPOSITION_TRIES = 50;
+      static const DWORD CHAT_REPOSITION_DELAY = 40;
       for (size_t i = 0; i < CHAT_REPOSITION_TRIES; ++i) {
         chat.window = find_window_by_pid(pi->dwProcessId);
         if (IsWindowVisible(chat.window)) {
