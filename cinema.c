@@ -4276,6 +4276,20 @@ static void cmd_hide_validator(void) {
   cmd_ctx.executor = cmd_hide_executor;
 }
 
+static void cmd_kill_executor(void) {
+  PostMessageW(chat.window, WM_CLOSE, 0, 0);
+  mpv_target_foreach(i, instance) {
+    log_message(LOG_DEBUG, "Closing PID=%lu", instance->pi.dwProcessId);
+    overlap_write(instance, MPV_QUIT, "quit", NULL, NULL);
+  }
+}
+
+static void cmd_kill_validator(void) {
+  if (!validate_screens()) return;
+  set_preview(true, L"kill  %s", cmd_ctx.targets.items);
+  cmd_ctx.executor = cmd_kill_executor;
+}
+
 static void cmd_maximize_executor(void) {
   size_t target = cmd_ctx.numbers.count ? cmd_ctx.numbers.items[0] - 1 : 0;
   cache_foreach(&cin_io.instances, Instance, i, instance) {
@@ -4898,6 +4912,7 @@ static bool init_commands(void) {
   register_cmd(L"extra", L"Adds an extra screen (see store command)", cmd_extra_validator);
   register_cmd(L"help", L"Show all commands", cmd_help_validator);
   register_cmd(L"hide", L"Hide media with term [hide term]", cmd_hide_validator);
+  register_cmd(L"kill", L"Kill screen(s) and chat [(1 2 ..) kill]", cmd_kill_validator);
   register_cmd(L"layout", L"Change layout to name [layout (name)]", cmd_layout_validator);
   register_cmd(L"list", L"Show all tags", cmd_list_validator);
   register_cmd(L"lock", L"Lock/unlock screen contents [(1 2 ..) lock]", cmd_lock_validator);
