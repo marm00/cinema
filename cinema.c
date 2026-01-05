@@ -2966,6 +2966,10 @@ typedef struct Window_Data {
   union {
     DWORD pid;
     wchar_t *name;
+    struct {
+      DWORD *pids;
+      DWORD count;
+    };
   };
   HWND hwnd;
 } Window_Data;
@@ -2982,7 +2986,7 @@ static BOOL CALLBACK enum_windows_proc_pid(HWND hwnd, LPARAM lParam) {
 }
 
 static HWND find_window_by_pid(DWORD pid) {
-  Window_Data data = {.pid = pid};
+  Window_Data data = {.pid = pid, .hwnd = NULL};
   EnumWindows(enum_windows_proc_pid, (LPARAM)&data);
   return data.hwnd;
 }
@@ -3000,8 +3004,39 @@ static BOOL CALLBACK enum_windows_proc_name(HWND hwnd, LPARAM lParam) {
 }
 
 static HWND find_window_by_name(wchar_t *name) {
-  Window_Data data = {.name = name};
+  Window_Data data = {.name = name, .hwnd = NULL};
   EnumWindows(enum_windows_proc_name, (LPARAM)&data);
+  return data.hwnd;
+}
+
+static BOOL CALLBACK enum_windows_proc_console(HWND hwnd, LPARAM lParam) {
+  Window_Data *data = (Window_Data *)lParam;
+  DWORD pid;
+  GetWindowThreadProcessId(hwnd, &pid);
+  for (DWORD i = 0; i < data->count; i++) {
+    if (pid == data->pids[i]) {
+      if (IsWindowVisible(hwnd) && GetWindow(hwnd, GW_OWNER) == NULL) {
+        data->hwnd = hwnd;
+        return FALSE;
+      }
+    }
+  }
+  return TRUE;
+}
+
+static HWND find_window_of_console(void) {
+  array_struct(DWORD) pids = {0};
+  DWORD dwProcessCount = 16;
+  array_init(&iocp_thread_arena, &pids, dwProcessCount);
+  DWORD actual_count = GetConsoleProcessList(pids.items, dwProcessCount);
+  array_resize(&iocp_thread_arena, &pids, actual_count);
+  if (actual_count > dwProcessCount) {
+    dwProcessCount = actual_count;
+    actual_count = GetConsoleProcessList(pids.items, dwProcessCount);
+  }
+  Window_Data data = {.pids = pids.items, .count = actual_count, .hwnd = NULL};
+  EnumWindows(enum_windows_proc_console, (LPARAM)&data);
+  array_free_items(&iocp_thread_arena, &pids);
   return data.hwnd;
 }
 
@@ -3107,10 +3142,10 @@ static inline void mpv_lock(void) {
 
 static inline void mpv_restore_focus(void) {
   if (!repl.window && (repl.viewport_bound || !(repl.window = GetConsoleWindow()))) {
-    static const size_t MPV_RESTORE_TRIES = 10;
-    static const DWORD MPV_RESTORE_DELAY = 120;
+    static const size_t MPV_RESTORE_TRIES = 20;
+    static const DWORD MPV_RESTORE_DELAY = 100;
     for (size_t i = 0; i < MPV_RESTORE_TRIES; ++i) {
-      repl.window = find_window_by_name(L"CASCADIA_HOSTING_WINDOW_CLASS");
+      repl.window = find_window_of_console();
       if (repl.window) break;
       else Sleep(MPV_RESTORE_DELAY);
     }
