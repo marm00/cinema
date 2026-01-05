@@ -923,13 +923,16 @@ static inline BOOL GetConsoleScreenBufferInfo_safe(HANDLE hConsoleOutput, PCONSO
             " %lu characters (cells)." WCRLF,
             msg_tail, max_y, max_x * (DWORD)max_y);
   }
-  // TODO: theoretically can happen infinitely, set upper bound
-  wwritef(L"NOTE: Console screen buffer height limit reached (%hd>=%hd)."
-          " Cinema resolved this by activating a fresh buffer. The content of"
-          " the previous buffer will be available once Cinema is closed."
-          " If you want to prevent this situation in the future, increase"
-          " the screen buffer size (height) of your console." WCRLF,
-          cur_y, max_y);
+  static bool notify_buffer_refresh = true;
+  if (notify_buffer_refresh) {
+    wwritef(L"NOTE: Console screen buffer height limit reached (%hd>=%hd)."
+            " Cinema resolved this by activating a fresh buffer. The content of"
+            " the previous buffer will be available once Cinema is closed."
+            " If you want to prevent this situation in the future, increase"
+            " the screen buffer size (height) of your console." WCRLF,
+            cur_y, max_y);
+  }
+  notify_buffer_refresh = false;
   if (!GetConsoleScreenBufferInfo(repl.out, lpConsoleScreenBufferInfo)) return FALSE;
   repl.home.Y = lpConsoleScreenBufferInfo->dwCursorPosition.Y;
   SHORT preview_shift = (SHORT)((repl.msg->count + PREFIX) / max_x) + 1;
