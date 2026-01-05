@@ -3142,6 +3142,8 @@ static inline void mpv_lock(void) {
 
 static inline void mpv_restore_focus(void) {
   if (!repl.window && (repl.viewport_bound || !(repl.window = GetConsoleWindow()))) {
+    // Since repl.window is set by calling GetForegroundWindow on launch,
+    // this branch is unlikely to be triggered.
     static const size_t MPV_RESTORE_TRIES = 20;
     static const DWORD MPV_RESTORE_DELAY = 100;
     for (size_t i = 0; i < MPV_RESTORE_TRIES; ++i) {
@@ -3388,6 +3390,7 @@ static inline bool bounded_console(HANDLE console) {
                          "(Command Prompt), which works perfectly." WCRLF
 
 static inline bool init_repl(void) {
+  repl.window = GetForegroundWindow();
   if (!SetConsoleCP(CP_UTF8)) goto code_page;
   if (!SetConsoleOutputCP(CP_UTF8)) goto code_page;
   if ((repl.in = GetStdHandle(STD_INPUT_HANDLE)) == INVALID_HANDLE_VALUE) goto handle_in;
