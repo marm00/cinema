@@ -908,6 +908,12 @@ static inline BOOL GetConsoleScreenBufferInfo_safe(HANDLE hConsoleOutput, PCONSO
   if (fresh_buffer == INVALID_HANDLE_VALUE) return FALSE;
   if (!SetConsoleScreenBufferSize(fresh_buffer, lpConsoleScreenBufferInfo->dwSize)) return FALSE;
   if (!SetConsoleActiveScreenBuffer(fresh_buffer)) return FALSE;
+  DWORD mode;
+  GetConsoleMode(fresh_buffer, &mode);
+  SetConsoleMode(fresh_buffer, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+  DWORD written;
+  WriteConsoleA(fresh_buffer, "\x1b[2J\x1b[3J\x1b[H", 12, &written, NULL);
+  SetConsoleMode(fresh_buffer, mode);
   repl.out = fresh_buffer;
   repl.dwSize_X = max_x;
   SetConsoleCursorPosition(repl.out, (COORD){.X = 0, .Y = 0});
@@ -931,6 +937,8 @@ static inline BOOL GetConsoleScreenBufferInfo_safe(HANDLE hConsoleOutput, PCONSO
             " If you want to prevent this situation in the future, increase"
             " the screen buffer size (height) of your console." WCRLF,
             cur_y, max_y);
+  } else {
+    wwritef(L"Increase console size");
   }
   notify_buffer_refresh = false;
   if (!GetConsoleScreenBufferInfo(repl.out, lpConsoleScreenBufferInfo)) return FALSE;
@@ -1152,8 +1160,8 @@ static void log_wmessage(Cin_Log_Level level, const wchar_t *wmessage, ...) {
 }
 
 static void wwrite_safe(const wchar_t *str, DWORD len) {
-  clear_preview(0);
   EnterCriticalSection(&log_lock);
+  clear_preview(0);
   hide_cursor();
   cursor_home();
   wwrite(str, len);
@@ -3388,9 +3396,9 @@ static inline bool bounded_console(HANDLE console) {
   return prev_bot == next_bot;
 }
 
-#define viewport_warning L"Large inputs can cause minor scrollback issues in your terminal. " \
-                         "If this is bothersome, you can use vanilla cmd.exe "                \
-                         "(Command Prompt), which works perfectly." WCRLF
+#define viewport_warning L"Large inputs can cause minor scrollback issues in your console. " \
+                         "You can use vanilla cmd.exe (Command Prompt), "                    \
+                         "which works correctly." WCRLF
 
 static inline bool init_repl(void) {
   repl.window = GetForegroundWindow();
