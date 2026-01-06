@@ -4845,15 +4845,25 @@ static void cmd_copy_validator(void) {
 }
 
 static void cmd_extra_executor(void) {
-  Instance *extra = NULL;
-  cache_get(&io_arena, &cin_io.instances, extra);
-  playlist_set_default(extra);
+  bool reuse = false;
   mpv_lock();
-  mpv_spawn(extra, SIZE_MAX);
+  cache_foreach(&cin_io.instances, Instance, i, old) {
+    if (!old->pipe) {
+      // reuse if free instance available
+      reuse = true;
+      mpv_spawn(old, SIZE_MAX);
+    }
+  }
+  if (!reuse) {
+    Instance *extra = NULL;
+    cache_get(&io_arena, &cin_io.instances, extra);
+    playlist_set_default(extra);
+    mpv_spawn(extra, SIZE_MAX);
+  }
 }
 
 static void cmd_extra_validator(void) {
-  set_preview(true, L"add extra screen");
+  set_preview(true, L"add extra screen to layout");
   cmd_ctx.executor = cmd_extra_executor;
 }
 
