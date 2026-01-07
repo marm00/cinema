@@ -4983,7 +4983,7 @@ static bool init_commands(void) {
   register_cmd(L"store", L"Store layout in cinema.conf [store (layout)]", cmd_store_validator);
   register_cmd(L"swap", L"Swap screen contents [(1 2) swap]", cmd_swap_validator);
   register_cmd(L"tag", L"Limit media to tag [(1 2 ..) tag (name)]", cmd_tag_validator);
-  register_cmd(L"twitch", L"Set media to twitch url [(1 2 ..) twitch (channel)]", cmd_twitch_validator);
+  register_cmd(L"twitch", L"Show channel [(1 2 ..) twitch (channel)]", cmd_twitch_validator);
   return true;
 }
 

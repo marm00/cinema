@@ -1,17 +1,25 @@
-# Cinema media player
+# Cinema
 
-A CLI tool to search and play local and online videos simultaneously, using mpv.
+Watch media in your preferred layout with simple commands.
 
-Compiled with `clang cinema.c libsais.c -std=c11 -O3 -march=znver2 -mtune=znver2 -flto=thin -fopenmp -DCIN_OPENMP -DLIBSAIS_OPENMP -DNDEBUG -fuse-ld=lld -luser32 -fomit-frame-pointer -ffunction-sections -fdata-sections -o cinema.exe`
+## Download
 
-<https://mpv.io/installation/>\
-<https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20250227/mpv-x86_64-20250227-git-5338f4b.7z>
+You can download the latest installable version of Cinema for Windows.
 
-## mpv configuration
+<https://mpv.io/installation/>
 
-TODO: mpv_config_dir in config somewhere\
-TODO: specify yt-dlp dependency
+## Overview
 
-If the `mpv` executable is located inside this folder, configuration in `./portable_config/` is used.\
-Otherwise, system files are used. If you want to target another directory, use `mpv_config_dir`\
-See <https://mpv.io/manual/stable/#files-on-windows> and <https://github.com/mpv-player/mpv/tree/master/etc> for examples.
+## Features
+
+## Bugs and requests
+
+Please use the issue tracker here on GitHub to submit a bug report or request a feature.
+
+## Compilation
+
+## Contributing
+
+## License
+
+MIT
