@@ -18,6 +18,8 @@ Please use the issue tracker here on GitHub to submit a bug report or request a 
 
 ## Compilation
 
+build.bat
+
 ## Contributing
 
 ## License
