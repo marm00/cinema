@@ -4,6 +4,7 @@ cinema.rdi
 cinema.lib
 cinema.exp
 cinema.ilk
+cinema.res
 config.json
 .vscode
 .proj
