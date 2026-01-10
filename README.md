@@ -25,3 +25,7 @@ build.bat
 ## License
 
 MIT
+
+## List of input commands
+
+TODO
