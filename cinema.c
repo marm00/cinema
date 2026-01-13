@@ -2326,7 +2326,6 @@ static void setup_directory(const char *path, Tag_Directories *tag_dirs) {
 static inline void setup_pattern(const char *pattern, Tag_Pattern_Items *tag_pattern_items) {
   // Processes all files (not directories) that match the pattern
   // https://support.microsoft.com/en-us/office/examples-of-wildcard-characters-939e153f-bd30-47e4-a763-61897c87b3f4
-  // TODO: explain allowed patterns (e.g., wildcards) in readme/json examples
   int32_t len_utf16 = utf8_to_utf16_norm(pattern);
   assert(len_utf16);
   assert(utf16_buf_norm.items[len_utf16 - 1] == L'\0');
