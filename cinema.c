@@ -172,6 +172,13 @@ static inline Arena_Chunk *arena_chunk_init(Arena *arena, uint32_t bytes) {
   assert(cin_system.page_size <= CIN_ARENA_MAX);
   size_t dwSize = align(bytes, cin_system.page_size);
   Arena_Chunk *chunk = VirtualAlloc(NULL, dwSize, cin_system.alloc_type, PAGE_READWRITE);
+  if (!chunk) {
+    DWORD code = GetLastError();
+    printf("Cinema crashed with code %lu trying to use VirtualAlloc", code);
+    // https://learn.microsoft.com/en-us/windows/win32/debug/system-error-codes
+    assert(false);
+    exit(1);
+  }
   chunk->prev = arena->curr;
   chunk->count = CIN_ARENA_HEADER;
   chunk->capacity = (uint32_t)dwSize;
