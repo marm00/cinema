@@ -1,7 +1,5 @@
 # Cinema
 
-Watch media in your preferred layout with simple commands.
-
 ## Download
 
 You can download the latest installable version of Cinema for Windows.
@@ -9,6 +7,12 @@ You can download the latest installable version of Cinema for Windows.
 <https://mpv.io/installation/>
 
 ## Overview
+
+Cinema gives you a video wall with full control over the layout and content, powered by [mpv](https://github.com/mpv-player/mpv/).
+
+It should be easy to pick up how it works by just launching it and seeing what happens. If something is wrong, please share your problem (see [Bugs and requests](#bugs-and-requests)).
+
+Customize your settings in [cinema.conf](./cinema.conf) or by typing commands from the [list of commands](#list-of-commands), which can also be used for things like search, shuffle, and autoplay.
 
 ## Features
 
@@ -18,7 +22,7 @@ Please use the issue tracker here on GitHub to submit a bug report or request a 
 
 ## Compilation
 
-build.bat
+Windows only at the moment ([build.bat](./build.bat)).
 
 ## Contributing
 
