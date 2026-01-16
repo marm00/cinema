@@ -25,13 +25,15 @@ If something is wrong, please share your problem (see [Bugs and requests](#bugs-
 
 ## Bugs and requests
 
-Please use the issue tracker here on GitHub to submit a bug report or request a feature.
+Please use the [issue tracker](https://github.com/marm00/cinema/issues) here on GitHub to submit a bug report or request a feature.
 
 ## Compilation
 
 Windows only currently ([build.bat](./build.bat)).
 
 ## Contributing
+
+Please read [CONTRIBUTING.md](./CONTRIBUTING.md). Pull requests are always welcome.
 
 ## License
 
