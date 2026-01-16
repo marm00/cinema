@@ -8,13 +8,20 @@ You can download the latest installable version of Cinema for Windows.
 
 ## Overview
 
-Cinema gives you a video wall with full control over the layout and content, powered by [mpv](https://github.com/mpv-player/mpv/).
+Cinema gives you a video wall with full control over the layout and content, powered by [mpv](https://github.com/mpv-player/mpv/). Pressing enter shuffles the content, type *help* for more information.
 
-It should be easy to pick up how it works by just launching it and seeing what happens. If something is wrong, please share your problem (see [Bugs and requests](#bugs-and-requests)).
+Customize your settings in [cinema.conf](./cinema.conf) or by typing commands from the [list of commands](#list-of-commands), which can also be used for things like search, autoplay, and macros.
 
-Customize your settings in [cinema.conf](./cinema.conf) or by typing commands from the [list of commands](#list-of-commands), which can also be used for things like search, shuffle, and autoplay.
+If something is wrong, please share your problem (see [Bugs and requests](#bugs-and-requests)).
 
 ## Features
+
+* Video wall (multiple screens) of mpv-supported media, including Twitch streams.
+* Instant search across your media library, as well as tags to group media.
+* Shuffle on demand or autoplay.
+* Save and load layouts of screens and Chatterino.
+* Macros to do many things at once, optionally on startup.
+* And a lot more: [list of commands](#list-of-commands).
 
 ## Bugs and requests
 
@@ -22,7 +29,7 @@ Please use the issue tracker here on GitHub to submit a bug report or request a 
 
 ## Compilation
 
-Windows only at the moment ([build.bat](./build.bat)).
+Windows only currently ([build.bat](./build.bat)).
 
 ## Contributing
 
@@ -36,7 +43,7 @@ Commands have autocomplete and optional arguments. For example: `2 4 s foo` sets
 
 `autoplay` Autoplay media [(1 2 ..) autoplay (*seconds*)]. If *seconds* (number) is omitted, the next playlist entry will always play after the current one ends. If *seconds* is greater than 0, the next one plays every [value of *seconds*] seconds. Setting *seconds* to 0 turns off autoplay.
 
-`chat` Show or reposition chat ([chatterino](https://chatterino.com/)). You can move the window and use the *store* command to save the updated location and size.
+`chat` Show or reposition chat ([Chatterino](https://chatterino.com/)). You can move the window and use the *store* command to save the updated location and size.
 
 `clear` Clear the current tag or search term [(1 2 ..) clear]. This restores the default playlist.
 
@@ -48,9 +55,9 @@ Commands have autocomplete and optional arguments. For example: `2 4 s foo` sets
 
 `hide` Hide media with term [hide term]. The results of future searches will not include any files containing the provided term (you can use this to exclude specific file extensions, for example). Note that this is separate from *tags*, those playlists are not impacted by the *hide* command.
 
-`kill` Kill screen(s) and chat [(1 2 ..) kill]. Closes the mpv instances and chatterino instance, without exiting (use the *quit* command to kill everything and exit).
+`kill` Kill screen(s) and chat [(1 2 ..) kill]. Closes the mpv instances and Chatterino instance, without exiting (use the *quit* command to kill everything and exit).
 
-`layout` Change layout to name [layout (*name*)]. Layouts are stored in cinema.conf and contain a name, one or more screens, and optionally chatterino size and position. See cinema.conf for more information. You can use the *store* command to save an updated layout to this file, or do it manually.
+`layout` Change layout to name [layout (*name*)]. Layouts are stored in cinema.conf and contain a name, one or more screens, and optionally Chatterino size and position. See cinema.conf for more information. You can use the *store* command to save an updated layout to this file, or do it manually.
 
 `list` Show all tags. These tags come from your cinema.conf file and can be supplied as an argument to the *tag* command.
 
