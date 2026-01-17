@@ -29,7 +29,7 @@ Please use the [issue tracker](https://github.com/marm00/cinema/issues) here on 
 
 ## Compilation
 
-Windows only, run [`build.bat`](./build.bat). Builds in debug mode with openmp enabled by default. For the release version, run `build.bat release`. To disable openmp, run `build.bat nomp`. You will get cinema.exe, which accepts no arguments.
+Windows only, run [`build.bat`](./build.bat). Builds in debug mode with openmp enabled by default. For the release version, run `build.bat release`. To disable openmp, run `build.bat nomp`. The log level for debug builds is *debug*, and *warning* for release builds; run `build.bat log_[X]` where [X] is one of *trace*, *debug*, *info*, *warning*, *error*. You will get cinema.exe, which accepts no arguments.
 
 ## Contributing
 
