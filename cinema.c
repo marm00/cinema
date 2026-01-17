@@ -49,7 +49,11 @@ typedef enum {
   LOG_TRACE
 } Cin_Log_Level;
 
-static const Cin_Log_Level GLOBAL_LOG_LEVEL = LOG_DEBUG;
+#if !defined(LOG_LEVEL)
+#define LOG_LEVEL LOG_WARNING
+#endif
+
+static const Cin_Log_Level GLOBAL_LOG_LEVEL = LOG_LEVEL;
 static const char *LOG_LEVELS[LOG_TRACE + 1] = {"ERROR", "WARNING", "INFO", "DEBUG", "TRACE"};
 
 #define CIN_CONF_FILENAME "cinema.conf"
