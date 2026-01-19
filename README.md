@@ -2,13 +2,13 @@
 
 ## Download
 
+You can download the latest installable version of Cinema for Windows [here (GitHub releases page)](https://github.com/marm00/cinema/releases).
+
 ## Overview
 
 Cinema gives you a video wall with full control over the layout and content, powered by [mpv](https://github.com/mpv-player/mpv/). Pressing enter shuffles the content, type *help* for more information.
 
 Customize your settings in [cinema.conf](./cinema.conf) or by typing commands from the [list of commands](#list-of-commands), which can also be used for things like search, autoplay, and macros.
-
-If something is wrong, please share your problem (see [Bugs and requests](#bugs-and-requests)).
 
 ## Features
 
@@ -25,7 +25,7 @@ Please use the [issue tracker](https://github.com/marm00/cinema/issues) here on 
 
 ## Compilation
 
-Windows only, run [`build.bat`](./build.bat). Builds in debug mode with openmp enabled by default. For the release version, run `build.bat release`. To disable openmp, run `build.bat nomp`. The log level for debug builds is *debug*, and *warning* for release builds; run `build.bat log_[X]` where [X] is one of *trace*, *debug*, *info*, *warning*, *error*. You will get cinema.exe, which accepts no arguments.
+Windows only for now, run `build.bat`. Builds in debug mode with openmp enabled by default. For the release version, run `build release`. To disable openmp, run `build nomp`. The log level for debug builds is *debug*, and *warning* for release builds; run `build log_[X]` where [X] is one of *trace*, *debug*, *info*, *warning*, *error*. You will get cinema.exe, which accepts no arguments.
 
 ## Contributing
 
