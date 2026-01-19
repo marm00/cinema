@@ -2,10 +2,6 @@
 
 ## Download
 
-You can download the latest installable version of Cinema for Windows.
-
-<https://mpv.io/installation/>
-
 ## Overview
 
 Cinema gives you a video wall with full control over the layout and content, powered by [mpv](https://github.com/mpv-player/mpv/). Pressing enter shuffles the content, type *help* for more information.
