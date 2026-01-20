@@ -4,6 +4,11 @@
 
 You can download the latest installable version of Cinema for Windows [here (GitHub releases page)](https://github.com/marm00/cinema/releases).
 
+TODO: portable zip install with mpv, yt-dlp, chatterino
+<https://mpv.io/installation>
+<https://github.com/yt-dlp/yt-dlp?tab=readme-ov-file#recommended>
+<https://chatterino.com/>
+
 ## Overview
 
 Cinema gives you a video wall with full control over the layout and content, powered by [mpv](https://github.com/mpv-player/mpv/). Pressing enter shuffles the content, type *help* for more information.
@@ -25,7 +30,9 @@ Please use the [issue tracker](https://github.com/marm00/cinema/issues) here on 
 
 ## Compilation
 
-Windows only for now, run `build.bat`. Builds in debug mode with openmp enabled by default. For the release version, run `build release`. To disable openmp, run `build nomp`. The log level for debug builds is *debug*, and *warning* for release builds; run `build log_[X]` where [X] is one of *trace*, *debug*, *info*, *warning*, *error*. You will get cinema.exe, which accepts no arguments.
+Windows only for now. Make sure you have [Build Tools for Visual Studio](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2026) and [LLVM](https://github.com/llvm/llvm-project/releases). The [RAD Debugger](https://github.com/EpicGamesExt/raddebugger) is recommended for development.
+
+Run `build.bat`. It builds in debug mode with openmp enabled by default. For the release version, run `build release`. To disable openmp, run `build nomp`. Run `build log_[X]` where [X] is one of *trace*, *debug* (default for debug builds), *info*, *warning* (default for release builds), *error*. You will get cinema.exe, which accepts no arguments.
 
 ## Contributing
 
