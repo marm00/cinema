@@ -3424,22 +3424,22 @@ static inline bool init_repl(void) {
   if (!SetConsoleMode(repl.in, repl.in_mode | ENABLE_PROCESSED_INPUT | ENABLE_WINDOW_INPUT)) goto handle_in;
   if ((repl.out = GetStdHandle(STD_OUTPUT_HANDLE)) == INVALID_HANDLE_VALUE) goto handle_out;
   if ((repl.viewport_bound = bounded_console(repl.out))) wswrite(viewport_warning);
+  if (!arena_chunk_init(&console_arena, CIN_ARENA_CAP)) goto memory;
+  repl.msg = create_console_message();
+  repl.msg_index = 0;
   CONSOLE_SCREEN_BUFFER_INFO buffer_info;
   if (!GetConsoleScreenBufferInfo_safe(repl.out, &buffer_info)) goto handle_out;
   repl.dwSize_X = (DWORD)buffer_info.dwSize.X;
+  repl.home = (COORD){.X = PREFIX, .Y = buffer_info.dwCursorPosition.Y};
+  repl._filled = 0;
   if (!GetConsoleCursorInfo(repl.out, &repl.cursor_info)) goto handle_out;
   if (!WriteConsoleW(repl.out, PREFIX_STR, PREFIX_STRLEN, NULL, NULL)) goto handle_out;
-  if (!arena_chunk_init(&console_arena, CIN_ARENA_CAP)) goto memory;
   array_init(&console_arena, &wwrite_buf, CIN_ARRAY_CAP);
   array_init(&console_arena, &write_buf, CIN_ARRAY_CAP);
   array_init(&console_arena, &preview, CIN_ARRAY_CAP);
   array_init(&console_arena, &utf16_buf_raw, CIN_MAX_PATH);
   array_init(&console_arena, &utf16_buf_norm, CIN_MAX_PATH);
   array_init(&console_arena, &utf8_buf, CIN_MAX_PATH_BYTES);
-  repl.msg = create_console_message();
-  repl.msg_index = 0;
-  repl.home = (COORD){.X = PREFIX, .Y = buffer_info.dwCursorPosition.Y};
-  repl._filled = 0;
   return true;
 code_page:
   wswrite(L"Failed to modify console code page" WCRLF);
