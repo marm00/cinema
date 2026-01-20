@@ -950,7 +950,7 @@ static inline BOOL GetConsoleScreenBufferInfo_safe(HANDLE hConsoleOutput, PCONSO
             " the screen buffer size (height) of your console." WCRLF,
             cur_y, max_y);
   } else {
-    wwritef(L"Increase console size");
+    wwritef(L"Cut off? Increase console size and retry");
   }
   notify_buffer_refresh = false;
   if (!GetConsoleScreenBufferInfo(repl.out, lpConsoleScreenBufferInfo)) return FALSE;
@@ -2662,6 +2662,10 @@ static bool init_config(const char *filename) {
 
 static bool reinit_documents(void) {
   int32_t d_bytes = (int32_t)array_bytes(&docs);
+  if (d_bytes == 0) {
+    log_wmessage(LOG_ERROR, L"media library is empty");
+    return false;
+  }
   int32_t remainder = (int32_t)docs.bytes_capacity - d_bytes;
 #if defined(LIBSAIS_OPENMP)
   int32_t result = libsais_gsa_omp(docs.items, docs.gsa, d_bytes, remainder, NULL, cin_system.threads);
@@ -3691,6 +3695,7 @@ static inline bool validate_screens(void) {
 }
 
 static wchar_t exe_path_mpv[CIN_MAX_PATH] = {0};
+static wchar_t exe_path_ytdlp[CIN_MAX_PATH] = {0};
 static wchar_t exe_path_chatterino[CIN_MAX_PATH] = {0};
 
 static bool find_exe(const wchar_t *dir, const wchar_t *exe, wchar_t *buf) {
@@ -3724,7 +3729,7 @@ static bool find_exe(const wchar_t *dir, const wchar_t *exe, wchar_t *buf) {
     if (attrs != INVALID_FILE_ATTRIBUTES) return true;
   }
   log_wmessage(LOG_ERROR, L"Failed to find executable '%s'."
-                          L"Please install it or add it to your environment variables.",
+                          L"Please install it in a standard directory or add it to your environment variables.",
                exe);
   wmemset(buf, L'\0', CIN_MAX_PATH);
   return false;
@@ -3732,11 +3737,15 @@ static bool find_exe(const wchar_t *dir, const wchar_t *exe, wchar_t *buf) {
 
 static bool init_executables(void) {
   if (!find_exe(L"mpv", L"mpv", exe_path_mpv)) {
-    printf("mpv not found\n");
+    printf(CRLF "mpv not found" CRLF);
+    return false;
+  }
+  if (!find_exe(L"mpv", L"yt-dlp", exe_path_ytdlp)) {
+    printf(CRLF "yt-dlp not found" CRLF);
     return false;
   }
   if (!find_exe(L"Chatterino", L"chatterino", exe_path_chatterino)) {
-    printf("chatterino not found\n");
+    printf(CRLF "chatterino not found" CRLF);
   }
   // NOTE: See for ytdl: https://mpv.io/manual/stable/#options-ytdl-path
   return true;
