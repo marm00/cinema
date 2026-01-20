@@ -3731,8 +3731,13 @@ static bool find_exe(const wchar_t *dir, const wchar_t *exe, wchar_t *buf) {
 }
 
 static bool init_executables(void) {
-  if (!find_exe(L"mpv", L"mpv", exe_path_mpv)) return false;
-  find_exe(L"Chatterino", L"chatterino", exe_path_chatterino);
+  if (!find_exe(L"mpv", L"mpv", exe_path_mpv)) {
+    printf("mpv not found\n");
+    return false;
+  }
+  if (!find_exe(L"Chatterino", L"chatterino", exe_path_chatterino)) {
+    printf("chatterino not found\n");
+  }
   // NOTE: See for ytdl: https://mpv.io/manual/stable/#options-ytdl-path
   return true;
 }
