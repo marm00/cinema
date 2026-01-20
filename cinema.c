@@ -85,7 +85,8 @@ static inline bool init_os(void) {
     if (LookupPrivilegeValueW(NULL, L"SeLockMemoryPrivilege", &luid)) {
       TOKEN_PRIVILEGES p = {.PrivilegeCount = 1,
                             .Privileges[0] = {.Luid = luid, .Attributes = SE_PRIVILEGE_ENABLED}};
-      if (AdjustTokenPrivileges(token, FALSE, &p, sizeof(p), NULL, NULL)) {
+      AdjustTokenPrivileges(token, FALSE, &p, sizeof(p), NULL, NULL);
+      if (GetLastError() == ERROR_SUCCESS) {
         cin_system.alloc_type |= MEM_LARGE_PAGES;
         cin_system.page_size = GetLargePageMinimum();
       }
