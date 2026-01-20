@@ -3225,6 +3225,13 @@ static inline void iocp_parse(Instance *instance, const char *buf_start, size_t 
     case MPV_WINDOW_ID: {
       if (++mpv_supply == mpv_demand) mpv_unlock();
       char *data = strstr(buf, CIN_MPVKEY_DATA);
+      if (!data) {
+        // NOTE: If the request was delivered before mpv managed to create
+        // the window, it will return something like "error: property
+        // unavailable": retry.
+        overlap_write(instance, MPV_WINDOW_ID, "get_property", "window-id", NULL);
+        break;
+      }
       assert(data);
       data += cin_strlen(CIN_MPVKEY_DATA);
       assert(cin_isnum(*data));
