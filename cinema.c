@@ -18,16 +18,16 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+#define _CRT_RAND_S
+
 #include <assert.h>
 #include <inttypes.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
-
-#define _CRT_RAND_S
-#include <stdlib.h>
 
 #if defined(_WIN32)
 #include <windows.h>
