@@ -72,6 +72,8 @@ Commands have autocomplete and optional arguments. For example: `2 4 s foo` sets
 
 `maximize` Maximize and close others [(1) maximize]. Example: with three active screens, screen 1 is directed to be maximized, and will be set to full screen, while screens 2 and 3 are closed (see the *kill* command).
 
+`mute` Mute/unmute screen(s) [(1 2 ..) mute]. This is a toggle.
+
 `quit` Close screens and quit Cinema. See the *kill* command to close specific screens, chat, and keep Cinema alive.
 
 `reroll` Shuffle media [(1 2 ..) (*reroll*)]. This is the default autocomplete command. Each screen is associated with a playlist. When autoplay is enabled, or if this command is executed, the next entry in the playlist is loaded. Cinema uses the standard Fisher–Yates algorithm with a partial Sattolo shuffle.

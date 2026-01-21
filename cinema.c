@@ -4405,6 +4405,18 @@ static void cmd_maximize_validator(void) {
   cmd_ctx.executor = cmd_maximize_executor;
 }
 
+static void cmd_mute_executor(void) {
+  mpv_target_foreach(i, instance) {
+    overlap_write(instance, MPV_WRITE, "cycle", "mute", NULL);
+  }
+}
+
+static void cmd_mute_validator(void) {
+  if (!validate_screens()) return;
+  set_preview(true, L"mute/unmute %s", cmd_ctx.targets.items);
+  cmd_ctx.executor = cmd_mute_executor;
+}
+
 static void cmd_autoplay_executor(void) {
   wchar_t *p = cmd_ctx.unicode;
   LONGLONG seconds = -1;
@@ -5009,6 +5021,7 @@ static bool init_commands(void) {
   register_cmd(L"lock", L"Lock/unlock screen contents [(1 2 ..) lock]", cmd_lock_validator);
   register_cmd(L"macro", L"Execute macro [macro (name)]", cmd_macro_validator);
   register_cmd(L"maximize", L"Maximize and close others [(1) maximize]", cmd_maximize_validator);
+  register_cmd(L"mute", L"Mute screen(s) [(1 2 ..) mute]", cmd_mute_validator);
   register_cmd(L"quit", L"Close screens and quit Cinema", cmd_quit_validator);
   register_cmd(L"reroll", L"Shuffle media [(1 2 ..) (reroll)]", cmd_reroll_validator);
   register_cmd(L"search", L"Limit media to term [(1 2 ..) search (term)]", cmd_search_validator);
