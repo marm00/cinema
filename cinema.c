@@ -1596,6 +1596,7 @@ static inline Radix_Leaf *radix_next(Radix_Tree *tree, Radix_Leaf *current) {
 static inline uint32_t rand_between(uint32_t min, uint32_t max) {
   assert(max >= min);
   uint32_t range = max - min + 1;
+  assert(range);
   uint32_t upper = UINT_MAX - (UINT_MAX % range);
   uint32_t random;
   do rand_s(&random);
@@ -2119,6 +2120,7 @@ typedef struct Playlist {
   uint32_t next_index;
   uint32_t targets;
   bool from_tag;
+  bool empty;
   // search table key not applicable to tag playlist
   table_key_pos search_pos;
   table_key_len search_len;
@@ -4192,12 +4194,19 @@ static void cmd_tag_executor(void) {
     array_free(&console_arena, cmd_ctx.tag->url_items);
     cmd_ctx.tag->url_items = NULL;
   }
-  array_to_pow1(&docs_arena, playlist);
-  playlist_setup_shuffle(playlist);
+  if (playlist->count > 0) {
+    array_to_pow1(&docs_arena, playlist);
+    playlist_setup_shuffle(playlist);
+  } else {
+    playlist->empty = true;
+    log_message(LOG_INFO, "Tag is empty");
+  }
 reroll:
-  mpv_target_foreach(i, instance) {
-    playlist_set(instance, cmd_ctx.tag->playlist);
-    playlist_play(instance);
+  if (!cmd_ctx.tag->playlist->empty) {
+    mpv_target_foreach(i, instance) {
+      playlist_set(instance, cmd_ctx.tag->playlist);
+      playlist_play(instance);
+    }
   }
 }
 
@@ -4254,6 +4263,11 @@ static void cmd_search_executor(void) {
       playlist->from_tag = false;
       media.search_patterns.count += len_u32;
       document_listing(pattern, len - 1, playlist);
+      if (playlist->count <= 0) {
+        log_message(LOG_INFO, "No results for search query: %s", pattern);
+        cache_put(&media.playlists, playlist);
+        return;
+      }
       playlist_setup_shuffle(playlist);
     }
     log_message(LOG_INFO, "Search playlist count=%d, cap=%d", playlist->count, playlist->capacity);
