@@ -1,5 +1,7 @@
 # Cinema
 
+![Screenshot of Cinema in action with the 7tv Cinema emote in the center.](./cinema.jpg)
+
 ## Download
 
 You can download the latest installable version of Cinema for Windows [here (GitHub releases page)](https://github.com/marm00/cinema/releases).
