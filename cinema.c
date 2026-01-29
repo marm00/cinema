@@ -910,6 +910,7 @@ static inline bool ctrl_on(PINPUT_RECORD input) {
 
 static inline BOOL GetConsoleScreenBufferInfo_safe(HANDLE hConsoleOutput, PCONSOLE_SCREEN_BUFFER_INFO lpConsoleScreenBufferInfo) {
   if (!GetConsoleScreenBufferInfo(hConsoleOutput, lpConsoleScreenBufferInfo)) return FALSE;
+  if (repl.viewport_bound) return TRUE;
   SHORT cur_y = lpConsoleScreenBufferInfo->dwCursorPosition.Y;
   SHORT max_y = lpConsoleScreenBufferInfo->dwSize.Y - 1;
   DWORD max_x = (DWORD)lpConsoleScreenBufferInfo->dwSize.X;
@@ -1071,6 +1072,13 @@ static inline void rewrite_post_log(void) {
     }
   }
   wwrite(WCRLF, WCRLF_LEN);
+  if (repl.viewport_bound) {
+    wwrite(WCRLF, WCRLF_LEN);
+    CONSOLE_SCREEN_BUFFER_INFO post_scroll_info;
+    GetConsoleScreenBufferInfo(repl.out, &post_scroll_info);
+    repl.home.Y = post_scroll_info.dwCursorPosition.Y - 1;
+    SetConsoleCursorPosition(repl.out, (COORD){.X = 0, .Y = repl.home.Y});
+  }
   wwrite(PREFIX_STR, PREFIX_STRLEN);
   wwrite(repl.msg->items, repl.msg->count);
   SHORT preview_offset = (SHORT)((repl.msg->count + PREFIX) / repl.dwSize_X) + 1;
