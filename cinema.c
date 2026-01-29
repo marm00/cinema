@@ -3320,15 +3320,13 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
     if (!GetQueuedCompletionStatus(iocp, &bytes, &completion_key, &ovl, INFINITE)) {
       // https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-getqueuedcompletionstatus#remarks
       log_last_error("Failed to dequeue packet");
-      exit(1);
     }
     Instance *instance = (Instance *)completion_key;
     Overlapped_Context *ctx = (Overlapped_Context *)ovl;
     if (ctx->type != MPV_READ) {
       Overlapped_Write *write = (Overlapped_Write *)ctx;
       if (write->bytes != bytes) {
-        log_message(LOG_ERROR, "Expected '%zu' bytes but received '%ld'", write->bytes, bytes);
-        exit(1);
+        log_message(LOG_ERROR, "Expected '%zu' bytes but received '%ld': %s", write->bytes, bytes, write->buf);
       }
     } else {
       if (bytes) {
