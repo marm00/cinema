@@ -3743,7 +3743,7 @@ static bool find_exe(const wchar_t *dir, const wchar_t *exe, wchar_t *buf) {
     DWORD attrs = GetFileAttributesW(buf);
     if (attrs != INVALID_FILE_ATTRIBUTES) return true;
   }
-  log_wmessage(LOG_ERROR, L"Failed to find executable '%s'."
+  log_wmessage(LOG_ERROR, L"Failed to find executable '%s'. "
                           L"Please install it in a standard directory or add it to your environment variables.",
                exe);
   wmemset(buf, L'\0', CIN_MAX_PATH);
@@ -3751,17 +3751,9 @@ static bool find_exe(const wchar_t *dir, const wchar_t *exe, wchar_t *buf) {
 }
 
 static bool init_executables(void) {
-  if (!find_exe(L"mpv", L"mpv", exe_path_mpv)) {
-    printf(CRLF "mpv not found" CRLF);
-    return false;
-  }
-  if (!find_exe(L"mpv", L"yt-dlp", exe_path_ytdlp)) {
-    printf(CRLF "yt-dlp not found" CRLF);
-    return false;
-  }
-  if (!find_exe(L"Chatterino", L"chatterino", exe_path_chatterino)) {
-    printf(CRLF "chatterino not found" CRLF);
-  }
+  if (!find_exe(L"mpv", L"mpv", exe_path_mpv)) return false;
+  if (!find_exe(L"mpv", L"yt-dlp", exe_path_ytdlp)) return false;
+  find_exe(L"Chatterino", L"chatterino", exe_path_chatterino);
   // NOTE: See for ytdl: https://mpv.io/manual/stable/#options-ytdl-path
   return true;
 }
