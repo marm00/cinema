@@ -17,7 +17,7 @@ Customize your settings in [cinema.conf](./cinema.conf) or by typing commands fr
 * Video wall (multiple screens) of mpv-supported media, including Twitch streams.
 * Instant search across your media library, as well as tags to group media.
 * Shuffle on demand or autoplay.
-* Save and load layouts of screens and Chatterino.
+* Save and load layouts of screens and [Chatterino](https://chatterino.com/).
 * Macros to do many things at once, optionally on startup.
 * And a lot more: [list of commands](#list-of-commands).
 
@@ -29,7 +29,7 @@ Please use the [issue tracker](https://github.com/marm00/cinema/issues) here on 
 
 Windows only for now. Make sure you have [Build Tools for Visual Studio](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2026) (select 'Desktop development with C++' when prompted) and [LLVM](https://github.com/llvm/llvm-project/releases/latest). The [RAD Debugger](https://github.com/EpicGamesExt/raddebugger) is recommended for development.
 
-Run `build.bat`. It builds in debug mode with openmp enabled by default. For the release version, run `build release`. To disable openmp, run `build nomp`. Specify the log level with `build log_[X]` where [X] is one of *trace*, *debug* (default for debug builds), *info*, *warning* (default for release builds), *error*, descending in frequency. You will get cinema.exe, which accepts no arguments.
+Run `build.bat`. It builds in debug mode with openmp enabled by default. For the release version, run `build release`. To disable openmp, run `build nomp`. To enable address sanitizer, run `build asan`. Specify the log level with `build log_[X]` where [X] is one of *trace*, *debug* (default for debug builds), *info*, *warning* (default for release builds), *error*, descending in frequency. You will get cinema.exe, which accepts no arguments.
 
 ## Contributing
 

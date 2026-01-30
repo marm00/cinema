@@ -20,6 +20,7 @@ if "%log_debug%"=="1" set log_level=%log_level% -DLOG_LEVEL=3 && echo [logs: deb
 if "%log_trace%"=="1" set log_level=%log_level% -DLOG_LEVEL=4 && echo [logs: trace]
 
 set warn= -Wall -Wextra -Wpedantic -Wstrict-prototypes -Wmissing-prototypes -Wconversion -Wsign-conversion -Wshadow -Wformat=2 -Wno-unused-function
+if "%asan%"=="1" set warn=%warn% -fsanitize=address && echo [address sanitizer]
 
 llvm-rc cinema.rc -fo cinema.res
 
