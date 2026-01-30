@@ -128,10 +128,13 @@ static inline uint32_t pow2(uint32_t exponent) {
 
 // Power of 2 allocation, where the max is 1U << 31,
 // chosen to support max of 32-bit libsais.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-variable"
 static const uint32_t CIN_SIZE_CLASSES[] = {
     8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072,
     262144, 524288, 1048576, 2097152, 4194304, 8388608, 16777216, 33554432, 67108864,
     134217728, 268435456, 536870912, 1073741824, 2147483648};
+#pragma clang diagnostic pop
 
 #define CIN_ARENA_MIN_K 3U
 #define CIN_ARENA_MAX_K 31U
@@ -2538,6 +2541,7 @@ static bool init_config(const char *filename) {
   layout_tree = radix_tree();
   macro_tree = radix_tree();
   Conf_Root *root = &conf_parser.scopes.items[0].root;
+  (void)root;
   for (size_t i = 1; i < conf_parser.scopes.count; ++i) {
     Conf_Scope *scope = &conf_parser.scopes.items[i];
     log_message(LOG_DEBUG, "[Scope %zu: %zu]", i, scope->type);
