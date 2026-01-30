@@ -5053,7 +5053,10 @@ static void execute_startup_macros(void) {
     cmd_ctx.macro = macro;
     cmd_macro_executor();
   }
+  cmd_ctx.numbers.count = 0;
   cmd_reroll_validator();
+  set_preview_pos(repl.home.Y + 1);
+  log_preview();
 }
 
 int main(int argc, char **argv) {
