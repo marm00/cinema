@@ -3129,8 +3129,10 @@ static inline void playlist_set_default(Instance *instance) {
   playlist_set(instance, &media.default_playlist);
 }
 
+static bool cin_idle = false;
+
 static inline void playlist_play_core(Instance *instance, const char *arg) {
-  if (instance->locked) return;
+  if (instance->locked || cin_idle) return;
   assert(instance->playlist);
   Playlist *playlist = instance->playlist;
   uint32_t index = instance->playlist->next_index;
@@ -4379,6 +4381,15 @@ static void cmd_hide_validator(void) {
   cmd_ctx.executor = cmd_hide_executor;
 }
 
+static void cmd_idle_executor(void) {
+  cin_idle = !cin_idle;
+}
+
+static void cmd_idle_validator(void) {
+  set_preview(true, cin_idle ? L"allow commands to play media" : L"set screens to idle");
+  cmd_ctx.executor = cmd_idle_executor;
+}
+
 static void cmd_kill_executor(void) {
   PostMessageW(chat.window, WM_CLOSE, 0, 0);
   mpv_target_foreach(i, instance) {
@@ -4872,7 +4883,7 @@ static void cmd_macro_validator(void) {
 #define TWITCH_BUF_SIZE (cin_strlen(TWITCH_PREFIX) + TWITCH_CHANNEL_MAX_CHARS + 1)
 
 static void cmd_twitch_executor(void) {
-  if (!cmd_ctx.unicode) return;
+  if (!cmd_ctx.unicode || cin_idle) return;
   static char twitch_buf[TWITCH_BUF_SIZE] = {TWITCH_PREFIX};
   int32_t len = utf16_to_utf8(cmd_ctx.unicode);
   assert(len >= 0);
@@ -5037,6 +5048,7 @@ static bool init_commands(void) {
   register_cmd(L"extra", L"Adds an extra screen (see store command)", cmd_extra_validator);
   register_cmd(L"help", L"Show all commands", cmd_help_validator);
   register_cmd(L"hide", L"Hide media with term [hide term]", cmd_hide_validator);
+  register_cmd(L"idle", L"Make commands (not) play media [idle]", cmd_idle_validator);
   register_cmd(L"kill", L"Kill screen(s) and chat [(1 2 ..) kill]", cmd_kill_validator);
   register_cmd(L"layout", L"Change layout to name [layout (name)]", cmd_layout_validator);
   register_cmd(L"list", L"Show all tags", cmd_list_validator);

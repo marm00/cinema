@@ -57,6 +57,8 @@ Commands have autocomplete and optional arguments. For example: `2 4 s foo` sets
 
 `hide` Hide media with term [hide term]. The results of future searches will not include any files containing the provided term (you can use this to exclude specific file extensions, for example). Note that this is separate from *tags*, those playlists are not impacted by the *hide* command.
 
+`idle` Make commands (not) play media [idle]. This is a niche toggle mostly useful for macro optimizations: commands will not play media when idle is toggled on. For example, you can set a layout and tag without loading any files; the default macro in cinema.conf uses this.
+
 `kill` Kill screen(s) and chat [(1 2 ..) kill]. Closes the mpv instances and Chatterino instance, without exiting (use the *quit* command to kill everything and exit).
 
 `layout` Change layout to name [layout (*name*)]. Layouts are stored in cinema.conf and contain a name, one or more screens, and optionally Chatterino size and position. See cinema.conf for more information. You can use the *store* command to save an updated layout to this file, or do it manually.
