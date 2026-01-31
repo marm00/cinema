@@ -1873,7 +1873,8 @@ static inline void conf_enter_scope(Conf_Scope_Type type) {
 static inline bool conf_keycmp(char *k, Conf_Scope_Type type, Conf_Key *out, bool unique) {
   if (memcmp(k, conf_parser.buf.items, conf_parser.k_len) != 0) return false;
   assert(&conf_scope()->type);
-  uint32_t v_len = (uint32_t)(conf_parser.len - (size_t)(conf_parser.v - conf_parser.buf.items));
+  const size_t v_pos = (size_t)(conf_parser.v - conf_parser.buf.items);
+  const uint32_t v_len = (uint32_t)(conf_parser.len - v_pos);
   if (conf_scope()->type != type) {
     conf_parser.error = true;
     char *scope_msg;
@@ -2033,7 +2034,7 @@ static bool parse_config(const char *filename) {
         size_t dist = (size_t)(comment - p);
         size_t comment_len = remainder - dist;
         conf_parser.len -= comment_len;
-        if (conf_parser.len && *(comment - 1) == ' ') --conf_parser.len;
+        if (comment_len) *(p + dist) = '\0';
       }
       if (!conf_keyget()) {
         conf_parser.buf.items[conf_parser.k_len] = '\0';
