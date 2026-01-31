@@ -3217,6 +3217,10 @@ static inline void iocp_parse(Instance *instance, const char *buf_start, size_t 
         assert(*p == '\"');
         ++p;
         if (CIN_MPVVAL(p, "quit")) mpv_kill(instance);
+        // NOTE: When a file fails to load, especially with offline twitch streams,
+        // the instance becomes idle. We choose to resolve this by trying the next
+        // entry in the playlist. Maybe make this an option instead.
+        else if (CIN_MPVVAL(p, "error")) playlist_play(instance);
       }
     } else if (CIN_MPVVAL(p, "file-loaded")) {
       if (instance->autoplay_mpv) playlist_insert(instance);
