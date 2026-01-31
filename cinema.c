@@ -3243,6 +3243,8 @@ static inline void iocp_parse(Instance *instance, const char *buf_start, size_t 
         // NOTE: If the request was delivered before mpv managed to create
         // the window, it will return something like "error: property
         // unavailable": retry.
+        static const DWORD GET_WINDOW_DELAY = 200;
+        Sleep(GET_WINDOW_DELAY);
         overlap_write(instance, MPV_WINDOW_ID, "get_property", "window-id", NULL);
         break;
       }
