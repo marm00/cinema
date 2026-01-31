@@ -3365,11 +3365,11 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
             tail_pos += offset;
             buf = contiguous_buf;
           }
-          log_message(LOG_DEBUG, "Message (%p): %.*s", instance, tail_pos, buf);
           size_t buf_offset = 0;
           for (;;) {
             *lf = '\0';
             ++tail_pos;
+            log_message(LOG_DEBUG, "Message (%p): %.*s", instance, tail_pos, buf + buf_offset);
             iocp_parse(instance, buf, buf_offset);
             if (tail_pos >= len) break;
             lf = memchr(buf + tail_pos, '\n', len - tail_pos);
