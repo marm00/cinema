@@ -5074,6 +5074,7 @@ static void execute_startup_macros(void) {
   }
   cmd_ctx.numbers.count = 0;
   cmd_reroll_validator();
+  set_preview(true, L"press enter to shuffle (h for help)");
   set_preview_pos(repl.home.Y + 1);
   log_preview();
 }
