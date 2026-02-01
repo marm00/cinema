@@ -3103,8 +3103,8 @@ static inline void playlist_shuffle(Playlist *playlist) {
 
 static inline void playlist_set(Instance *instance, Playlist *playlist) {
   Playlist *prev = instance->playlist;
-  if (prev && --prev->targets == 0 && !prev->from_tag &&
-      prev != playlist && prev != &media.default_playlist) {
+  if (prev && prev != playlist && --prev->targets == 0 &&
+      !prev->from_tag && prev != &media.default_playlist) {
     Table_Key key = {.strings = media.search_patterns.items,
                      .pos = prev->search_pos,
                      .len = prev->search_len};
