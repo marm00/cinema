@@ -971,7 +971,7 @@ static inline int32_t lcps(const uint8_t *a, const uint8_t *b) {
   return matching;
 }
 
-static inline bool cin_isloweralpha(char *c) {
+static inline bool cin_isloweralpha(const char *c) {
   return *c <= 'z' && *c >= 'a';
 }
 
@@ -1197,7 +1197,7 @@ static void log_last_error(const char *message, ...) {
                                 FORMAT_MESSAGE_FROM_SYSTEM |
                                 FORMAT_MESSAGE_IGNORE_INSERTS;
   EnterCriticalSection(&log_lock);
-  LPVOID buffer;
+  LPVOID buffer = NULL;
   DWORD code = GetLastError();
   if (!FormatMessageA(dw_flags, NULL, code, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPTSTR)&buffer, 0, NULL)) {
     log_message(LOG_ERROR, "Failed to log GLE=%d - error with GLE=%d", code, GetLastError());
@@ -2766,7 +2766,6 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len, Playli
     return;
   }
   int32_t tmp_right = right;
-  int32_t tmp_r_lcp = r_lcp;
   bool found = false;
   while (left < right) {
     int32_t mid = left + ((right - left) >> 1);
@@ -2774,16 +2773,12 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len, Playli
     if (t_lcp == pattern_len) {
       found = true;
       right = mid;
-      r_lcp = t_lcp;
     } else if (docs.items[docs.gsa[mid] + t_lcp] == '\0') {
       left = mid + 1;
-      l_lcp = t_lcp;
     } else if (pattern[t_lcp] < docs.items[docs.gsa[mid] + t_lcp]) {
       right = mid;
-      r_lcp = t_lcp;
     } else {
       left = mid + 1;
-      l_lcp = t_lcp;
     }
   }
   if (!found && lcps(pattern, docs.items + docs.gsa[left]) < pattern_len) {
@@ -2793,20 +2788,15 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len, Playli
   int32_t l_bound = left;
   int32_t r_bound = left;
   right = tmp_right;
-  l_lcp = pattern_len;
-  r_lcp = tmp_r_lcp;
   while (left < right) {
     int32_t mid = left + ((right - left + 1) >> 1);
     int32_t t_lcp = lcps(pattern, docs.items + docs.gsa[mid]);
     if (t_lcp == pattern_len) {
       left = mid;
-      l_lcp = pattern_len;
     } else if (docs.items[docs.gsa[mid] + t_lcp] == '\0') {
       right = mid - 1;
-      r_lcp = t_lcp;
     } else {
       right = mid - 1;
-      r_lcp = t_lcp;
     }
     r_bound = left;
   }
@@ -2838,7 +2828,7 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len, Playli
     skip:;
     }
   }
-  if (++dedup_counter == 0) {
+  if (dedup_counter++ == USHRT_MAX) {
     memset(docs.dedup_counters, 0, (size_t)array_bytes(&docs) * sizeof(uint16_t));
     dedup_counter = 1;
   }
@@ -2967,20 +2957,20 @@ static bool overlap_read(Instance *instance) {
 #define CIN_WRITE_CMD_2ARG (CIN_WRITE_CMD_LEFT CIN_WRITE_CMD_MID CIN_WRITE_CMD_MID CIN_WRITE_CMD_RIGHT)
 
 static bool overlap_write(Instance *instance, MPV_Packet type, const char *cmd, const char *arg1, const char *arg2) {
-  Overlapped_Write *write = NULL;
-  cache_get_zero(&io_arena, &cin_io.writes, write);
-  write->ovl_ctx.type = type;
-  int64_t request_id = (int64_t)(uintptr_t)write;
+  Overlapped_Write *msg = NULL;
+  cache_get_zero(&io_arena, &cin_io.writes, msg);
+  msg->ovl_ctx.type = type;
+  int64_t request_id = (int64_t)(uintptr_t)msg;
   int32_t bytes = 0;
-  if (arg1 && arg2) bytes = snprintf(write->buf, sizeof(write->buf), CIN_WRITE_CMD_2ARG, request_id, cmd, arg1, arg2);
-  else if (arg1) bytes = snprintf(write->buf, sizeof(write->buf), CIN_WRITE_CMD_1ARG, request_id, cmd, arg1);
-  else bytes = snprintf(write->buf, sizeof(write->buf), CIN_WRITE_CMD_0ARG, request_id, cmd);
+  if (arg1 && arg2) bytes = snprintf(msg->buf, sizeof(msg->buf), CIN_WRITE_CMD_2ARG, request_id, cmd, arg1, arg2);
+  else if (arg1) bytes = snprintf(msg->buf, sizeof(msg->buf), CIN_WRITE_CMD_1ARG, request_id, cmd, arg1);
+  else bytes = snprintf(msg->buf, sizeof(msg->buf), CIN_WRITE_CMD_0ARG, request_id, cmd);
   assert(bytes > 0);
-  assert((size_t)bytes < sizeof(write->buf) - 1);
-  write->bytes = (size_t)bytes;
+  assert((size_t)bytes < sizeof(msg->buf) - 1);
+  msg->bytes = (size_t)bytes;
   log_message(LOG_DEBUG, "Writing message (PID %lu) (%zu bytes): %.*s",
-              instance->pi.dwProcessId, write->bytes, write->bytes - 1, write->buf);
-  if (instance->pipe && !WriteFile(instance->pipe, write->buf, (DWORD)write->bytes, NULL, &write->ovl_ctx.ovl)) {
+              instance->pi.dwProcessId, msg->bytes, msg->bytes - 1, msg->buf);
+  if (instance->pipe && !WriteFile(instance->pipe, msg->buf, (DWORD)msg->bytes, NULL, &msg->ovl_ctx.ovl)) {
     switch (GetLastError()) {
     case ERROR_IO_PENDING:
       // iocp will free write
@@ -3235,11 +3225,11 @@ static inline void iocp_parse(Instance *instance, const char *buf_start, size_t 
     assert(cin_isnum(*p));
     int64_t req_id = *p - '0';
     while (cin_isnum(*++p)) req_id = (req_id * 10) + (*p - '0');
-    Overlapped_Write *write = (Overlapped_Write *)(uintptr_t)req_id;
-    assert(write);
-    assert(write->bytes);
-    log_message(LOG_DEBUG, "Recovered original write: %p (%zu bytes)", write, write->bytes);
-    switch (write->ovl_ctx.type) {
+    Overlapped_Write *msg = (Overlapped_Write *)(uintptr_t)req_id;
+    assert(msg);
+    assert(msg->bytes);
+    log_message(LOG_DEBUG, "Recovered original write: %p (%zu bytes)", msg, msg->bytes);
+    switch (msg->ovl_ctx.type) {
     case MPV_LOADFILE:
       // overlap_write(instance, MPV_WRITE, "playlist-next", NULL, NULL);
       break;
@@ -3320,7 +3310,7 @@ static inline void iocp_parse(Instance *instance, const char *buf_start, size_t 
     default:
       break;
     }
-    cache_put(&cin_io.writes, write);
+    cache_put(&cin_io.writes, msg);
   }
 }
 
@@ -3337,9 +3327,9 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
     Instance *instance = (Instance *)completion_key;
     Overlapped_Context *ctx = (Overlapped_Context *)ovl;
     if (ctx->type != MPV_READ) {
-      Overlapped_Write *write = (Overlapped_Write *)ctx;
-      if (write->bytes != bytes) {
-        log_message(LOG_ERROR, "Expected '%zu' bytes but received '%ld': %s", write->bytes, bytes, write->buf);
+      Overlapped_Write *msg = (Overlapped_Write *)ctx;
+      if (msg->bytes != bytes) {
+        log_message(LOG_ERROR, "Expected '%zu' bytes but received '%ld': %s", msg->bytes, bytes, msg->buf);
       }
     } else {
       if (bytes) {
@@ -3598,6 +3588,7 @@ static cache_struct(Console_Timer_Ctx) timer_cache = {0};
 static inline void reset_console_timer(Console_Timer_Ctx *ctx) {
   LARGE_INTEGER t;
   FILETIME ft;
+  // set union then read parts
   t.QuadPart = ctx->millis * -10000LL;
   ft.dwHighDateTime = (DWORD)t.HighPart;
   ft.dwLowDateTime = (DWORD)t.LowPart;
@@ -3621,7 +3612,7 @@ static inline Console_Timer_Ctx *register_console_timer(bool (*f)(Console_Timer_
   ctx->timer = CreateThreadpoolTimer(console_timer_callback, ctx, NULL);
   if (ctx->timer == NULL) {
     log_last_error("Failed to register console timer");
-    return false;
+    return NULL;
   }
   return ctx;
 }
@@ -4094,6 +4085,7 @@ static cmd_validator parse_command(const wchar_t *command) {
                 *p, pos + 1);
     return NULL;
   }
+  // temporarily null-terminate
   *(wchar_t *)p = L'\0';
   cmd_validator validator = patricia_query(cmd_ctx.trie, start);
   if (!validator) {
@@ -4264,7 +4256,8 @@ static void cmd_search_executor(void) {
     cache_get_zero(&docs_arena, &media.playlists, playlist);
     table_value value = (table_value)playlist;
     table_value result = table_insert(&docs_arena, &media.search_table, &key, value);
-    if (result >= 0) {
+    if (result != -1) {
+      assert(result);
       cache_put(&media.playlists, playlist);
       playlist = (Playlist *)result;
       log_message(LOG_DEBUG, "Searched for cached pattern");
@@ -4274,7 +4267,7 @@ static void cmd_search_executor(void) {
       playlist->from_tag = false;
       media.search_patterns.count += len_u32;
       document_listing(pattern, len - 1, playlist);
-      if (playlist->count <= 0) {
+      if (!playlist->count) {
         log_message(LOG_INFO, "No results for search query: %s", pattern);
         cache_put(&media.playlists, playlist);
         return;
@@ -4307,18 +4300,17 @@ static void cmd_hide_executor(void) {
   memcpy(strings + pos, pattern, len_u32);
   Table_Key key = {.strings = strings, .pos = pos, .len = len_u32};
   table_value value = table_find(&media.search_table, &key);
-  Playlist *playlist = NULL;
-  if (value >= 0) {
-    playlist = (Playlist *)value;
+  Playlist tmp_playlist = {0};
+  if (value != -1) {
+    assert(value);
+    tmp_playlist = *(Playlist *)value;
   } else {
-    Playlist tmp = {0};
-    document_listing(pattern, len - 1, &tmp);
-    playlist = &tmp;
+    document_listing(pattern, len - 1, &tmp_playlist);
   }
-  assert(playlist);
+  assert(&tmp_playlist);
   Hidden_Table *table = &media.hidden_table;
   uint32_t hash_n = 1;
-  while (hash_n < (table->count + playlist->count) * 2) hash_n <<= 1;
+  while (hash_n < (table->count + (&tmp_playlist)->count) * 2) hash_n <<= 1;
   uint32_t start = table->capacity;
   array_ensure_capacity_core(&docs_arena, table, hash_n, true);
   uint32_t end = table->capacity;
@@ -4336,7 +4328,7 @@ static void cmd_hide_executor(void) {
       }
     }
   }
-  array_foreach(playlist, int32_t, i, doc) {
+  array_foreach(&tmp_playlist, int32_t, i, doc) {
     uint64_t hash = (uint64_t)doc * CIN_INTEGER_HASH;
     uint64_t index = hash & mask;
     while (table->items[index] >= 0) {
@@ -4347,7 +4339,7 @@ static void cmd_hide_executor(void) {
     ++table->count;
   next:;
   }
-  if (value < 0) array_free_items(&docs_arena, playlist);
+  if (value < 0) array_free_items(&docs_arena, &tmp_playlist);
   Playlist prev_default = media.default_playlist;
   Playlist new_default = {0};
   array_ensure_capacity_core(&docs_arena, &new_default, prev_default.count, true);
@@ -4606,7 +4598,7 @@ static void cmd_store_executor(void) {
       ++p;
       ++bottom_line;
     }
-    if (strncmp(p, "[layout]", cin_strlen("[layout]")) != 0) goto append;
+    if (!p || strncmp(p, "[layout]", cin_strlen("[layout]")) != 0) goto append;
     p += cin_strlen("[layout]");
     const char *overwrite_start = p;
     const char *overwrite_end = overwrite_start;
@@ -4716,6 +4708,7 @@ append:
     int32_t c;
     while ((c = fgetc(file)) != EOF)
       if (c == '\n') ++scope_line;
+    fseek(file, 0, SEEK_END);
     layout->scope_line = scope_line;
     fprintf(file, CRLF "[layout]" CRLF);
     fprintf(file, FSTR_NAME, name);
@@ -5253,7 +5246,6 @@ int main(int argc, char **argv) {
       wmemcpy(repl.msg->items, head->items, head->count);
       repl.msg_index = repl.msg->count;
       repl.msg->next = head->next;
-      head = head->prev;
       if (repl.msg->count < prev_count) clear_tail(prev_count - repl.msg->count);
       cursor_home();
       wwrite(repl.msg->items, repl.msg->count);
