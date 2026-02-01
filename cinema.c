@@ -3451,7 +3451,7 @@ static inline bool init_repl(void) {
   if (!GetConsoleMode(repl.in, &repl.in_mode)) goto handle_in;
   if (!SetConsoleMode(repl.in, repl.in_mode | ENABLE_PROCESSED_INPUT | ENABLE_WINDOW_INPUT)) goto handle_in;
   if ((repl.out = GetStdHandle(STD_OUTPUT_HANDLE)) == INVALID_HANDLE_VALUE) goto handle_out;
-  if ((repl.viewport_bound = bounded_console(repl.out))) wswrite(viewport_warning);
+  repl.viewport_bound = bounded_console(repl.out);
   if (!arena_chunk_init(&console_arena, CIN_ARENA_CAP)) goto memory;
   repl.msg = create_console_message();
   repl.msg_index = 0;
