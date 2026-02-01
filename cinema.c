@@ -965,10 +965,16 @@ static inline BOOL GetConsoleScreenBufferInfo_safe(HANDLE hConsoleOutput, PCONSO
   return TRUE;
 }
 
-static inline int32_t lcps(const uint8_t *a, const uint8_t *b) {
-  int32_t matching = 0;
+static inline int32_t lcps_from(const uint8_t *a, const uint8_t *b, int32_t start) {
+  a += start;
+  b += start;
+  int32_t matching = start;
   while (*a && *b && *(a++) == *(b++)) ++matching;
   return matching;
+}
+
+static inline int32_t lcps(const uint8_t *a, const uint8_t *b) {
+  return lcps_from(a, b, 0);
 }
 
 static inline bool cin_isloweralpha(const char *c) {
@@ -2098,7 +2104,6 @@ struct Document_Collection {
   // represent the start/end positions of each doc
   int32_t doc_count;
   int32_t *gsa;
-  int32_t *lcp;
   int32_t *suffix_to_doc;
   uint16_t *dedup_counters;
 } docs = {0};
@@ -2692,24 +2697,6 @@ static bool reinit_documents(void) {
     return false;
   }
   int32_t *tmp = arena_bump_T(&docs_arena, int32_t, (uint32_t)d_bytes);
-#if defined(LIBSAIS_OPENMP)
-  result = libsais_plcp_gsa_omp(docs.items, docs.gsa, tmp, d_bytes, cin_system.threads);
-#else
-  result = libsais_plcp_gsa(docs.items, docs.gsa, tmp, d_bytes);
-#endif
-  if (result != 0) {
-    log_message(LOG_ERROR, "Failed to build PLCP array");
-    return false;
-  }
-#if defined(LIBSAIS_OPENMP)
-  result = libsais_lcp_omp(tmp, docs.gsa, docs.lcp, d_bytes, cin_system.threads);
-#else
-  result = libsais_lcp(tmp, docs.gsa, docs.lcp, d_bytes);
-#endif
-  if (result != 0) {
-    log_message(LOG_ERROR, "Failed to build LCP array");
-    return false;
-  }
   Playlist *default_playlist = &media.default_playlist;
   array_ensure_capacity_core(&docs_arena, default_playlist, (uint32_t)docs.doc_count, false);
   for (int32_t i = 0, offset = 0; i < d_bytes; ++i) {
@@ -2735,7 +2722,6 @@ static bool reinit_documents(void) {
 static bool init_documents(void) {
   int32_t d_bytes = (int32_t)array_bytes(&docs);
   docs.gsa = arena_bump_T(&docs_arena, uint8_t, docs.bytes_mul32);
-  docs.lcp = arena_bump_T(&docs_arena, uint8_t, docs.bytes_mul32);
   docs.dedup_counters = arena_bump_T(&docs_arena, uint16_t, (uint32_t)d_bytes);
   docs.suffix_to_doc = arena_bump_T(&docs_arena, int32_t, (uint32_t)d_bytes);
   table_init(&docs_arena, &media.search_table, CIN_QUERIES_CAP);
@@ -2766,40 +2752,61 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len, Playli
     return;
   }
   int32_t tmp_right = right;
+  int32_t tmp_r_lcp = r_lcp;
   bool found = false;
   while (left < right) {
     int32_t mid = left + ((right - left) >> 1);
-    int32_t t_lcp = lcps(pattern, docs.items + docs.gsa[mid]);
+    int32_t min_lcp = (l_lcp < r_lcp) ? l_lcp : r_lcp;
+    int32_t t_lcp = lcps_from(pattern, docs.items + docs.gsa[mid], min_lcp);
     if (t_lcp == pattern_len) {
+      // pattern is a prefix of suffix[mid]
       found = true;
       right = mid;
+      r_lcp = t_lcp;
     } else if (docs.items[docs.gsa[mid] + t_lcp] == '\0') {
+      // pattern was a prefix but larger than suffix[mid]
       left = mid + 1;
+      l_lcp = t_lcp;
     } else if (pattern[t_lcp] < docs.items[docs.gsa[mid] + t_lcp]) {
+      // pattern is smaller than suffix[mid]
       right = mid;
+      r_lcp = t_lcp;
     } else {
+      // pattern is larger than suffix[mid]
       left = mid + 1;
+      l_lcp = t_lcp;
     }
   }
-  if (!found && lcps(pattern, docs.items + docs.gsa[left]) < pattern_len) {
-    log_message(LOG_DEBUG, "No suffix has pattern as prefix");
-    return;
+  if (!found) {
+    int32_t min_lcp = (l_lcp < r_lcp) ? l_lcp : r_lcp;
+    if (lcps_from(pattern, docs.items + docs.gsa[left], min_lcp) < pattern_len) {
+      log_message(LOG_DEBUG, "No suffix has pattern as prefix");
+      return;
+    }
   }
   int32_t l_bound = left;
-  int32_t r_bound = left;
   right = tmp_right;
+  l_lcp = pattern_len;
+  r_lcp = tmp_r_lcp;
   while (left < right) {
     int32_t mid = left + ((right - left + 1) >> 1);
-    int32_t t_lcp = lcps(pattern, docs.items + docs.gsa[mid]);
-    if (t_lcp == pattern_len) {
+    int32_t min_lcp = (l_lcp < r_lcp) ? l_lcp : r_lcp;
+    int32_t t_lcp = lcps_from(pattern, docs.items + docs.gsa[mid], min_lcp);
+    if (t_lcp >= pattern_len) {
+      // pattern is a prefix of suffix[mid]
       left = mid;
+      l_lcp = t_lcp;
     } else if (docs.items[docs.gsa[mid] + t_lcp] == '\0') {
+      // pattern is larger than suffix[mid]
       right = mid - 1;
+      r_lcp = t_lcp;
     } else {
+      // mismatch
       right = mid - 1;
+      r_lcp = t_lcp;
     }
-    r_bound = left;
   }
+  int32_t r_bound = left;
   log_message(LOG_DEBUG, "Boundaries are [%d, %d] or [%s, %s]", l_bound, r_bound,
               docs.items + docs.gsa[l_bound], docs.items + docs.gsa[r_bound]);
   static uint16_t dedup_counter = 1;

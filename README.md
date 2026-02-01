@@ -77,7 +77,7 @@ Commands have autocomplete and optional arguments. For example: `2 4 s foo` sets
 
 `reroll` Shuffle media [(1 2 ..) (*reroll*)]. This is the default autocomplete command. Each screen is associated with a playlist. When autoplay is enabled, or if this command is executed, the next entry in the playlist is loaded. Cinema uses the standard Fisher–Yates algorithm with a partial Sattolo shuffle.
 
-`search` Limit media to term [(1 2 ..) search (*term*)]. The playlists will be updated to only have media that includes the *term*. For example, searching for *C:*, *foo*, or *.mp4* will ensure that the playlist only contains files with *C:*, *foo*, or *.mp4* in their names. Cinema uses [libsais](https://github.com/IlyaGrebnov/libsais) to construct a generalized suffix array (GSA) and longest common prefix (LCP) array on launch and queries it (with result deduplication) on demand.
+`search` Limit media to term [(1 2 ..) search (*term*)]. The playlists will be updated to only have media that includes the *term*. For example, searching for *C:*, *foo*, or *.mp4* will ensure that the playlist only contains files with *C:*, *foo*, or *.mp4* in their names. Cinema uses [libsais](https://github.com/IlyaGrebnov/libsais) to construct a generalized suffix array (GSA) on launch and queries it (with result deduplication) on demand.
 
 `store` Store layout in cinema.conf [store (*layout*)]. You can store the current state, which includes all screens, their sizes and positions, as well as chat, to a new or existing layout by *name*. This is an alternative to modifying cinema.conf manually.
 
