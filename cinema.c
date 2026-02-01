@@ -4261,6 +4261,10 @@ static void cmd_search_executor(void) {
       cache_put(&media.playlists, playlist);
       playlist = (Playlist *)result;
       log_message(LOG_DEBUG, "Searched for cached pattern");
+      if (playlist->empty) {
+        log_message(LOG_DEBUG, "Cached pattern is empty, using default playlist");
+        return;
+      }
     } else {
       playlist->search_pos = pos;
       playlist->search_len = len_u32;
@@ -4269,7 +4273,7 @@ static void cmd_search_executor(void) {
       document_listing(pattern, len - 1, playlist);
       if (!playlist->count) {
         log_message(LOG_INFO, "No results for search query: %s", pattern);
-        cache_put(&media.playlists, playlist);
+        playlist->empty = true;
         return;
       }
       playlist_setup_shuffle(playlist);
