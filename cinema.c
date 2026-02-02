@@ -3110,17 +3110,25 @@ static inline void playlist_shuffle(Playlist *playlist) {
 
 static inline void playlist_set(Instance *instance, Playlist *playlist) {
   Playlist *prev = instance->playlist;
-  if (prev && prev != playlist && --prev->targets == 0 &&
-      !prev->from_tag && prev != &media.default_playlist) {
-    Table_Key key = {.strings = media.search_patterns.items,
-                     .pos = prev->search_pos,
-                     .len = prev->search_len};
-    table_delete(&media.search_table, &key);
-    array_free_items(&docs_arena, prev);
-    cache_put(&media.playlists, prev);
+  Playlist *next = playlist;
+  ++next->targets;
+  instance->playlist = next;
+  if (prev) {
+    assert(prev->targets > 0);
+    --prev->targets;
+    const bool prev_empty = prev->targets == 0;
+    const bool prev_not_default = prev != &media.default_playlist;
+    const bool prev_from_search = !prev->from_tag;
+    if (prev_empty && prev_not_default && prev_from_search) {
+      assert(prev != next);
+      Table_Key key = {.strings = media.search_patterns.items,
+                       .pos = prev->search_pos,
+                       .len = prev->search_len};
+      table_delete(&media.search_table, &key);
+      array_free_items(&docs_arena, prev);
+      cache_put(&media.playlists, prev);
+    }
   }
-  ++playlist->targets;
-  instance->playlist = playlist;
 }
 
 static inline void playlist_set_default(Instance *instance) {
@@ -4352,8 +4360,8 @@ static void cmd_hide_executor(void) {
   }
   if (value < 0) array_free_items(&docs_arena, &tmp_playlist);
   Playlist prev_default = media.default_playlist;
-  Playlist new_default = {0};
-  array_ensure_capacity_core(&docs_arena, &new_default, prev_default.count, true);
+  Playlist new_default = prev_default;
+  array_init_zero(&docs_arena, &new_default, prev_default.count);
   array_foreach(&prev_default, int32_t, i, doc) {
     uint64_t hash = (uint64_t)doc * CIN_INTEGER_HASH;
     uint64_t index = hash & mask;
