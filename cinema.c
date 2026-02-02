@@ -3143,6 +3143,8 @@ static inline void playlist_play_core(Instance *instance, const char *arg) {
   Playlist *playlist = instance->playlist;
   uint32_t index = instance->playlist->next_index;
   char *url = (char *)docs.items + playlist->items[index];
+  assert(url);
+  assert(*url);
   overlap_write(instance, MPV_LOADFILE, "loadfile", url, arg);
   if (++instance->playlist->next_index == instance->playlist->count) {
     playlist_shuffle(instance->playlist);
@@ -4371,6 +4373,23 @@ static void cmd_hide_executor(void) {
     }
     array_push(&docs_arena, &new_default, doc);
   skip:;
+  }
+  if (!new_default.count) {
+    log_message(LOG_WARNING, "Original playlist restored since every item was hidden");
+    int32_t d_bytes = (int32_t)array_bytes(&docs);
+    array_ensure_capacity_core(&docs_arena, &new_default, (uint32_t)docs.doc_count, false);
+    for (int32_t i = 0, offset = 0; i < d_bytes; ++i) {
+      if (docs.items[i] == '\0') {
+        uint32_t playlist_pos = (&new_default)->count++;
+        (&new_default)->items[playlist_pos] = offset;
+        offset = i + 1;
+      }
+    }
+    for (uint32_t i = 0; i < table->capacity; ++i) table->items[i] = -1;
+    array_resize(&docs_arena, table, 0);
+    array_resize(&docs_arena, &media.search_patterns, 0);
+    memset(media.search_table.items, 0, media.search_table.bytes_capacity);
+    array_resize(&docs_arena, &media.search_table, 0);
   }
   array_to_pow1(&docs_arena, &new_default);
   media.default_playlist = new_default;
