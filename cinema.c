@@ -4385,9 +4385,9 @@ static void cmd_hide_executor(void) {
         offset = i + 1;
       }
     }
-    for (uint32_t i = 0; i < table->capacity; ++i) table->items[i] = -1;
-    array_resize(&docs_arena, table, 0);
     array_resize(&docs_arena, &media.search_patterns, 0);
+    memset(table->items, -1, table->bytes_capacity);
+    array_resize(&docs_arena, table, 0);
     memset(media.search_table.items, 0, media.search_table.bytes_capacity);
     array_resize(&docs_arena, &media.search_table, 0);
   }
