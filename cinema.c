@@ -461,6 +461,12 @@ static_assert(CIN_PTR == 8 ? (CIN_ARRAY_SIZE == 24) : true, "bytes updated (poss
 #define array_create(arena, slice) \
   arena_slice_reinit((arena), &slice, CIN_ARRAY_SIZE, align_size(CIN_ARRAY_SIZE), false)
 
+#define array_copy(arena, to, from)                \
+  do {                                             \
+    *(to) = *(from);                               \
+    array_init_zero((arena), (to), (from)->count); \
+  } while (0)
+
 #define array_free_items(arena, a)                                                        \
   if ((a)->items) arena_free_pow2((arena), &(Arena_Slice){.items = (uint8_t *)(a)->items, \
                                                           .k = (a)->bytes_capacity_k,     \
@@ -616,6 +622,8 @@ static_assert(CIN_PTR == 8 ? (CIN_ARRAY_SIZE == 24) : true, "bytes updated (poss
     assert((a)->count >= (n)); \
     (a)->count -= (n);         \
   } while (0)
+
+#define array_clear(a) (a)->count = 0
 
 #define array_bytes(a) \
   ((a)->count * sizeof(*(a)->items))
@@ -938,7 +946,7 @@ static inline BOOL GetConsoleScreenBufferInfo_safe(HANDLE hConsoleOutput, PCONSO
   SHORT msg_tail = index_y_repl(repl.msg->count) + 1;
   if (msg_tail >= max_y) {
     repl.msg_index = 0;
-    repl.msg->count = 0;
+    array_clear(repl.msg);
     wwritef(L"NOTE: Input message too large (tail at line %hd >= console"
             " screen buffer height limit %hd). Cinema resolved this by fully"
             " clearing your input. Your console terminal supports roughly"
@@ -1664,7 +1672,7 @@ static inline void table_init(Arena *arena, Robin_Hood_Table *table, uint32_t ca
   assert(table->capacity == 0);
   assert(capacity > 0);
   table->items = arena_bump_T(arena, Table_Bucket, capacity);
-  table->count = 0;
+  array_clear(table);
   table->capacity = capacity;
   table->bytes_capacity = capacity * sizeof(Table_Bucket);
   table->bytes_capacity_k = 0;
@@ -1683,7 +1691,7 @@ static inline void table_double(Arena *arena, Robin_Hood_Table *table) {
   table->capacity <<= 1;
   table->items = arena_bump_T(arena, Table_Bucket, table->capacity);
   table->bytes_capacity <<= 1;
-  table->count = 0;
+  array_clear(table);
   table->mask = table->capacity - 1;
   assert(prev_buckets != table->items);
   assert(table->capacity > 0);
@@ -2081,7 +2089,7 @@ static bool parse_config(const char *filename) {
       goto end;
     }
     conf_parser.buf.items[0] = '\0';
-    conf_parser.buf.count = 0;
+    array_clear(&conf_parser.buf);
     ++conf_parser.line;
   }
   ok = true;
@@ -2812,7 +2820,7 @@ static void document_listing(const uint8_t *pattern, int32_t pattern_len, Playli
   static uint16_t dedup_counter = 1;
   int32_t n = min(docs.doc_count, (r_bound - l_bound) + 1);
   array_ensure_capacity_core(&docs_arena, result, (uint32_t)n, false);
-  result->count = 0;
+  array_clear(result);
   for (int32_t i = l_bound; i <= r_bound; ++i) {
     int32_t doc = docs.suffix_to_doc[i];
     if (docs.dedup_counters[doc] != dedup_counter) {
@@ -3665,7 +3673,7 @@ static struct CommandContext {
 } cmd_ctx = {0};
 
 static inline void set_preview(bool success, const wchar_t *format, ...) {
-  preview.count = 0;
+  array_clear(&preview);
   if (!success) {
     array_wsextend(&console_arena, &preview, COMMAND_ERROR_WMESSAGE);
   }
@@ -3701,7 +3709,7 @@ static inline bool validate_screens(void) {
       return false;
     }
   }
-  cmd_ctx.targets.count = 0;
+  array_clear(&cmd_ctx.targets);
   if (!n_count) {
     array_wsextend(&console_arena, &cmd_ctx.targets, L"(all screens)\0");
     for (size_t i = 0; i < cmd_ctx.layout->count; ++i) {
@@ -4043,7 +4051,7 @@ static cmd_validator parse_command(const wchar_t *command) {
   // 5. Command 'letter+' with 'space' (3b) may precede 'unicode*'
   // 5a. 'unicode*' string is finished with '\0'
   cmd_ctx.executor = NULL;
-  cmd_ctx.numbers.count = 0;
+  array_clear(&cmd_ctx.numbers);
   cmd_ctx.unicode = NULL;
   const wchar_t *p = command;
   while (iswspace(*p)) ++p;
@@ -4362,8 +4370,8 @@ static void cmd_hide_executor(void) {
   }
   if (value < 0) array_free_items(&docs_arena, &tmp_playlist);
   Playlist prev_default = media.default_playlist;
-  Playlist new_default = prev_default;
-  array_init_zero(&docs_arena, &new_default, prev_default.count);
+  Playlist new_default = {0};
+  array_copy(&docs_arena, &new_default, &prev_default);
   array_foreach(&prev_default, int32_t, i, doc) {
     uint64_t hash = (uint64_t)doc * CIN_INTEGER_HASH;
     uint64_t index = hash & mask;
@@ -4385,11 +4393,11 @@ static void cmd_hide_executor(void) {
         offset = i + 1;
       }
     }
-    array_resize(&docs_arena, &media.search_patterns, 0);
+    array_clear(&media.search_patterns);
     memset(table->items, -1, table->bytes_capacity);
-    array_resize(&docs_arena, table, 0);
+    array_clear(table);
     memset(media.search_table.items, 0, media.search_table.bytes_capacity);
-    array_resize(&docs_arena, &media.search_table, 0);
+    array_clear(&media.search_table);
   }
   array_to_pow1(&docs_arena, &new_default);
   media.default_playlist = new_default;
@@ -4579,7 +4587,7 @@ static void cmd_store_executor(void) {
   char *name = NULL;
   bool try_overwrite = layout != NULL;
   if (try_overwrite) {
-    layout->count = 0;
+    array_clear(layout);
     name = (char *)layout_strings.items + layout->name_offset;
   } else {
     layout = arena_bump_T1(&console_arena, Cin_Layout);
@@ -4588,7 +4596,7 @@ static void cmd_store_executor(void) {
     setup_layout(name, layout);
   }
   cmd_ctx.layout = layout;
-  geometry_buf.count = 0;
+  array_clear(&geometry_buf);
   cache_foreach(&cin_io.instances, Instance, i, instance) {
     if (instance->pipe && IsWindow(instance->window)) {
       GetWindowRect(instance->window, &instance->rect);
@@ -4937,7 +4945,7 @@ static void cmd_twitch_validator(void) {
 }
 
 static void cmd_copy_executor(void) {
-  clipboard.count = 0;
+  array_clear(&clipboard);
   clipboard.supply = 0;
   clipboard.demand = 0;
   mpv_target_foreach(i, instance) {
@@ -5103,7 +5111,7 @@ static void execute_startup_macros(void) {
     cmd_ctx.macro = macro;
     cmd_macro_executor();
   }
-  cmd_ctx.numbers.count = 0;
+  array_clear(&cmd_ctx.numbers);
   cmd_reroll_validator();
   set_preview(true, L"press enter to shuffle (h for help)");
   set_preview_pos(repl.home.Y + 1);
@@ -5171,7 +5179,7 @@ int main(int argc, char **argv) {
         if (msg_tail) repl.msg->prev = msg_tail;
         repl.msg->next = NULL;
         repl.msg_index = 0;
-        repl.msg->count = 0;
+        array_clear(repl.msg);
       } else {
         // commit to history
         if (msg_tail) {
@@ -5183,7 +5191,7 @@ int main(int argc, char **argv) {
         repl.msg = create_console_message();
         repl.msg->prev = msg_tail;
         repl.msg_index = 0;
-        repl.msg->count = 0;
+        array_clear(repl.msg);
       }
       if (cmd_ctx.executor) {
         cmd_ctx.executor();
@@ -5193,7 +5201,7 @@ int main(int argc, char **argv) {
       clear_full();
       cursor_home();
       repl.msg_index = 0;
-      repl.msg->count = 0;
+      array_clear(repl.msg);
     } break;
     case VK_HOME:
       cursor_home();
@@ -5271,7 +5279,7 @@ int main(int argc, char **argv) {
         clear_full();
         cursor_home();
         repl.msg->prev = msg_tail;
-        repl.msg->count = 0;
+        array_clear(repl.msg);
         repl.msg_index = 0;
       }
     } break;
@@ -5303,7 +5311,7 @@ int main(int argc, char **argv) {
       } else {
         clear_full();
         cursor_home();
-        repl.msg->count = 0;
+        array_clear(repl.msg);
         repl.msg_index = 0;
       }
     } break;
