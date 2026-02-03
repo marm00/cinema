@@ -461,12 +461,6 @@ static_assert(CIN_PTR == 8 ? (CIN_ARRAY_SIZE == 24) : true, "bytes updated (poss
 #define array_create(arena, slice) \
   arena_slice_reinit((arena), &slice, CIN_ARRAY_SIZE, align_size(CIN_ARRAY_SIZE), false)
 
-#define array_copy(arena, to, from)                \
-  do {                                             \
-    *(to) = *(from);                               \
-    array_init_zero((arena), (to), (from)->count); \
-  } while (0)
-
 #define array_free_items(arena, a)                                                        \
   if ((a)->items) arena_free_pow2((arena), &(Arena_Slice){.items = (uint8_t *)(a)->items, \
                                                           .k = (a)->bytes_capacity_k,     \
@@ -541,6 +535,19 @@ static_assert(CIN_PTR == 8 ? (CIN_ARRAY_SIZE == 24) : true, "bytes updated (poss
   do {                                                          \
     array_resize((arena), (a), (n));                            \
     memcpy((a)->items, (new_items), (n) * sizeof(*(a)->items)); \
+  } while (0)
+
+#define array_copy_shallow(arena, to, from)        \
+  do {                                             \
+    *(to) = *(from);                               \
+    array_init_zero((arena), (to), (from)->count); \
+  } while (0)
+
+#define array_copy_deep(arena, to, from)                    \
+  do {                                                      \
+    *(to) = *(from);                                        \
+    array_init((arena), (to), (from)->count);               \
+    array_set((arena), (to), (from)->items, (from)->count); \
   } while (0)
 
 #define array_extend_core(arena, a, new_items, n, zero)                      \
@@ -4371,7 +4378,7 @@ static void cmd_hide_executor(void) {
   if (value < 0) array_free_items(&docs_arena, &tmp_playlist);
   Playlist prev_default = media.default_playlist;
   Playlist new_default = {0};
-  array_copy(&docs_arena, &new_default, &prev_default);
+  array_copy_shallow(&docs_arena, &new_default, &prev_default);
   array_foreach(&prev_default, int32_t, i, doc) {
     uint64_t hash = (uint64_t)doc * CIN_INTEGER_HASH;
     uint64_t index = hash & mask;
