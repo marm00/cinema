@@ -91,7 +91,7 @@ static inline bool init_os(void) {
   return true;
 }
 
-#define align(a, b) (((a) + (b) - 1) & (~((b) - 1)))
+#define align(a, b) (((a) + (b)-1) & (~((b)-1)))
 #define CIN_PTR ((uint32_t)__SIZEOF_POINTER__)
 #define align_size(T) max(CIN_PTR, __alignof(T))
 #define align_to_size(n) align((n), CIN_PTR)
@@ -104,7 +104,7 @@ static inline bool init_os(void) {
 #define gigabytes(n) ((n) << 30)
 #define CIN_ARENA_CAP megabytes(2)
 #define CIN_ARENA_BYTES align(sizeof(Arena), 64)
-#define cin_ispow2(n) ((n) && ((n) & ((n) - 1)) == 0)
+#define cin_ispow2(n) ((n) && ((n) & ((n)-1)) == 0)
 
 static inline uint32_t log2_floor(uint32_t n) {
   assert(n > 0U && "0 is undefined behavior");
@@ -5215,7 +5215,7 @@ int main(int argc, char **argv) {
       DWORD right = repl.msg_index;
       if (ctrl_on(&input)) {
         while (right < repl.msg->count && repl.msg->items[right] != CIN_SPACE) ++right;
-        while (right < repl.msg->count && repl.msg->items[++right] == CIN_SPACE);
+        while (right < repl.msg->count && repl.msg->items[++right] == CIN_SPACE) (void);
       } else {
         ++right;
       }
@@ -5307,7 +5307,7 @@ int main(int argc, char **argv) {
       if (repl.msg_index < repl.msg->count) {
         if (ctrl_on(&input)) {
           while (repl.msg_index < repl.msg->count && repl.msg->items[repl.msg_index] != CIN_SPACE) ++repl.msg_index;
-          while (repl.msg_index < repl.msg->count && repl.msg->items[++repl.msg_index] == CIN_SPACE);
+          while (repl.msg_index < repl.msg->count && repl.msg->items[++repl.msg_index] == CIN_SPACE) (void);
         } else {
           ++repl.msg_index;
         }
