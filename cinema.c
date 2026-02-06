@@ -771,6 +771,12 @@ static inline int32_t utf8_to_utf16_norm(const char *str) {
 }
 #endif
 
+static inline int32_t utf8_norm(char *str) {
+  int32_t len = 0;
+  for (; *str; ++len, ++str) *str = tolower(*str);
+  return len;
+}
+
 // https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
 // A path can have 248 "characters" (260 - 12 = 248)
 // with 12 reserved for 8.3 file name.
@@ -1142,6 +1148,10 @@ static inline bool cin_isnum(char c) {
   return c <= '9' && c >= '0';
 }
 
+static inline bool cin_isnum_1based(char c) {
+  return c <= '9' && c >= '1';
+}
+
 static inline wchar_t cin_wlower(wchar_t c) {
   if (c <= L'Z' && c >= 'A') return c + (L'a' - L'A');
   if (c < 128) return c;
@@ -1276,12 +1286,12 @@ static void log_wmessage(Cin_Log_Level level, const wchar_t *wmessage, ...) {
   LeaveCriticalSection(&log_lock);
 }
 
-static void wwrite_safe(const wchar_t *str, uint32_t len) {
+static void wwrite_safe(const char *str, uint32_t len) {
   EnterCriticalSection(&log_lock);
   clear_preview(0);
   hide_cursor();
   cursor_home();
-  cin_wwrite(str, len);
+  cin_write(str, len);
   rewrite_post_log();
   LeaveCriticalSection(&log_lock);
 }
@@ -1372,13 +1382,13 @@ typedef void (*patricia_fn)(void);
 
 typedef struct Patricia_Node {
   struct Patricia_Node *edges[COMMAND_ALPHABET];
-  const wchar_t *suffix;
+  const char *suffix;
   size_t len;
   patricia_fn fn;
   int32_t min;
 } Patricia_Node;
 
-static inline Patricia_Node *patricia_node(const wchar_t *suffix, size_t len) {
+static inline Patricia_Node *patricia_node(const char *suffix, size_t len) {
   Patricia_Node *node = arena_bump_T1(&arena_console, Patricia_Node);
   assert(node);
   node->suffix = suffix;
@@ -1386,27 +1396,27 @@ static inline Patricia_Node *patricia_node(const wchar_t *suffix, size_t len) {
   return node;
 }
 
-static inline size_t patricia_lcp(const wchar_t *a, const wchar_t *b, size_t max) {
+static inline size_t patricia_lcp(const char *a, const char *b, size_t max) {
   size_t i = 0;
   while (i < max && a[i] && a[i] == b[i]) ++i;
   return i;
 }
 
-static inline patricia_fn patricia_query(Patricia_Node *root, const wchar_t *pattern) {
+static inline patricia_fn patricia_query(Patricia_Node *root, const char *pattern) {
   assert(root);
-  assert(wcslen(pattern) > 0);
-  assert((*pattern >= L'a' && *pattern <= L'z'));
+  assert(strlen(pattern) > 0);
+  assert((*pattern >= 'a' && *pattern <= 'z'));
   Patricia_Node *node = root;
-  const wchar_t *p = pattern;
+  const char *p = pattern;
   while (*p) {
-    assert((*p >= L'a' && *p <= L'z'));
-    const int32_t i = *p - L'a';
+    assert((*p >= 'a' && *p <= 'z'));
+    const int32_t i = *p - 'a';
     Patricia_Node *edge = node->edges[i];
     if (edge == NULL) {
       return NULL;
     }
     const size_t common = patricia_lcp(p, edge->suffix, edge->len);
-    if (p[common] == L'\0') {
+    if (p[common] == '\0') {
       return edge->fn;
     }
     if (common < edge->len) {
@@ -1418,18 +1428,18 @@ static inline patricia_fn patricia_query(Patricia_Node *root, const wchar_t *pat
   return node->fn;
 }
 
-static inline void patricia_insert(Patricia_Node *root, const wchar_t *str, patricia_fn fn) {
+static inline void patricia_insert(Patricia_Node *root, const char *str, patricia_fn fn) {
   assert(root);
-  assert(wcslen(str) > 0);
-  assert((*str >= L'a' && *str <= L'z'));
+  assert(strlen(str) > 0);
+  assert((*str >= 'a' && *str <= 'z'));
   Patricia_Node *node = root;
-  const wchar_t *p = str;
+  const char *p = str;
   while (*p) {
-    assert((*p >= L'a' && *p <= L'z'));
-    const int32_t i = *p - L'a';
+    assert((*p >= 'a' && *p <= 'z'));
+    const int32_t i = *p - 'a';
     Patricia_Node *edge = node->edges[i];
     if (edge == NULL) {
-      const size_t edge_len = wcslen(p);
+      const size_t edge_len = strlen(p);
       edge = patricia_node(p, edge_len);
       edge->fn = fn;
       node->edges[i] = edge;
@@ -1443,7 +1453,7 @@ static inline void patricia_insert(Patricia_Node *root, const wchar_t *str, patr
     const size_t common = patricia_lcp(p, edge->suffix, edge->len);
     if (common == edge->len) {
       p += common;
-      if (*p == L'\0') {
+      if (*p == '\0') {
         edge->min = -1;
         edge->fn = fn;
         return;
@@ -1454,17 +1464,17 @@ static inline void patricia_insert(Patricia_Node *root, const wchar_t *str, patr
       edge->suffix += common;
       edge->len -= common;
       node->edges[i] = split;
-      split->edges[edge->suffix[0] - L'a'] = edge;
+      split->edges[edge->suffix[0] - 'a'] = edge;
       p += common;
-      if (*p == L'\0') {
+      if (*p == '\0') {
         split->min = -1;
         split->fn = fn;
       } else {
-        const size_t remainder_len = wcslen(p);
+        const size_t remainder_len = strlen(p);
         Patricia_Node *remainder = patricia_node(p, remainder_len);
         remainder->fn = fn;
-        const int32_t edge_i = edge->suffix[0] - L'a';
-        const int32_t next_i = *p - L'a';
+        const int32_t edge_i = edge->suffix[0] - 'a';
+        const int32_t next_i = *p - 'a';
         split->edges[next_i] = remainder;
         // update internal node lexicographical minimum
         if (next_i < edge_i) {
@@ -2303,31 +2313,33 @@ static Radix_Tree *tag_tree = NULL;
 static Radix_Tree *layout_tree = NULL;
 static Radix_Tree *macro_tree = NULL;
 
-static inline void setup_file_path(wchar_t *path, int32_t *len) {
+static inline void setup_file_path(char *path, int32_t *len) {
   assert(len);
-  for (wchar_t *p = path; *p; ++p) {
-    if (*p == L'\\') {
-      *p++ = L'/';
-      wchar_t *dups = p;
-      while (*dups == L'\\') ++dups;
+  for (char *p = path; *p; ++p) {
+    if (*p == '\\') {
+      *p++ = '/';
+      char *dups = p;
+      while (*dups == '\\') ++dups;
       if (p != dups) {
         const ptrdiff_t removed = dups - p;
         const ptrdiff_t pos = dups - path;
         assert((size_t)*len >= (size_t)pos);
         const size_t remainder = (size_t)*len - (size_t)pos;
-        wmemcpy(p, dups, remainder);
+        memcpy(p, dups, remainder);
         p = dups;
         *len -= (int32_t)removed;
       }
     }
   }
-  *(path + (size_t)*len) = L'\0';
+  *(path + (size_t)*len) = '\0';
 }
 
-static void setup_directory(const char *path, Tag_Directories *tag_dirs) {
-  int32_t len_utf16 = utf8_to_utf16_norm(path);
+static void setup_directory(char *path, Tag_Directories *tag_dirs) {
+  int32_t len_utf16 = utf8_norm(path);
+#ifdef _WIN32
+  setup_file_path(path, &len_utf16);
+#endif
   assert(len_utf16);
-  setup_file_path(utf16_buf_norm.items, &len_utf16);
   const size_t len = (size_t)len_utf16;
   Directory_Path root_dir = {.len = len};
   wmemcpy(root_dir.path, utf16_buf_norm.items, len);
@@ -3721,7 +3733,7 @@ typedef void (*cmd_validator)(void);
 typedef void (*cmd_executor)(void);
 
 array_define(Command_Numbers, size_t);
-array_define(Command_Help, wchar_t);
+array_define(Command_Help, char);
 array_define(Command_Targets, wchar_t);
 
 static struct CommandContext {
@@ -3731,7 +3743,7 @@ static struct CommandContext {
   Tag_Items *tag;
   cmd_executor executor;
   Command_Numbers numbers;
-  wchar_t *unicode;
+  char *unicode;
   Command_Targets targets;
   Command_Help help;
   Cin_Macro *macro;
@@ -3903,9 +3915,9 @@ static inline void chat_reposition(const Cin_Layout *layout) {
   }
 }
 
-#define CIN_MPVCALL_START L"mpv --idle --config-dir=./ --input-ipc-server="
+#define CIN_MPVCALL_START "mpv --idle --config-dir=./ --input-ipc-server="
 #define CIN_MPVCALL_START_LEN cin_strlen(CIN_MPVCALL_START)
-#define CIN_MPVCALL_PIPE L"\\\\.\\pipe\\cinema_mpv_"
+#define CIN_MPVCALL_PIPE "\\\\.\\pipe\\cinema_mpv_"
 #define CIN_MPVCALL_PIPE_LEN cin_strlen(CIN_MPVCALL_PIPE)
 #define CIN_MPVCALL (CIN_MPVCALL_START CIN_MPVCALL_PIPE)
 #define CIN_MPVCALL_LEN cin_strlen(CIN_MPVCALL)
@@ -3914,7 +3926,7 @@ static inline void chat_reposition(const Cin_Layout *layout) {
 #define CIN_MPVCALL_BUF align_to_block(CIN_MPVCALL_LEN + CIN_MPVCALL_DIGITS + CIN_MPVCALL_GEOMETRY_LEN)
 
 static void mpv_spawn(Instance *instance, size_t index) {
-  static wchar_t mpv_command[CIN_MPVCALL_BUF] = {CIN_MPVCALL};
+  static char mpv_command[CIN_MPVCALL_BUF] = {CIN_MPVCALL};
   const bool extra = index == SIZE_MAX;
   if (extra) index = cmd_ctx.layout->count;
   instance->ovl_ctx.type = MPV_READ;
@@ -3922,7 +3934,7 @@ static void mpv_spawn(Instance *instance, size_t index) {
   size_t left = right;
   size_t j = index;
   do {
-    mpv_command[left--] = L'0' + (j % 10);
+    mpv_command[left--] = '0' + (j % 10);
     j /= 10;
   } while (j);
   const size_t digits = right - left++;
@@ -3931,7 +3943,7 @@ static void mpv_spawn(Instance *instance, size_t index) {
   if (extra) array_push(&arena_console, cmd_ctx.layout, screen);
   // screen.len actually includes null-terminator
   char *screen_utf8 = (char *)screen_strings.items + screen.offset;
-  const int32_t len = utf8_to_utf16_nraw(screen_utf8, (int32_t)screen.len);
+  const int32_t len = (int32_t)screen.len;
   if (len > (int32_t)CIN_MPVCALL_GEOMETRY_LEN) {
     char *layout_name = (char *)layout_strings.items + cmd_ctx.layout->name_offset;
     printf("Cinema crashed because the config value of screen %zu in layout '%s' is "
@@ -3940,13 +3952,15 @@ static void mpv_spawn(Instance *instance, size_t index) {
            screen_utf8, CIN_MPVCALL_GEOMETRY_LEN);
     exit(1);
   }
-  swprintf(mpv_command + CIN_MPVCALL_LEN + digits, CIN_MPVCALL_GEOMETRY_LEN, L" --geometry=%.*s",
-           len, utf16_buf_raw.items);
-  log_wmessage(LOG_DEBUG, L"Spawning instance: %s", mpv_command);
+  sprintf(mpv_command + CIN_MPVCALL_LEN + digits, " --geometry=%.*s", len, screen_utf8);
+  log_message(LOG_DEBUG, "Spawning instance: %s", mpv_command);
+#ifdef _WIN32
+  utf8_to_utf16_raw(mpv_command);
   STARTUPINFOW si = {0};
   si.cb = sizeof(si);
   PROCESS_INFORMATION pi = {0};
-  if (!CreateProcessW(exe_path_mpv, mpv_command, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+  wchar_t *mpv_command_utf16 = utf16_buf_raw.items;
+  if (!CreateProcessW(exe_path_mpv, mpv_command_utf16, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
     if (GetLastError() == ERROR_FILE_NOT_FOUND) {
       log_last_error("Failed to find mpv executable");
     } else {
@@ -3956,11 +3970,14 @@ static void mpv_spawn(Instance *instance, size_t index) {
   }
   instance->si = si;
   instance->pi = pi;
-  mpv_command[CIN_MPVCALL_LEN + digits] = L'\0';
-  const bool ok_pipe = create_pipe(instance, mpv_command + CIN_MPVCALL_START_LEN);
+  mpv_command_utf16[CIN_MPVCALL_LEN + digits] = L'\0';
+  const bool ok_pipe = create_pipe(instance, mpv_command_utf16 + CIN_MPVCALL_START_LEN);
   assert(ok_pipe);
   const bool ok_iocp = CreateIoCompletionPort(instance->pipe, cin_io.iocp, (ULONG_PTR)instance, 0) != NULL;
   assert(ok_iocp);
+#else
+// TODO: linux
+#endif
   instance->buf_head = arena_bump_T1(&arena_io, Read_Buffer);
   instance->buf_tail = instance->buf_head;
   const bool ok_read = overlap_read(instance);
@@ -4060,8 +4077,8 @@ static void cmd_layout_validator(void) {
   radix_v layout = NULL;
   const uint8_t *layout_name = NULL;
   if (cmd_ctx.unicode) {
-    const int32_t len = utf16_to_utf8(cmd_ctx.unicode);
-    layout = radix_query(layout_tree, utf8_buf.items, (size_t)len - 1, &layout_name);
+    const size_t len = strlen(cmd_ctx.unicode);
+    layout = radix_query(layout_tree, (uint8_t *)cmd_ctx.unicode, len - 1, &layout_name);
     if (!layout) {
       set_preview(false, L"layout does not exist: '%ls'", cmd_ctx.unicode);
       return;
@@ -4099,7 +4116,7 @@ static void cmd_reroll_validator(void) {
   cmd_ctx.executor = cmd_reroll_executor;
 }
 
-static cmd_validator parse_command(const wchar_t *command) {
+static cmd_validator parse_command(const char *command) {
   // Grammar rules:
   // 1. First character must be either empty or in L'a'..L'z' (letter) or in L'1'..L'9' (digit)
   // 2. Empty (whitespace*\0) is a command
@@ -4117,21 +4134,21 @@ static cmd_validator parse_command(const wchar_t *command) {
   cmd_ctx.executor = NULL;
   array_clear(&cmd_ctx.numbers);
   cmd_ctx.unicode = NULL;
-  const wchar_t *p = command;
-  while (iswspace(*p)) ++p;
+  const char *p = command;
+  while (isspace(*p)) ++p;
   size_t number = 0;
   for (; *p; ++p) {
-    if (cin_wisnum_1based(*p)) {
+    if (cin_isnum_1based(*p)) {
       // 4a. build decimal number
       number *= 10;
-      number += *p - L'0';
+      number += (size_t)(*p - '0');
     } else if (*p == ' ') {
       if (number) {
         // 4c. push decimal number onto array
         array_push(&arena_console, &cmd_ctx.numbers, number);
       }
       number = 0;
-    } else if (cin_wisloweralpha(*p)) {
+    } else if (cin_isloweralpha(*p)) {
       // if numbers array empty and number, push
       if (number) {
         array_push(&arena_console, &cmd_ctx.numbers, number);
@@ -4154,9 +4171,9 @@ static cmd_validator parse_command(const wchar_t *command) {
     }
     return cmd_reroll_validator;
   }
-  const wchar_t *start = p;
+  const char *start = p;
   ++p;
-  while (cin_wisloweralpha(*p)) ++p;
+  while (cin_isloweralpha(*p)) ++p;
   // 3/3a. letter+, command begins at start, ends at p
   if (!*p) {
     // 3c. possible command
@@ -4166,7 +4183,7 @@ static cmd_validator parse_command(const wchar_t *command) {
     }
     return validator;
   }
-  if (*p != L' ') {
+  if (*p != ' ') {
     const intptr_t pos = p - command;
     assert(pos >= 0);
     set_preview(false, L"unexpected character '%c' at position %zd,"
@@ -4175,22 +4192,29 @@ static cmd_validator parse_command(const wchar_t *command) {
     return NULL;
   }
   // temporarily null-terminate
-  *(wchar_t *)p = L'\0';
+  *(char *)p = '\0';
   cmd_validator validator = patricia_query(cmd_ctx.trie, start);
   if (!validator) {
     set_preview(false, L"'%s' is not a valid command", start);
   }
-  *(wchar_t *)p = L' ';
+  *(char *)p = ' ';
   ++p;
   // 5a. unicode starts at p ends at \0
-  cmd_ctx.unicode = (wchar_t *)p;
+  cmd_ctx.unicode = (char *)p;
   return validator;
 }
 
 static void update_preview(void) {
   array_reserve(&arena_console, repl.msg, 1);
   repl.msg->items[repl.msg->count] = L'\0';
+#ifdef _WIN32
+  utf16_to_utf8(repl.msg->items);
+  uint8_t *utf8_msg = utf8_buf.items;
+  cmd_validator validator_fn = parse_command((char *)utf8_msg);
+#else
+  // TODO: linux
   cmd_validator validator_fn = parse_command(repl.msg->items);
+#endif
   if (validator_fn) {
     validator_fn();
   }
@@ -4307,8 +4331,8 @@ static void cmd_tag_validator(void) {
   radix_v tag = NULL;
   const uint8_t *tag_name = NULL;
   if (cmd_ctx.unicode) {
-    const int32_t len = utf16_to_utf8(cmd_ctx.unicode);
-    tag = radix_query(tag_tree, utf8_buf.items, (size_t)len - 1, &tag_name);
+    const size_t len = strlen(cmd_ctx.unicode);
+    tag = radix_query(tag_tree, (uint8_t *)cmd_ctx.unicode, len - 1, &tag_name);
     if (!tag) {
       set_preview(false, L"tag does not exist: '%ls'", cmd_ctx.unicode);
       return;
@@ -4331,10 +4355,11 @@ static void cmd_tag_validator(void) {
 static void cmd_search_executor(void) {
   Playlist *playlist = &media.default_playlist;
   int32_t len = 0;
-  if (cmd_ctx.unicode && (len = (int32_t)wcslen(cmd_ctx.unicode))) {
+  if (cmd_ctx.unicode && (len = (int32_t)strlen(cmd_ctx.unicode))) {
+#ifdef _WIN32
     setup_file_path(cmd_ctx.unicode, &len);
-    len = utf16_to_utf8(cmd_ctx.unicode);
-    uint8_t *pattern = utf8_buf.items;
+#endif
+    uint8_t *pattern = (uint8_t *)cmd_ctx.unicode;
     const table_key_len len_u32 = (table_key_len)len;
     log_message(LOG_DEBUG, "Search with pattern: '%s', len: %d", pattern, len);
     array_reserve(&arena_docs, &media.search_patterns, len_u32);
@@ -4383,8 +4408,8 @@ static void cmd_search_validator(void) {
 
 static void cmd_hide_executor(void) {
   if (!cmd_ctx.unicode) return;
-  const int32_t len = utf16_to_utf8(cmd_ctx.unicode);
-  uint8_t *pattern = utf8_buf.items;
+  const size_t len = strlen(cmd_ctx.unicode);
+  uint8_t *pattern = (uint8_t *)cmd_ctx.unicode;
   if (len <= 1) return;
   const uint32_t len_u32 = (uint32_t)len;
   array_reserve(&arena_docs, &media.search_patterns, len_u32);
@@ -4398,7 +4423,7 @@ static void cmd_hide_executor(void) {
     assert(value);
     tmp_playlist = *(Playlist *)value;
   } else {
-    document_listing(pattern, len - 1, &tmp_playlist);
+    document_listing(pattern, (int32_t)len - 1, &tmp_playlist);
   }
   assert(&tmp_playlist);
   Hidden_Table *table = &media.hidden_table;
@@ -5094,9 +5119,8 @@ static void cmd_list_executor(void) {
     array_pop(&output);
     output.items[output.count - 1] = '\0';
   }
-  const int32_t len = utf8_to_utf16_nraw(output.items, (int32_t)output.count);
-  assert(len);
-  wwrite_safe(utf16_buf_raw.items, (uint32_t)len);
+  assert(output.count);
+  wwrite_safe(output.items, (uint32_t)output.count);
   array_free_items(&arena_console, &output);
 }
 
@@ -5121,15 +5145,15 @@ static void cmd_quit_validator(void) {
   cmd_ctx.executor = cmd_quit_executor;
 }
 
-static inline void register_cmd(const wchar_t *name, const wchar_t *help, cmd_validator validator) {
-  assert(wmemchr(help, PREFIX_TOKEN, wcslen(help)) == NULL);
+static inline void register_cmd(const char *name, const char *help, cmd_validator validator) {
+  assert(memchr(help, PREFIX_TOKEN, strlen(help)) == NULL);
   patricia_insert(cmd_ctx.trie, name, validator);
-  const wchar_t *v_str = WCRLF L"  %-10s %s";
-  const int32_t len_i32 = _scwprintf(v_str, name, help);
+  const char *v_str = CRLF "  %-10s %s";
+  const int32_t len_i32 = _scprintf(v_str, name, help);
   assert(len_i32);
   const uint32_t len = (uint32_t)len_i32 + 1;
   array_reserve(&arena_console, &cmd_ctx.help, len);
-  swprintf(cmd_ctx.help.items + cmd_ctx.help.count, len, v_str, name, help);
+  sprintf(cmd_ctx.help.items + cmd_ctx.help.count, len, v_str, name, help);
   cmd_ctx.help.count += len - 1;
 }
 
@@ -5144,30 +5168,30 @@ static bool init_commands(void) {
   cmd_ctx.trie = patricia_node(NULL, 0);
   array_init(&arena_console, &cmd_ctx.numbers, COMMAND_NUMBERS_CAP);
   array_wsextend(&arena_console, &cmd_ctx.help,
-                 WCR L"Available commands:" WCRLF L"  "
-                     L"Note: optional arguments before/after in brackets []" WCRLF);
-  register_cmd(L"autoplay", L"Autoplay media [(1 2 ..) autoplay (seconds)]", cmd_autoplay_validator);
-  register_cmd(L"chat", L"Show chat (see store command)", cmd_chat_validator);
-  register_cmd(L"clear", L"Clear tag/term [(1 2 ..) clear]", cmd_clear_validator);
-  register_cmd(L"copy", L"Copy url(s) to clipboard [(1 2 ..) copy]", cmd_copy_validator);
-  register_cmd(L"extra", L"Adds an extra screen (see store command)", cmd_extra_validator);
-  register_cmd(L"help", L"Show all commands", cmd_help_validator);
-  register_cmd(L"hide", L"Hide media with term [hide term]", cmd_hide_validator);
-  register_cmd(L"idle", L"Make commands (not) play media [idle]", cmd_idle_validator);
-  register_cmd(L"kill", L"Kill screen(s) and chat [(1 2 ..) kill]", cmd_kill_validator);
-  register_cmd(L"layout", L"Change layout to name [layout (name)]", cmd_layout_validator);
-  register_cmd(L"list", L"Show all tags", cmd_list_validator);
-  register_cmd(L"lock", L"Lock/unlock screen contents [(1 2 ..) lock]", cmd_lock_validator);
-  register_cmd(L"macro", L"Execute macro [macro (name)]", cmd_macro_validator);
-  register_cmd(L"maximize", L"Maximize and close others [(1) maximize]", cmd_maximize_validator);
-  register_cmd(L"mute", L"Mute screen(s) [(1 2 ..) mute]", cmd_mute_validator);
-  register_cmd(L"quit", L"Close screens and quit Cinema", cmd_quit_validator);
-  register_cmd(L"reroll", L"Shuffle media [(1 2 ..) (reroll)]", cmd_reroll_validator);
-  register_cmd(L"search", L"Limit media to term [(1 2 ..) search (term)]", cmd_search_validator);
-  register_cmd(L"store", L"Store layout in cinema.conf [store (layout)]", cmd_store_validator);
-  register_cmd(L"swap", L"Swap screen contents [(1 2) swap]", cmd_swap_validator);
-  register_cmd(L"tag", L"Limit media to tag [(1 2 ..) tag (name)]", cmd_tag_validator);
-  register_cmd(L"twitch", L"Show channel [(1 2 ..) twitch (channel)]", cmd_twitch_validator);
+                 CR "Available commands:" CRLF "  "
+                    "Note: optional arguments before/after in brackets []" CRLF);
+  register_cmd("autoplay", "Autoplay media [(1 2 ..) autoplay (seconds)]", cmd_autoplay_validator);
+  register_cmd("chat", "Show chat (see store command)", cmd_chat_validator);
+  register_cmd("clear", "Clear tag/term [(1 2 ..) clear]", cmd_clear_validator);
+  register_cmd("copy", "Copy url(s) to clipboard [(1 2 ..) copy]", cmd_copy_validator);
+  register_cmd("extra", "Adds an extra screen (see store command)", cmd_extra_validator);
+  register_cmd("help", "Show all commands", cmd_help_validator);
+  register_cmd("hide", "Hide media with term [hide term]", cmd_hide_validator);
+  register_cmd("idle", "Make commands (not) play media [idle]", cmd_idle_validator);
+  register_cmd("kil", "Kill screen(s) and chat [(1 2 ..) kill]", cmd_kill_validator);
+  register_cmd("layout", "Change layout to name [layout (name)]", cmd_layout_validator);
+  register_cmd("list", "Show all tags", cmd_list_validator);
+  register_cmd("lock", "Lock/unlock screen contents [(1 2 ..) lock]", cmd_lock_validator);
+  register_cmd("macro", "Execute macro [macro (name)]", cmd_macro_validator);
+  register_cmd("maximize", "Maximize and close others [(1) maximize]", cmd_maximize_validator);
+  register_cmd("mute", "Mute screen(s) [(1 2 ..) mute]", cmd_mute_validator);
+  register_cmd("quit", "Close screens and quit Cinema", cmd_quit_validator);
+  register_cmd("rerol", "Shuffle media [(1 2 ..) (reroll)]", cmd_reroll_validator);
+  register_cmd("search", "Limit media to term [(1 2 ..) search (term)]", cmd_search_validator);
+  register_cmd("store", "Store layout in cinema.conf [store (layout)]", cmd_store_validator);
+  register_cmd("swap", "Swap screen contents [(1 2) swap]", cmd_swap_validator);
+  register_cmd("tag", "Limit media to tag [(1 2 ..) tag (name)]", cmd_tag_validator);
+  register_cmd("twitch", "Show channel [(1 2 ..) twitch (channel)]", cmd_twitch_validator);
   return true;
 }
 
