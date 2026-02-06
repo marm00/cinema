@@ -34,6 +34,8 @@
 #pragma comment(lib, "user32")
 #pragma comment(lib, "advapi32")
 #else
+#include <errno.h>
+#include <sys/mman.h>
 #include <sys/param.h>
 #include <unistd.h>
 #endif
@@ -60,18 +62,20 @@ static const Cin_Log_Level GLOBAL_LOG_LEVEL = LOG_LEVEL;
 static const char *LOG_LEVELS[LOG_TRACE + 1] = {"ERROR", "WARNING", "INFO", "DEBUG", "TRACE"};
 
 static struct Cin_System {
-  // Assuming large pages is the default, design around always committing
-  uint32_t alloc_type;
   size_t page_size;
+  uint32_t alloc_type;
   int32_t threads;
 } cin_system = {
 #ifdef _WIN32
-    .alloc_type = MEM_RESERVE | MEM_COMMIT,
-#else
-    .alloc_type = 0,
-#endif
     .page_size = 4096,
-    .threads = 1};
+    .alloc_type = MEM_RESERVE | MEM_COMMIT,
+    .threads = 1
+#else
+    .page_size = 4096,
+    .alloc_type = MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE,
+    .threads = 1
+#endif
+};
 
 static inline bool init_os(void) {
 #ifdef _WIN32
@@ -184,17 +188,30 @@ static_assert(sizeof(Arena_Block) == CIN_PTR, "should just hold a pointer");
 #define CIN_ARENA_HEADER align(sizeof(Arena_Chunk), CIN_ARENA_MIN)
 
 static inline Arena_Chunk *arena_chunk_init(Arena *arena, uint32_t bytes) {
+  // TODO: separate commit/reserve steps (especially for linux)
   assert(arena);
   assert(cin_system.page_size <= CIN_ARENA_MAX);
   const size_t dwSize = align(bytes, cin_system.page_size);
+#ifdef _WIN32
   Arena_Chunk *chunk = VirtualAlloc(NULL, dwSize, cin_system.alloc_type, PAGE_READWRITE);
   if (!chunk) {
     uint32_t code = GetLastError();
-    printf("Cinema crashed with code %lu trying to use VirtualAlloc", code);
+    printf("Cinema crashed with code %lu trying to allocate memory with VirtualAlloc", code);
     // https://learn.microsoft.com/en-us/windows/win32/debug/system-error-codes
     assert(false);
     exit(1);
   }
+#else
+  Arena_Chunk *chunk = mmap(NULL, dwSize, PROT_READ | PROT_WRITE,
+                            (int32_t)cin_system.alloc_type, -1, 0);
+  if (chunk == MAP_FAILED) {
+    printf("Cinema crashed with code %d trying to allocate memory with mmap", errno);
+    // https://kernel.googlesource.com/pub/scm/linux/kernel/git/nico/archive/+/v0.97/include/linux/errno.h
+    assert(false);
+    exit(1);
+  }
+  madvise(chunk, dwSize, MADV_HUGEPAGE);
+#endif
   chunk->prev = arena->curr;
   chunk->count = CIN_ARENA_HEADER;
   chunk->capacity = (uint32_t)dwSize;
@@ -276,7 +293,7 @@ static inline void arena_slice_reinit(Arena *arena, Arena_Slice *slice, uint32_t
   if (block) {
     arena->free_list[class] = block->next;
     slice->items = (uint8_t *)block;
-    if (zero) ZeroMemory(slice->items, slice->size);
+    if (zero) memset(slice->items, 0, slice->size);
   } else {
     slice->items = arena_bump(arena, slice->size, alignment);
   }
@@ -401,7 +418,7 @@ static inline void arena_slice_free(Arena *arena, Arena_Slice *slice) {
       (c)->free_list = (c)->free_list->next_free;                  \
       if ((zero)) {                                                \
         void *_next = (out_node)->next;                            \
-        ZeroMemory((out_node), (c)->cache_node_bytes);             \
+        memset((out_node), 0, (c)->cache_node_bytes);              \
         (out_node)->next = _next;                                  \
       }                                                            \
     } else {                                                       \
@@ -2966,7 +2983,7 @@ static bool create_pipe(Instance *instance, const wchar_t *name) {
 }
 
 static bool overlap_read(Instance *instance) {
-  ZeroMemory(&instance->ovl_ctx.ovl, sizeof(OVERLAPPED));
+  memset(&instance->ovl_ctx.ovl, 0, sizeof(OVERLAPPED));
   char *start = instance->buf_tail->buf + instance->buf_tail->bytes;
   const uint32_t to_read = (uint32_t)(sizeof(instance->buf_tail->buf) - instance->buf_tail->bytes);
   if (instance->pipe && !ReadFile(instance->pipe, start, to_read, NULL, &instance->ovl_ctx.ovl)) {
@@ -3197,7 +3214,7 @@ static inline void mpv_kill(Instance *instance) {
   Read_Buffer *buf_head = instance->buf_head;
   Read_Buffer *buf_tail = instance->buf_tail;
   Instance *next = instance->next;
-  ZeroMemory(instance, sizeof(Instance));
+  memset(instance, 0, sizeof(Instance));
   playlist_set_default(instance);
   instance->buf_head = buf_head;
   instance->buf_tail = buf_tail;
