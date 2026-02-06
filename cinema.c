@@ -27,14 +27,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <wchar.h>
 
 #ifdef _WIN32
+#include <wchar.h>
 #include <windows.h>
 #pragma comment(lib, "user32")
 #pragma comment(lib, "advapi32")
 #else
 #include <errno.h>
+#include <stdarg.h>
 #include <sys/mman.h>
 #include <sys/param.h>
 #include <unistd.h>
@@ -196,7 +197,7 @@ static inline Arena_Chunk *arena_chunk_init(Arena *arena, uint32_t bytes) {
   Arena_Chunk *chunk = VirtualAlloc(NULL, dwSize, cin_system.alloc_type, PAGE_READWRITE);
   if (!chunk) {
     uint32_t code = GetLastError();
-    printf("Cinema crashed with code %lu trying to allocate memory with VirtualAlloc", code);
+    printf("Cinema crashed with code %u trying to allocate memory with VirtualAlloc", code);
     // https://learn.microsoft.com/en-us/windows/win32/debug/system-error-codes
     assert(false);
     exit(1);
@@ -595,17 +596,6 @@ static_assert(CIN_PTR == 8 ? (CIN_ARRAY_SIZE == 24) : true, "bytes updated (poss
 #define array_extend_zero(arena, a, new_items, n) \
   array_extend_core((arena), (a), (new_items), (n), true)
 
-#define array_wextend(arena, a, new_items, n)           \
-  do {                                                  \
-    array_reserve((arena), (a), (n));                   \
-    wmemcpy((a)->items + (a)->count, (new_items), (n)); \
-    (a)->count += (n);                                  \
-  } while (0)
-
-#define array_wsextend(arena, a, new_items) \
-  array_wextend((arena), (a), (new_items),  \
-                sizeof((new_items)) / sizeof(*((new_items))) - 1);
-
 #define array_splice(arena, a, i, new_items, n)                       \
   do {                                                                \
     assert((i) <= (a)->count);                                        \
@@ -615,15 +605,6 @@ static_assert(CIN_PTR == 8 ? (CIN_ARRAY_SIZE == 24) : true, "bytes updated (poss
             ((a)->count - (i)) * sizeof(*(a)->items));                \
     memcpy((a)->items + (i), (new_items), (n) * sizeof(*(a)->items)); \
     (a)->count += (n);                                                \
-  } while (0)
-
-#define array_wsplice(arena, a, i, new_items, n)                          \
-  do {                                                                    \
-    assert((i) <= (a)->count);                                            \
-    array_reserve((arena), (a), (n));                                     \
-    wmemmove((a)->items + (i) + (n), (a)->items + (i), (a)->count - (i)); \
-    wmemcpy((a)->items + (i), (new_items), (n));                          \
-    (a)->count += (n);                                                    \
   } while (0)
 
 #define array_insert(arena, a, i, new_item)              \
@@ -637,17 +618,6 @@ static_assert(CIN_PTR == 8 ? (CIN_ARRAY_SIZE == 24) : true, "bytes updated (poss
     }                                                    \
     (a)->items[(i)] = (new_item);                        \
     (a)->count++;                                        \
-  } while (0)
-
-#define array_winsert(arena, a, i, new_item)                              \
-  do {                                                                    \
-    assert((i) <= (a)->count);                                            \
-    array_reserve((arena), (a), 1);                                       \
-    if ((i) < (a)->count) {                                               \
-      wmemmove((a)->items + (i) + 1, (a)->items + (i), (a)->count - (i)); \
-    }                                                                     \
-    (a)->items[(i)] = (new_item);                                         \
-    (a)->count++;                                                         \
   } while (0)
 
 #define array_pop(a)    \
@@ -705,10 +675,101 @@ static_assert(CIN_PTR == 8 ? (CIN_ARRAY_SIZE == 24) : true, "bytes updated (poss
     }                                               \
   } while (0)
 
+#ifdef _WIN32
+#define array_wextend(arena, a, new_items, n)           \
+  do {                                                  \
+    array_reserve((arena), (a), (n));                   \
+    wmemcpy((a)->items + (a)->count, (new_items), (n)); \
+    (a)->count += (n);                                  \
+  } while (0)
+
+#define array_wsextend(arena, a, new_items) \
+  array_wextend((arena), (a), (new_items),  \
+                sizeof((new_items)) / sizeof(*((new_items))) - 1);
+
+#define array_wsplice(arena, a, i, new_items, n)                          \
+  do {                                                                    \
+    assert((i) <= (a)->count);                                            \
+    array_reserve((arena), (a), (n));                                     \
+    wmemmove((a)->items + (i) + (n), (a)->items + (i), (a)->count - (i)); \
+    wmemcpy((a)->items + (i), (new_items), (n));                          \
+    (a)->count += (n);                                                    \
+  } while (0)
+
+#define array_winsert(arena, a, i, new_item)                              \
+  do {                                                                    \
+    assert((i) <= (a)->count);                                            \
+    array_reserve((arena), (a), 1);                                       \
+    if ((i) < (a)->count) {                                               \
+      wmemmove((a)->items + (i) + 1, (a)->items + (i), (a)->count - (i)); \
+    }                                                                     \
+    (a)->items[(i)] = (new_item);                                         \
+    (a)->count++;                                                         \
+  } while (0)
+#endif
+
 static Arena arena_console = {0};
 static Arena arena_docs = {0};
 static Arena arena_io = {0};
 static Arena arena_iocp_thread = {0};
+
+array_struct(uint8_t) utf8_buf = {0};
+
+#ifdef _WIN32
+array_define(UTF16_Buffer, wchar_t);
+static UTF16_Buffer utf16_buf_raw = {0};
+static UTF16_Buffer utf16_buf_norm = {0};
+
+static inline int32_t utf16_to_utf8(const wchar_t *wstr) {
+  // https://learn.microsoft.com/en-us/windows/win32/api/stringapiset/nf-stringapiset-widechartomultibyte
+  assert(utf8_buf.items);
+  assert(wstr);
+  // because cchWideChar is set to -1, the output is null-terminated (and len includes it)
+  // n_bytes represents the char count needed
+  const int32_t n_bytes = WideCharToMultiByte(CP_UTF8, 0, wstr, -1, NULL, 0, NULL, NULL);
+  assert(n_bytes);
+  array_resize(&arena_console, &utf8_buf, (uint32_t)n_bytes);
+  return WideCharToMultiByte(CP_UTF8, 0, wstr, -1, (char *)utf8_buf.items, n_bytes, NULL, NULL);
+}
+
+static inline int32_t utf8_to_utf16_raw(const char *str) {
+  // https://learn.microsoft.com/en-us/windows/win32/api/stringapiset/nf-stringapiset-multibytetowidechar
+  assert(utf16_buf_raw.items);
+  assert(str);
+  // because cbMultiByte is set to -1, the output is null-terminated (and len includes it)
+  // n_chars represents the wchar_t count needed
+  const int32_t n_chars = MultiByteToWideChar(CP_UTF8, 0, str, -1, NULL, 0);
+  assert(n_chars);
+  array_resize(&arena_console, &utf16_buf_raw, (uint32_t)n_chars);
+  return MultiByteToWideChar(CP_UTF8, 0, str, -1, utf16_buf_raw.items, n_chars);
+}
+
+static inline int32_t utf8_to_utf16_nraw(const char *str, int32_t len) {
+  assert(utf16_buf_raw.items);
+  assert(str);
+  // process len bytes, with n_chars not including null terminator
+  const int32_t n_chars = MultiByteToWideChar(CP_UTF8, 0, str, len, NULL, 0);
+  assert(n_chars);
+  array_resize(&arena_console, &utf16_buf_raw, (uint32_t)n_chars);
+  return MultiByteToWideChar(CP_UTF8, 0, str, len, utf16_buf_raw.items, n_chars);
+}
+
+static inline int32_t utf16_norm(const wchar_t *str) {
+  // n_chars represents the possibly updated wchar_t count needed
+  const int32_t n_chars = LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE,
+                                        str, -1, NULL, 0, NULL, NULL, 0);
+  assert(n_chars);
+  array_resize(&arena_console, &utf16_buf_norm, (uint32_t)n_chars);
+  return LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE, str,
+                       -1, utf16_buf_norm.items, n_chars, NULL, NULL, 0);
+}
+
+static inline int32_t utf8_to_utf16_norm(const char *str) {
+  const int32_t len = utf8_to_utf16_raw(str);
+  assert(len);
+  return utf16_norm(utf16_buf_raw.items);
+}
+#endif
 
 // https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
 // A path can have 248 "characters" (260 - 12 = 248)
@@ -751,36 +812,115 @@ static struct REPL {
   HANDLE out;
   HANDLE in;
   HANDLE window;
-  uint32_t msg_index;
+  DWORD msg_index;
   COORD home;
   CONSOLE_CURSOR_INFO cursor_info;
-  uint32_t dwSize_X;
-  uint32_t _filled;
-  uint32_t in_mode;
+  DWORD dwSize_X;
+  DWORD _filled;
+  DWORD in_mode;
   int32_t viewport_bound;
 } repl = {0};
 
 static struct Console_Preview {
   array_struct_members(wchar_t);
-  uint32_t prev_len;
-  uint32_t len;
+  DWORD prev_len;
+  DWORD len;
   COORD pos;
 } preview = {0};
 
-static array_struct(wchar_t) wwrite_buf = {0};
 static array_struct(char) write_buf = {0};
 
-static inline void wswrite(const wchar_t *str) {
+#ifdef _WIN32
+static inline void cin_wwrite_utf8(const char *str, uint32_t len) {
+  const int32_t len_i32 = utf8_to_utf16_nraw(str, (int32_t)len);
+  assert(len_i32 > 0);
+  wchar_t *utf16_str = utf16_buf_raw.items;
+  WriteConsoleW(repl.out, utf16_str, (uint32_t)len_i32, NULL, NULL);
+}
+#endif
+
+static inline void cin_write(const char *str, uint32_t len) {
+#ifdef _WIN32
+  cin_wwrite_utf8(str, len);
+#else
+  write(repl.out, str, len);
+#endif
+}
+
+static inline void cin_swrite(const char *str) {
+  assert(strlen(str) <= SIZE_MAX && "Corrupted string");
+  const size_t len = strlen(str);
+#ifdef _WIN32
+  cin_wwrite_utf8(str, (uint32_t)len);
+#else
+  write(repl.out, str, len);
+#endif
+}
+
+#ifdef __GNUC__
+#define PRINTF_ATTR(fmt, arg) __attribute__((format(printf, fmt, arg)))
+#else
+#define PRINTF_ATTR(fmt, arg)
+#endif
+
+static void PRINTF_ATTR(1, 2) cin_writef(const char *format, ...) {
+  va_list args;
+  va_list args_dup;
+  va_start(args, format);
+  va_copy(args_dup, args);
+#ifdef _WIN32
+  const int32_t len_i32 = _vscprintf(format, args);
+#else
+  const int32_t len_i32 = vsnprintf(NULL, 0, format, args);
+#endif
+  assert(len_i32 >= 0);
+  const uint32_t len = (uint32_t)len_i32;
+  va_end(args);
+  array_resize(&arena_console, &write_buf, len + 1);
+#ifdef _WIN32
+  _vsnprintf_s(write_buf.items, len + 1, len, format, args_dup);
+  va_end(args_dup);
+  cin_wwrite_utf8(write_buf.items, len);
+#else
+  vsnprintf(write_buf.items, len + 1, format, args_dup);
+  va_end(args_dup);
+#endif
+}
+
+static void PRINTF_ATTR(1, 0) cin_vwritef(const char *format, va_list args) {
+  va_list args_dup;
+  va_copy(args_dup, args);
+#ifdef _WIN32
+  const int32_t len_i32 = _vscprintf(format, args_dup);
+#else
+  const int32_t len_i32 = vsnprintf(NULL, 0, format, args_dup);
+#endif
+  assert(len_i32 >= 0);
+  const uint32_t len = (uint32_t)len_i32;
+  va_end(args_dup);
+  array_resize(&arena_console, &write_buf, len + 1);
+#ifdef _WIN32
+  _vsnprintf_s(write_buf.items, len + 1, len, format, args);
+  cin_wwrite_utf8(write_buf.items, len);
+#else
+  vsnprintf(write_buf.items, len + 1, format, args);
+#endif
+}
+
+#ifdef _WIN32
+static array_struct(wchar_t) wwrite_buf = {0};
+
+static inline void cin_wwrite(const wchar_t *str, uint32_t len) {
+  WriteConsoleW(repl.out, str, len, NULL, NULL);
+}
+
+static inline void cin_wswrite(const wchar_t *str) {
   assert(wcslen(str) <= SIZE_MAX && "Corrupted string");
   const size_t len = wcslen(str);
   WriteConsoleW(repl.out, str, (uint32_t)len, NULL, NULL);
 }
 
-static inline void wwrite(const wchar_t *str, uint32_t len) {
-  WriteConsoleW(repl.out, str, len, NULL, NULL);
-}
-
-static void wwritef(const wchar_t *format, ...) {
+static void cin_wwritef(const wchar_t *format, ...) {
   va_list args;
   va_list args_dup;
   va_start(args, format);
@@ -795,7 +935,7 @@ static void wwritef(const wchar_t *format, ...) {
   WriteConsoleW(repl.out, wwrite_buf.items, len, NULL, NULL);
 }
 
-static void wvwritef(const wchar_t *format, va_list args) {
+static void cin_wvwritef(const wchar_t *format, va_list args) {
   va_list args_dup;
   va_copy(args_dup, args);
   const int32_t len_i32 = _vscwprintf(format, args_dup);
@@ -806,43 +946,7 @@ static void wvwritef(const wchar_t *format, va_list args) {
   _vsnwprintf_s(wwrite_buf.items, len + 1, len, format, args);
   WriteConsoleW(repl.out, wwrite_buf.items, len, NULL, NULL);
 }
-
-static inline void swrite(const char *str) {
-  assert(strlen(str) <= SIZE_MAX && "Corrupted string");
-  const size_t len = strlen(str);
-  WriteConsoleA(repl.out, str, (uint32_t)len, NULL, NULL);
-}
-
-static inline void write(const char *str, uint32_t len) {
-  WriteConsoleA(repl.out, str, len, NULL, NULL);
-}
-
-static void writef(const char *format, ...) {
-  va_list args;
-  va_list args_dup;
-  va_start(args, format);
-  va_copy(args_dup, args);
-  const int32_t len_i32 = _vscprintf(format, args);
-  assert(len_i32 >= 0);
-  const uint32_t len = (uint32_t)len_i32;
-  va_end(args);
-  array_resize(&arena_console, &write_buf, len + 1);
-  _vsnprintf_s(write_buf.items, len + 1, len, format, args_dup);
-  va_end(args_dup);
-  WriteConsoleA(repl.out, write_buf.items, len, NULL, NULL);
-}
-
-static void vwritef(const char *format, va_list args) {
-  va_list args_dup;
-  va_copy(args_dup, args);
-  const int32_t len_i32 = _vscprintf(format, args_dup);
-  assert(len_i32 >= 0);
-  const uint32_t len = (uint32_t)len_i32;
-  va_end(args_dup);
-  array_resize(&arena_console, &write_buf, len + 1);
-  _vsnprintf_s(write_buf.items, len + 1, len, format, args);
-  WriteConsoleA(repl.out, write_buf.items, len, NULL, NULL);
-}
+#endif
 
 #define cin_strlen(str) (sizeof((str)) / sizeof(*(str)) - 1)
 #define CIN_SPACE 0x20
@@ -969,11 +1073,11 @@ static inline int32_t GetConsoleScreenBufferInfo_safe(HANDLE hConsoleOutput, PCO
   if (fresh_buffer == INVALID_HANDLE_VALUE) return FALSE;
   if (!SetConsoleScreenBufferSize(fresh_buffer, lpConsoleScreenBufferInfo->dwSize)) return FALSE;
   if (!SetConsoleActiveScreenBuffer(fresh_buffer)) return FALSE;
-  uint32_t mode;
+  DWORD mode;
   GetConsoleMode(fresh_buffer, &mode);
   SetConsoleMode(fresh_buffer, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
-  uint32_t written;
-  WriteConsoleA(fresh_buffer, "\x1b[2J\x1b[3J\x1b[H", 12, &written, NULL);
+  DWORD written;
+  WriteConsoleW(fresh_buffer, L"\x1b[2J\x1b[3J\x1b[H", 12, &written, NULL);
   SetConsoleMode(fresh_buffer, mode);
   repl.out = fresh_buffer;
   repl.dwSize_X = max_x;
@@ -984,22 +1088,22 @@ static inline int32_t GetConsoleScreenBufferInfo_safe(HANDLE hConsoleOutput, PCO
   if (msg_tail >= max_y) {
     repl.msg_index = 0;
     array_clear(repl.msg);
-    wwritef(L"NOTE: Input message too large (tail at line %hd >= console"
-            " screen buffer height limit %hd). Cinema resolved this by fully"
-            " clearing your input. Your console terminal supports roughly"
-            " %lu characters (cells)." WCRLF,
-            msg_tail, max_y, max_x * (uint32_t)max_y);
+    cin_wwritef(L"NOTE: Input message too large (tail at line %hd >= console"
+                " screen buffer height limit %hd). Cinema resolved this by fully"
+                " clearing your input. Your console terminal supports roughly"
+                " %lu characters (cells)." WCRLF,
+                msg_tail, max_y, max_x * (uint32_t)max_y);
   }
   static bool notify_buffer_refresh = true;
   if (notify_buffer_refresh) {
-    wwritef(L"NOTE: Console screen buffer height limit reached (%hd>=%hd)."
-            " Cinema resolved this by activating a fresh buffer. The content of"
-            " the previous buffer will be available once Cinema is closed."
-            " If you want to prevent this situation in the future, increase"
-            " the screen buffer size (height) of your console." WCRLF,
-            cur_y, max_y);
+    cin_wwritef(L"NOTE: Console screen buffer height limit reached (%hd>=%hd)."
+                " Cinema resolved this by activating a fresh buffer. The content of"
+                " the previous buffer will be available once Cinema is closed."
+                " If you want to prevent this situation in the future, increase"
+                " the screen buffer size (height) of your console." WCRLF,
+                cur_y, max_y);
   } else {
-    wwritef(L"Cut off? Increase console size and retry");
+    cin_wwritef(L"Cut off? Increase console size and retry");
   }
   notify_buffer_refresh = false;
   if (!GetConsoleScreenBufferInfo(repl.out, lpConsoleScreenBufferInfo)) return FALSE;
@@ -1075,7 +1179,7 @@ static void log_preview(void) {
   // set cursor to scroll down (and prep next write if < repl.dwSize_X)
   SetConsoleCursorPosition(repl.out, preview.pos);
   if (msg_len < repl.dwSize_X) {
-    wwrite(preview.items, msg_len);
+    cin_wwrite(preview.items, msg_len);
   } else if (msg_len > repl.dwSize_X) {
     assert(msg_len > 3);
     const uint32_t tmp1_pos = repl.dwSize_X - 1;
@@ -1121,16 +1225,16 @@ static inline void rewrite_post_log(void) {
     const SHORT x = index_x_repl(repl.msg->count);
     if (preview.len > (uint32_t)x) clear_preview(x);
   }
-  wwrite(WCRLF, WCRLF_LEN);
+  cin_wwrite(WCRLF, WCRLF_LEN);
   if (repl.viewport_bound) {
-    wwrite(WCRLF, WCRLF_LEN);
+    cin_wwrite(WCRLF, WCRLF_LEN);
     CONSOLE_SCREEN_BUFFER_INFO post_scroll_info;
     GetConsoleScreenBufferInfo(repl.out, &post_scroll_info);
     repl.home.Y = post_scroll_info.dwCursorPosition.Y - 1;
     SetConsoleCursorPosition(repl.out, (COORD){.X = 0, .Y = repl.home.Y});
   }
-  wwrite(PREFIX_STR, PREFIX_STRLEN);
-  wwrite(repl.msg->items, repl.msg->count);
+  cin_wwrite(PREFIX_STR, PREFIX_STRLEN);
+  cin_wwrite(repl.msg->items, repl.msg->count);
   const SHORT preview_offset = (SHORT)((repl.msg->count + PREFIX) / repl.dwSize_X) + 1;
   const SHORT preview_line = repl.home.Y + preview_offset;
   set_preview_pos(preview_line);
@@ -1147,70 +1251,13 @@ static void log_message(Cin_Log_Level level, const char *message, ...) {
   EnterCriticalSection(&log_lock);
   hide_cursor();
   cursor_home();
-  writef(CR "[%s] ", LOG_LEVELS[level]);
+  cin_writef(CR "[%s] ", LOG_LEVELS[level]);
   va_list args;
   va_start(args, message);
-  vwritef(message, args);
+  cin_vwritef(message, args);
   rewrite_post_log();
   va_end(args);
   LeaveCriticalSection(&log_lock);
-}
-
-array_define(UTF16_Buffer, wchar_t);
-array_define(UTF8_Buffer, uint8_t);
-
-static UTF16_Buffer utf16_buf_raw = {0};
-static UTF16_Buffer utf16_buf_norm = {0};
-static UTF8_Buffer utf8_buf = {0};
-
-static inline int32_t utf16_to_utf8(const wchar_t *wstr) {
-  // https://learn.microsoft.com/en-us/windows/win32/api/stringapiset/nf-stringapiset-widechartomultibyte
-  assert(utf8_buf.items);
-  assert(wstr);
-  // because cchWideChar is set to -1, the output is null-terminated (and len includes it)
-  // n_bytes represents the char count needed
-  const int32_t n_bytes = WideCharToMultiByte(CP_UTF8, 0, wstr, -1, NULL, 0, NULL, NULL);
-  assert(n_bytes);
-  array_resize(&arena_console, &utf8_buf, (uint32_t)n_bytes);
-  return WideCharToMultiByte(CP_UTF8, 0, wstr, -1, (char *)utf8_buf.items, n_bytes, NULL, NULL);
-}
-
-static inline int32_t utf8_to_utf16_raw(const char *str) {
-  // https://learn.microsoft.com/en-us/windows/win32/api/stringapiset/nf-stringapiset-multibytetowidechar
-  assert(utf16_buf_raw.items);
-  assert(str);
-  // because cbMultiByte is set to -1, the output is null-terminated (and len includes it)
-  // n_chars represents the wchar_t count needed
-  const int32_t n_chars = MultiByteToWideChar(CP_UTF8, 0, str, -1, NULL, 0);
-  assert(n_chars);
-  array_resize(&arena_console, &utf16_buf_raw, (uint32_t)n_chars);
-  return MultiByteToWideChar(CP_UTF8, 0, str, -1, utf16_buf_raw.items, n_chars);
-}
-
-static inline int32_t utf8_to_utf16_nraw(const char *str, int32_t len) {
-  assert(utf16_buf_raw.items);
-  assert(str);
-  // process len bytes, with n_chars not including null terminator
-  const int32_t n_chars = MultiByteToWideChar(CP_UTF8, 0, str, len, NULL, 0);
-  assert(n_chars);
-  array_resize(&arena_console, &utf16_buf_raw, (uint32_t)n_chars);
-  return MultiByteToWideChar(CP_UTF8, 0, str, len, utf16_buf_raw.items, n_chars);
-}
-
-static inline int32_t utf16_norm(const wchar_t *str) {
-  // n_chars represents the possibly updated wchar_t count needed
-  const int32_t n_chars = LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE,
-                                        str, -1, NULL, 0, NULL, NULL, 0);
-  assert(n_chars);
-  array_resize(&arena_console, &utf16_buf_norm, (uint32_t)n_chars);
-  return LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE, str,
-                       -1, utf16_buf_norm.items, n_chars, NULL, NULL, 0);
-}
-
-static inline int32_t utf8_to_utf16_norm(const char *str) {
-  const int32_t len = utf8_to_utf16_raw(str);
-  assert(len);
-  return utf16_norm(utf16_buf_raw.items);
 }
 
 static void log_wmessage(Cin_Log_Level level, const wchar_t *wmessage, ...) {
@@ -1220,10 +1267,10 @@ static void log_wmessage(Cin_Log_Level level, const wchar_t *wmessage, ...) {
   EnterCriticalSection(&log_lock);
   hide_cursor();
   cursor_home();
-  writef(CR "[%s] ", LOG_LEVELS[level]);
+  cin_writef(CR "[%s] ", LOG_LEVELS[level]);
   va_list args;
   va_start(args, wmessage);
-  wvwritef(wmessage, args);
+  cin_wvwritef(wmessage, args);
   rewrite_post_log();
   va_end(args);
   LeaveCriticalSection(&log_lock);
@@ -1234,7 +1281,7 @@ static void wwrite_safe(const wchar_t *str, uint32_t len) {
   clear_preview(0);
   hide_cursor();
   cursor_home();
-  wwrite(str, len);
+  cin_wwrite(str, len);
   rewrite_post_log();
   LeaveCriticalSection(&log_lock);
 }
@@ -1246,7 +1293,7 @@ static void log_last_error(const char *message, ...) {
   EnterCriticalSection(&log_lock);
   LPVOID buffer = NULL;
   uint32_t code = GetLastError();
-  if (!FormatMessageA(dw_flags, NULL, code, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPTSTR)&buffer, 0, NULL)) {
+  if (!FormatMessageW(dw_flags, NULL, code, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPWSTR)&buffer, 0, NULL)) {
     log_message(LOG_ERROR, "Failed to log GLE=%d - error with GLE=%d", code, GetLastError());
     return;
   }
@@ -1260,12 +1307,12 @@ static void log_last_error(const char *message, ...) {
   str[len - 2] = '\0';
   hide_cursor();
   cursor_home();
-  writef(CR "[%s] ", LOG_LEVELS[LOG_ERROR]);
+  cin_writef(CR "[%s] ", LOG_LEVELS[LOG_ERROR]);
   va_list args;
   va_start(args, message);
-  vwritef(message, args);
+  cin_vwritef(message, args);
   va_end(args);
-  writef(" - Code %lu: %s", code, (char *)buffer);
+  cin_writef(" - Code %lu: %s", code, (char *)buffer);
   rewrite_post_log();
   LocalFree(buffer);
   LeaveCriticalSection(&log_lock);
@@ -2710,7 +2757,7 @@ static bool init_config(const char *filename) {
   if (array_bytes(&docs) == CIN_ARENA_MAX) {
     // extremely rare case where we exceed INT_MAX by 1 byte,
     // instead of trying to fix it we force a crash
-    wwritef(L"Cinema crashed receiving too many file paths (exceeding %d bytes)", INT_MAX);
+    cin_wwritef(L"Cinema crashed receiving too many file paths (exceeding %d bytes)", INT_MAX);
     exit(1);
   }
   docs.bytes_mul32 = array_bytes(&docs) * (uint32_t)sizeof(int32_t);
@@ -3042,11 +3089,11 @@ static bool overlap_write(Instance *instance, MPV_Packet type, const char *cmd, 
 
 typedef struct Window_Data {
   union {
-    uint32_t pid;
+    DWORD pid;
     wchar_t *name;
     struct {
-      uint32_t *pids;
-      uint32_t count;
+      DWORD *pids;
+      DWORD count;
     };
   };
   HWND hwnd;
@@ -3054,7 +3101,7 @@ typedef struct Window_Data {
 
 static int32_t CALLBACK enum_windows_proc_pid(HWND hwnd, LPARAM lParam) {
   Window_Data *data = (Window_Data *)lParam;
-  uint32_t pid;
+  DWORD pid;
   GetWindowThreadProcessId(hwnd, &pid);
   if (pid == data->pid && IsWindow(hwnd)) {
     data->hwnd = hwnd;
@@ -3089,7 +3136,7 @@ static HWND find_window_by_name(wchar_t *name) {
 
 static int32_t CALLBACK enum_windows_proc_console(HWND hwnd, LPARAM lParam) {
   Window_Data *data = (Window_Data *)lParam;
-  uint32_t pid;
+  DWORD pid;
   GetWindowThreadProcessId(hwnd, &pid);
   for (uint32_t i = 0; i < data->count; i++) {
     if (pid == data->pids[i]) {
@@ -3103,10 +3150,10 @@ static int32_t CALLBACK enum_windows_proc_console(HWND hwnd, LPARAM lParam) {
 }
 
 static HWND find_window_of_console(void) {
-  array_struct(uint32_t) pids = {0};
-  uint32_t dwProcessCount = 16;
+  array_struct(DWORD) pids = {0};
+  DWORD dwProcessCount = 16;
   array_init(&arena_iocp_thread, &pids, dwProcessCount);
-  uint32_t actual_count = GetConsoleProcessList(pids.items, dwProcessCount);
+  DWORD actual_count = GetConsoleProcessList(pids.items, dwProcessCount);
   array_resize(&arena_iocp_thread, &pids, actual_count);
   if (actual_count > dwProcessCount) {
     dwProcessCount = actual_count;
@@ -3371,10 +3418,10 @@ static inline void iocp_parse(Instance *instance, const char *buf_start, size_t 
   }
 }
 
-static uint32_t WINAPI iocp_listener(LPVOID lp_param) {
+static DWORD WINAPI iocp_listener(LPVOID lp_param) {
   HANDLE iocp = (HANDLE)lp_param;
   for (;;) {
-    uint32_t bytes;
+    DWORD bytes;
     ULONG_PTR completion_key;
     OVERLAPPED *ovl;
     if (!GetQueuedCompletionStatus(iocp, &bytes, &completion_key, &ovl, INFINITE)) {
@@ -3503,15 +3550,15 @@ static inline bool init_repl(void) {
   array_init(&arena_console, &utf8_buf, CIN_MAX_PATH_BYTES);
   return true;
 code_page:
-  wswrite(L"Failed to modify console code page" WCRLF);
+  cin_swrite("Failed to modify console code page" CRLF);
   return false;
 handle_in:
-  wswrite(L"Failed to setup console input handle" WCRLF);
+  cin_swrite("Failed to setup console input handle" CRLF);
   return false;
 handle_out:
-  wswrite(L"Failed to setup console output handle" WCRLF);
+  cin_swrite("Failed to setup console output handle" CRLF);
 memory:
-  wswrite(L"Failed to allocate memory for repl/console" WCRLF);
+  cin_swrite("Failed to allocate memory for repl/console" CRLF);
   return false;
 }
 
@@ -5157,7 +5204,7 @@ int main(int argc, char **argv) {
   for (;;) {
     show_cursor();
     INPUT_RECORD input;
-    uint32_t read;
+    DWORD read;
     if (!ReadConsoleInputW(repl.in, &input, 1, &read)) {
       log_last_error("Failed to read console input");
       break;
@@ -5239,16 +5286,17 @@ int main(int argc, char **argv) {
       const uint32_t leftover = repl.msg->count - repl.msg_index;
       clear_tail(deleted);
       if (leftover) {
-        wwrite(repl.msg->items + repl.msg_index, leftover);
+        cin_wwrite(repl.msg->items + repl.msg_index, leftover);
         cursor_curr();
       }
     } break;
     case VK_DELETE: {
       if (repl.msg_index == repl.msg->count) continue;
-      uint32_t right = repl.msg_index;
+      DWORD right = repl.msg_index;
       if (ctrl_on(&input)) {
         while (right < repl.msg->count && repl.msg->items[right] != CIN_SPACE) ++right;
-        while (right < repl.msg->count && repl.msg->items[++right] == CIN_SPACE) (void);
+        while (right < repl.msg->count && repl.msg->items[++right] == CIN_SPACE) {
+        };
       } else {
         ++right;
       }
@@ -5258,7 +5306,7 @@ int main(int argc, char **argv) {
       clear_tail(deleted);
       if (leftover) {
         wmemmove(&repl.msg->items[repl.msg_index], &repl.msg->items[right], leftover);
-        wwrite(repl.msg->items + repl.msg_index, leftover);
+        cin_wwrite(repl.msg->items + repl.msg_index, leftover);
         cursor_curr();
       }
     } break;
@@ -5272,7 +5320,7 @@ int main(int argc, char **argv) {
       repl.msg->prev = repl.msg->prev->prev;
       if (repl.msg->count < prev_count) clear_tail(prev_count - repl.msg->count);
       cursor_home();
-      wwrite(repl.msg->items, repl.msg->count);
+      cin_wwrite(repl.msg->items, repl.msg->count);
     } break;
     case VK_DOWN: {
       if (repl.msg->next) {
@@ -5282,7 +5330,7 @@ int main(int argc, char **argv) {
         wmemcpy(repl.msg->items, repl.msg->next->items, repl.msg->next->count);
         if (repl.msg->count < prev_count) clear_tail(prev_count - repl.msg->count);
         cursor_home();
-        wwrite(repl.msg->items, repl.msg->count);
+        cin_wwrite(repl.msg->items, repl.msg->count);
         repl.msg->prev = repl.msg->next->prev;
         repl.msg->next = repl.msg->next->next;
         repl.msg_index = repl.msg->count;
@@ -5305,7 +5353,7 @@ int main(int argc, char **argv) {
       repl.msg->next = head->next;
       if (repl.msg->count < prev_count) clear_tail(prev_count - repl.msg->count);
       cursor_home();
-      wwrite(repl.msg->items, repl.msg->count);
+      cin_wwrite(repl.msg->items, repl.msg->count);
     } break;
     case VK_NEXT: {
       if (msg_tail) {
@@ -5315,7 +5363,7 @@ int main(int argc, char **argv) {
         wmemcpy(repl.msg->items, msg_tail->items, msg_tail->count);
         if (repl.msg->count < prev_count) clear_tail(prev_count - repl.msg->count);
         cursor_home();
-        wwrite(repl.msg->items, repl.msg->count);
+        cin_wwrite(repl.msg->items, repl.msg->count);
         repl.msg->prev = msg_tail->prev;
         repl.msg->next = msg_tail->next;
         repl.msg_index = repl.msg->count;
@@ -5340,7 +5388,8 @@ int main(int argc, char **argv) {
       if (repl.msg_index < repl.msg->count) {
         if (ctrl_on(&input)) {
           while (repl.msg_index < repl.msg->count && repl.msg->items[repl.msg_index] != CIN_SPACE) ++repl.msg_index;
-          while (repl.msg_index < repl.msg->count && repl.msg->items[++repl.msg_index] == CIN_SPACE) (void);
+          while (repl.msg_index < repl.msg->count && repl.msg->items[++repl.msg_index] == CIN_SPACE) {
+          };
         } else {
           ++repl.msg_index;
         }
@@ -5366,7 +5415,7 @@ int main(int argc, char **argv) {
         array_wsplice(&arena_console, repl.msg, repl.msg_index, surrogates + 2, 2);
         repl.msg_index -= 2;
         cursor_curr();
-        wwrite(repl.msg->items + repl.msg_index, repl.msg->count - repl.msg_index);
+        cin_wwrite(repl.msg->items + repl.msg_index, repl.msg->count - repl.msg_index);
         repl.msg_index += 4;
         cursor_curr();
         surrogate_count = 0;
@@ -5375,7 +5424,7 @@ int main(int argc, char **argv) {
         assert(IS_LOW_SURROGATE(c));
         surrogates[surrogate_count++] = c;
         array_wsplice(&arena_console, repl.msg, repl.msg_index, surrogates, 2);
-        wwrite(repl.msg->items + repl.msg_index, repl.msg->count - repl.msg_index);
+        cin_wwrite(repl.msg->items + repl.msg_index, repl.msg->count - repl.msg_index);
         repl.msg_index += 2;
         cursor_curr();
       } else {
@@ -5386,7 +5435,7 @@ int main(int argc, char **argv) {
           assert(!IS_LOW_SURROGATE(c));
           c = cin_wlower(c);
           array_winsert(&arena_console, repl.msg, repl.msg_index, c);
-          wwrite(repl.msg->items + repl.msg_index, repl.msg->count - repl.msg_index);
+          cin_wwrite(repl.msg->items + repl.msg_index, repl.msg->count - repl.msg_index);
           ++repl.msg_index;
           cursor_curr();
           surrogate_count = 0;
