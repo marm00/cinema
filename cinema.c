@@ -112,7 +112,7 @@ static inline bool init_os(void) {
 #define max(a, b) (((a) > (b)) ? (a) : (b))
 #endif
 
-#define align(a, b) (((a) + (b)-1) & (~((b)-1)))
+#define align(a, b) (((a) + (b) - 1) & (~((b) - 1)))
 #define CIN_PTR ((uint32_t)__SIZEOF_POINTER__)
 #define align_size(T) max(CIN_PTR, __alignof(T))
 #define align_to_size(n) align((n), CIN_PTR)
@@ -125,7 +125,7 @@ static inline bool init_os(void) {
 #define gigabytes(n) ((n) << 30)
 #define CIN_ARENA_CAP megabytes(2)
 #define CIN_ARENA_BYTES align(sizeof(Arena), 64)
-#define cin_ispow2(n) ((n) && ((n) & ((n)-1)) == 0)
+#define cin_ispow2(n) ((n) && ((n) & ((n) - 1)) == 0)
 
 static inline uint32_t log2_floor(uint32_t n) {
   assert(n > 0U && "0 is undefined behavior");
@@ -596,6 +596,10 @@ static_assert(CIN_PTR == 8 ? (CIN_ARRAY_SIZE == 24) : true, "bytes updated (poss
 #define array_extend_zero(arena, a, new_items, n) \
   array_extend_core((arena), (a), (new_items), (n), true)
 
+#define array_sextend(arena, a, new_items) \
+  array_extend((arena), (a), (new_items),  \
+               sizeof((new_items)) / sizeof(*((new_items))) - 1)
+
 #define array_splice(arena, a, i, new_items, n)                       \
   do {                                                                \
     assert((i) <= (a)->count);                                        \
@@ -685,7 +689,7 @@ static_assert(CIN_PTR == 8 ? (CIN_ARRAY_SIZE == 24) : true, "bytes updated (poss
 
 #define array_wsextend(arena, a, new_items) \
   array_wextend((arena), (a), (new_items),  \
-                sizeof((new_items)) / sizeof(*((new_items))) - 1);
+                sizeof((new_items)) / sizeof(*((new_items))) - 1)
 
 #define array_wsplice(arena, a, i, new_items, n)                          \
   do {                                                                    \
@@ -773,7 +777,7 @@ static inline int32_t utf8_to_utf16_norm(const char *str) {
 
 static inline int32_t utf8_norm(char *str) {
   int32_t len = 0;
-  for (; *str; ++len, ++str) *str = tolower(*str);
+  for (; *str; ++len, ++str) *str = (char)tolower(*str);
   return len;
 }
 
@@ -828,7 +832,7 @@ static struct REPL {
 } repl = {0};
 
 static struct Console_Preview {
-  array_struct_members(wchar_t);
+  array_struct_members(char);
   DWORD prev_len;
   DWORD len;
   COORD pos;
@@ -856,11 +860,7 @@ static inline void cin_write(const char *str, uint32_t len) {
 static inline void cin_swrite(const char *str) {
   assert(strlen(str) <= SIZE_MAX && "Corrupted string");
   const size_t len = strlen(str);
-#ifdef _WIN32
-  cin_wwrite_utf8(str, (uint32_t)len);
-#else
-  write(repl.out, str, len);
-#endif
+  cin_write(str, (uint32_t)len);
 }
 
 #ifdef __GNUC__
@@ -874,43 +874,32 @@ static void PRINTF_ATTR(1, 2) cin_writef(const char *format, ...) {
   va_list args_dup;
   va_start(args, format);
   va_copy(args_dup, args);
-#ifdef _WIN32
-  const int32_t len_i32 = _vscprintf(format, args);
-#else
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wformat-nonliteral"
   const int32_t len_i32 = vsnprintf(NULL, 0, format, args);
-#endif
   assert(len_i32 >= 0);
   const uint32_t len = (uint32_t)len_i32;
   va_end(args);
   array_resize(&arena_console, &write_buf, len + 1);
-#ifdef _WIN32
-  _vsnprintf_s(write_buf.items, len + 1, len, format, args_dup);
-  va_end(args_dup);
-  cin_wwrite_utf8(write_buf.items, len);
-#else
   vsnprintf(write_buf.items, len + 1, format, args_dup);
+#pragma clang diagnostic pop
   va_end(args_dup);
-#endif
+  cin_write(write_buf.items, len);
 }
 
 static void PRINTF_ATTR(1, 0) cin_vwritef(const char *format, va_list args) {
   va_list args_dup;
   va_copy(args_dup, args);
-#ifdef _WIN32
-  const int32_t len_i32 = _vscprintf(format, args_dup);
-#else
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wformat-nonliteral"
   const int32_t len_i32 = vsnprintf(NULL, 0, format, args_dup);
-#endif
   assert(len_i32 >= 0);
   const uint32_t len = (uint32_t)len_i32;
   va_end(args_dup);
   array_resize(&arena_console, &write_buf, len + 1);
-#ifdef _WIN32
-  _vsnprintf_s(write_buf.items, len + 1, len, format, args);
-  cin_wwrite_utf8(write_buf.items, len);
-#else
   vsnprintf(write_buf.items, len + 1, format, args);
-#endif
+#pragma clang diagnostic pop
+  cin_write(write_buf.items, len);
 }
 
 #ifdef _WIN32
@@ -1185,28 +1174,30 @@ static void log_preview(void) {
   if (!preview.count) return;
   const uint32_t msg_len = preview.count;
   preview.len = min(preview.count, repl.dwSize_X);
-  assert(wmemchr(preview.items, PREFIX_TOKEN, preview.len) == NULL);
+  // TODO: assert(memchr(preview.items, PREFIX_TOKEN, preview.len) == NULL);
   // set cursor to scroll down (and prep next write if < repl.dwSize_X)
   SetConsoleCursorPosition(repl.out, preview.pos);
   if (msg_len < repl.dwSize_X) {
-    cin_wwrite(preview.items, msg_len);
+    cin_write(preview.items, msg_len);
   } else if (msg_len > repl.dwSize_X) {
     assert(msg_len > 3);
     const uint32_t tmp1_pos = repl.dwSize_X - 1;
     const uint32_t tmp2_pos = repl.dwSize_X - 2;
     const uint32_t tmp3_pos = repl.dwSize_X - 3;
-    const wchar_t tmp1 = preview.items[tmp1_pos];
-    const wchar_t tmp2 = preview.items[tmp2_pos];
-    const wchar_t tmp3 = preview.items[tmp3_pos];
+    const char tmp1 = preview.items[tmp1_pos];
+    const char tmp2 = preview.items[tmp2_pos];
+    const char tmp3 = preview.items[tmp3_pos];
     preview.items[tmp1_pos] = '.';
     preview.items[tmp2_pos] = '.';
     preview.items[tmp3_pos] = '.';
-    WriteConsoleOutputCharacterW(repl.out, preview.items, preview.len, preview.pos, &repl._filled);
+    utf8_to_utf16_nraw(preview.items, (int32_t)preview.len);
+    WriteConsoleOutputCharacterW(repl.out, utf16_buf_raw.items, preview.len, preview.pos, &repl._filled);
     preview.items[tmp1_pos] = tmp1;
     preview.items[tmp2_pos] = tmp2;
     preview.items[tmp3_pos] = tmp3;
   } else {
-    WriteConsoleOutputCharacterW(repl.out, preview.items, preview.len, preview.pos, &repl._filled);
+    utf8_to_utf16_nraw(preview.items, (int32_t)preview.len);
+    WriteConsoleOutputCharacterW(repl.out, utf16_buf_raw.items, preview.len, preview.pos, &repl._filled);
   }
   FillConsoleOutputAttribute(repl.out, FOREGROUND_INTENSITY, preview.len, preview.pos, &repl._filled);
   cursor_curr();
@@ -2277,7 +2268,7 @@ typedef struct Cin_Layout {
 } Cin_Layout;
 
 typedef struct Cin_Macro {
-  array_struct_members(wchar_t);
+  array_struct_members(char);
 } Cin_Macro;
 
 static struct {
@@ -2313,33 +2304,38 @@ static Radix_Tree *tag_tree = NULL;
 static Radix_Tree *layout_tree = NULL;
 static Radix_Tree *macro_tree = NULL;
 
-static inline void setup_file_path(char *path, int32_t *len) {
-  assert(len);
-  for (char *p = path; *p; ++p) {
-    if (*p == '\\') {
-      *p++ = '/';
-      char *dups = p;
-      while (*dups == '\\') ++dups;
-      if (p != dups) {
-        const ptrdiff_t removed = dups - p;
-        const ptrdiff_t pos = dups - path;
-        assert((size_t)*len >= (size_t)pos);
-        const size_t remainder = (size_t)*len - (size_t)pos;
-        memcpy(p, dups, remainder);
-        p = dups;
-        *len -= (int32_t)removed;
-      }
-    }
-  }
-  *(path + (size_t)*len) = '\0';
-}
-
-static void setup_directory(char *path, Tag_Directories *tag_dirs) {
-  int32_t len_utf16 = utf8_norm(path);
 #ifdef _WIN32
-  setup_file_path(path, &len_utf16);
+#define DEFINE_SETUP_FILE_PATH(T, backward, forward, terminator, memcpy_fn) \
+  static inline void setup_file_path_##T(T *path, int32_t *len) {           \
+    assert(len);                                                            \
+    for (T *p = path; *p; ++p) {                                            \
+      if (*p == backward) {                                                 \
+        *p++ = forward;                                                     \
+        T *dups = p;                                                        \
+        while (*dups == backward) ++dups;                                   \
+        if (p != dups) {                                                    \
+          const ptrdiff_t removed = dups - p;                               \
+          const ptrdiff_t pos = dups - path;                                \
+          assert((size_t)*len >= (size_t)pos);                              \
+          const size_t remainder = (size_t)*len - (size_t)pos;              \
+          memcpy_fn(p, dups, remainder);                                    \
+          p = dups;                                                         \
+          *len -= (int32_t)removed;                                         \
+        }                                                                   \
+      }                                                                     \
+    }                                                                       \
+    *(path + (size_t)*len) = terminator;                                    \
+  }
+
+DEFINE_SETUP_FILE_PATH(char, '\\', '/', '\0', memcpy)
+DEFINE_SETUP_FILE_PATH(wchar_t, L'\\', L'/', L'\0', wmemcpy)
 #endif
+
+static void setup_directory(const char *path, Tag_Directories *tag_dirs) {
+#ifdef _WIN32
+  int32_t len_utf16 = utf8_to_utf16_norm(path);
   assert(len_utf16);
+  setup_file_path_wchar_t(utf16_buf_norm.items, &len_utf16);
   const size_t len = (size_t)len_utf16;
   Directory_Path root_dir = {.len = len};
   wmemcpy(root_dir.path, utf16_buf_norm.items, len);
@@ -2450,15 +2446,19 @@ static void setup_directory(char *path, Tag_Directories *tag_dirs) {
     FindClose(search);
   }
   assert(dir_stack.count == 0);
+#else
+  // TODO: linux
+#endif
 }
 
 static inline void setup_pattern(const char *pattern, Tag_Pattern_Items *tag_pattern_items) {
+#ifdef _WIN32
   // Processes all files (not directories) that match the pattern
   // https://support.microsoft.com/en-us/office/examples-of-wildcard-characters-939e153f-bd30-47e4-a763-61897c87b3f4
   int32_t len_utf16 = utf8_to_utf16_norm(pattern);
   assert(len_utf16);
   assert(utf16_buf_norm.items[len_utf16 - 1] == L'\0');
-  setup_file_path(utf16_buf_norm.items, &len_utf16);
+  setup_file_path_wchar_t(utf16_buf_norm.items, &len_utf16);
   wchar_t *separator = wcsrchr(utf16_buf_norm.items, L'/');
   if (separator == NULL || *(separator + 1) == L'\0') {
     log_message(LOG_ERROR, "Not a valid pattern: '%s', end properly with '\\...'", pattern);
@@ -2473,7 +2473,7 @@ static inline void setup_pattern(const char *pattern, Tag_Pattern_Items *tag_pat
   utf16_buf_norm.items[dir_len] = L'\0';
   static wchar_t abs_buf[CIN_MAX_PATH];
   uint32_t abs_len = GetFullPathNameW(utf16_buf_norm.items, CIN_MAX_PATH, abs_buf, NULL);
-  setup_file_path(abs_buf, (int32_t *)&abs_len);
+  setup_file_path_wchar_t(abs_buf, (int32_t *)&abs_len);
   if (abs_len == 0 || abs_len > CIN_MAX_PATH) {
     log_wmessage(LOG_ERROR, L"Pattern '%ls' full path '%ls' is empty or too long (max=%d)",
                  pattern, abs_buf, CIN_MAX_PATH);
@@ -2524,6 +2524,9 @@ static inline void setup_pattern(const char *pattern, Tag_Pattern_Items *tag_pat
     log_last_error("Failed to find next file");
   }
   FindClose(search);
+#else
+  // TODO: linux?
+#endif
 }
 
 static inline void setup_url(const char *url, Tag_Url_Items *tag_url_items) {
@@ -2606,21 +2609,33 @@ static inline void setup_layout(const char *name, Cin_Layout *layout) {
   radix_insert(layout_tree, utf8_buf.items, len_utf8_u32, layout);
 }
 
-static inline void setup_macro(const char *name, Cin_Macro *macro, bool startup) {
+static inline void setup_macro(char *name, Cin_Macro *macro, bool startup) {
+#ifdef _WIN32
   const int32_t len_utf16 = utf8_to_utf16_norm(name);
   assert(len_utf16 > 1);
   const int32_t len_utf8 = utf16_to_utf8(utf16_buf_norm.items);
   assert(len_utf8 > 1);
-  const uint32_t len_utf8_u32 = (uint32_t)len_utf8;
-  radix_insert(macro_tree, utf8_buf.items, len_utf8_u32, macro);
+  radix_insert(macro_tree, utf8_buf.items, (uint32_t)len_utf8, macro);
+#else
+  const int32_t len = utf8_norm(name);
+  assert(len > 0);
+  radix_insert(macro_tree, (uint8_t *)name, (uint32_t)len, macro);
+#endif
   if (startup) array_push(&arena_console, &startup_macros, macro);
 }
 
-static inline void setup_macro_command(const char *command, Cin_Macro *macro) {
-  const int32_t len = utf8_to_utf16_norm(command);
+static inline void setup_macro_command(char *command, Cin_Macro *macro) {
+#ifdef _WIN32
+  const int32_t len_utf16 = utf8_to_utf16_norm(command);
+  assert(len_utf16 > 1);
+  const int32_t len = utf16_to_utf8(utf16_buf_norm.items);
   assert(len > 1);
   const uint32_t len_u32 = (uint32_t)len;
-  array_wextend(&arena_console, macro, utf16_buf_norm.items, len_u32);
+  array_extend(&arena_console, macro, utf8_buf.items, len_u32);
+#else
+  const int32_t len = utf8_norm(command) + 1;
+  array_extend(&arena_console, macro, command, len);
+#endif
 }
 
 #define FOREACH_PART(str, part)                                                     \
@@ -2782,7 +2797,7 @@ static bool init_config(const char *filename) {
 static bool reinit_documents(void) {
   const int32_t d_bytes = (int32_t)array_bytes(&docs);
   if (d_bytes == 0) {
-    log_wmessage(LOG_ERROR, L"media library is empty");
+    log_message(LOG_ERROR, "media library is empty");
     return false;
   }
   const int32_t remainder = (int32_t)docs.bytes_capacity - d_bytes;
@@ -3727,14 +3742,15 @@ static inline bool init_timers(void) {
 }
 
 #define COMMAND_NUMBERS_CAP 8
-#define COMMAND_ERROR_WMESSAGE L"ERROR: "
+#define COMMAND_ERROR_MESSAGE "ERROR: "
+#define COMMAND_ERROR_MESSAGE_LEN cin_strlen(COMMAND_ERROR_MESSAGE)
 
 typedef void (*cmd_validator)(void);
 typedef void (*cmd_executor)(void);
 
 array_define(Command_Numbers, size_t);
 array_define(Command_Help, char);
-array_define(Command_Targets, wchar_t);
+array_define(Command_Targets, char);
 
 static struct CommandContext {
   Patricia_Node *trie;
@@ -3749,68 +3765,71 @@ static struct CommandContext {
   Cin_Macro *macro;
 } cmd_ctx = {0};
 
-static inline void set_preview(bool success, const wchar_t *format, ...) {
+static inline void set_preview(bool success, const char *format, ...) {
   array_clear(&preview);
   if (!success) {
-    array_wsextend(&arena_console, &preview, COMMAND_ERROR_WMESSAGE);
+    array_extend(&arena_console, &preview, COMMAND_ERROR_MESSAGE, COMMAND_ERROR_MESSAGE_LEN);
   }
   const size_t start = preview.count;
   va_list args;
   va_list args_dup;
   va_start(args, format);
   va_copy(args_dup, args);
-  const int32_t len_i32 = _vscwprintf(format, args);
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wformat-nonliteral"
+  const int32_t len_i32 = vsnprintf(NULL, 0, format, args);
+#pragma clang diagnostic pop
   assert(len_i32 >= 0);
   const uint32_t len = (uint32_t)len_i32;
   va_end(args);
   array_grow(&arena_console, &preview, len + 1);
-  _vsnwprintf_s(preview.items + start, preview.capacity, len, format, args_dup);
+  vsnprintf_s(preview.items + start, preview.capacity, len, format, args_dup);
   va_end(args_dup);
 }
 
-#define CIN_SCREEN_SEPARATOR L", "
+#define CIN_SCREEN_SEPARATOR ", "
 #define CIN_SCREEN_SEPARATOR_LEN (sizeof(CIN_SCREEN_SEPARATOR) / sizeof(*CIN_SCREEN_SEPARATOR) - 1)
+#define FSTR_CIN_SCREEN "%zu" CIN_SCREEN_SEPARATOR
 
 static inline bool validate_screens(void) {
   const size_t n_count = cmd_ctx.numbers.count;
   const size_t screen_count = cmd_ctx.layout->count;
   if (n_count > screen_count) {
-    set_preview(false, L"layout only has %zu screens (%zu provided)", screen_count, n_count);
+    set_preview(false, "layout only has %zu screens (%zu provided)", screen_count, n_count);
     return false;
   }
   for (size_t i = 0; i < n_count; ++i) {
     const size_t screen_index = cmd_ctx.numbers.items[i] - 1;
     if (screen_index >= screen_count) {
-      set_preview(false, L"screen %zu not found, layout only has %zu screens",
+      set_preview(false, "screen %zu not found, layout only has %zu screens",
                   screen_index + 1, screen_count);
       return false;
     }
   }
   array_clear(&cmd_ctx.targets);
   if (!n_count) {
-    array_wsextend(&arena_console, &cmd_ctx.targets, L"(all screens)\0");
+    array_sextend(&arena_console, &cmd_ctx.targets, "(all screens)\0");
     for (size_t i = 0; i < cmd_ctx.layout->count; ++i) {
       array_push(&arena_console, &cmd_ctx.numbers, i + 1);
     }
   } else {
     if (n_count == 1) {
-      array_wsextend(&arena_console, &cmd_ctx.targets, L"(screen ");
+      array_sextend(&arena_console, &cmd_ctx.targets, "(screen ");
     } else {
-      array_wsextend(&arena_console, &cmd_ctx.targets, L"(screens ");
+      array_sextend(&arena_console, &cmd_ctx.targets, "(screens ");
     }
-    const wchar_t *v_str = L"%zu" CIN_SCREEN_SEPARATOR;
     for (size_t i = 0; i < n_count; ++i) {
       const size_t number = cmd_ctx.numbers.items[i];
-      const int32_t len_i32 = _scwprintf(v_str, number);
+      const int32_t len_i32 = _scprintf(FSTR_CIN_SCREEN, number);
       assert(len_i32);
       const uint32_t len = (uint32_t)len_i32 + 1;
       array_reserve(&arena_console, &cmd_ctx.targets, len);
-      swprintf(cmd_ctx.targets.items + cmd_ctx.targets.count, len, v_str, number);
+      snprintf(cmd_ctx.targets.items + cmd_ctx.targets.count, len, FSTR_CIN_SCREEN, number);
       cmd_ctx.targets.count += len - 1;
     }
     cmd_ctx.targets.count -= CIN_SCREEN_SEPARATOR_LEN;
-    array_push(&arena_console, &cmd_ctx.targets, L')');
-    cmd_ctx.targets.items[cmd_ctx.targets.count] = L'\0';
+    array_push(&arena_console, &cmd_ctx.targets, ')');
+    cmd_ctx.targets.items[cmd_ctx.targets.count] = '\0';
   }
   return true;
 }
@@ -3952,7 +3971,7 @@ static void mpv_spawn(Instance *instance, size_t index) {
            screen_utf8, CIN_MPVCALL_GEOMETRY_LEN);
     exit(1);
   }
-  sprintf(mpv_command + CIN_MPVCALL_LEN + digits, " --geometry=%.*s", len, screen_utf8);
+  snprintf(mpv_command + CIN_MPVCALL_LEN + digits, CIN_MPVCALL_GEOMETRY_LEN, " --geometry=%.*s", len, screen_utf8);
   log_message(LOG_DEBUG, "Spawning instance: %s", mpv_command);
 #ifdef _WIN32
   utf8_to_utf16_raw(mpv_command);
@@ -4037,7 +4056,7 @@ static void cmd_help_executor(void) {
 }
 
 static void cmd_help_validator(void) {
-  set_preview(true, L"help (show a list of all commands)");
+  set_preview(true, "help (show a list of all commands)");
   cmd_ctx.executor = cmd_help_executor;
 }
 
@@ -4078,20 +4097,18 @@ static void cmd_layout_validator(void) {
   const uint8_t *layout_name = NULL;
   if (cmd_ctx.unicode) {
     const size_t len = strlen(cmd_ctx.unicode);
-    layout = radix_query(layout_tree, (uint8_t *)cmd_ctx.unicode, len - 1, &layout_name);
+    layout = radix_query(layout_tree, (uint8_t *)cmd_ctx.unicode, len, &layout_name);
     if (!layout) {
-      set_preview(false, L"layout does not exist: '%ls'", cmd_ctx.unicode);
+      set_preview(false, "layout does not exist: '%s'", cmd_ctx.unicode);
       return;
     }
-    utf8_to_utf16_raw((char *)layout_name);
     assert(layout);
     assert(layout_name);
-    set_preview(true, L"change layout to '%s'", utf16_buf_raw.items);
+    set_preview(true, "change layout to '%s'", (char *)layout_name);
   } else {
     Cin_Layout *curr = cmd_ctx.layout;
     char *curr_name = (char *)layout_strings.items + curr->name_offset;
-    utf8_to_utf16_nraw(curr_name, (int32_t)curr->name_len);
-    set_preview(true, L"reset layout '%s'", utf16_buf_raw.items);
+    set_preview(true, "reset layout '%s'", curr_name);
     layout = curr;
   }
   cmd_ctx.queued_layout = (Cin_Layout *)layout;
@@ -4112,13 +4129,13 @@ static void cmd_reroll_executor(void) {
 
 static void cmd_reroll_validator(void) {
   if (!validate_screens()) return;
-  set_preview(true, L"reroll %s", cmd_ctx.targets.items);
+  set_preview(true, "reroll %s", cmd_ctx.targets.items);
   cmd_ctx.executor = cmd_reroll_executor;
 }
 
 static cmd_validator parse_command(const char *command) {
   // Grammar rules:
-  // 1. First character must be either empty or in L'a'..L'z' (letter) or in L'1'..L'9' (digit)
+  // 1. First character must be either empty or in 'a'..'z' (letter) or in '1'..'9' (digit)
   // 2. Empty (whitespace*\0) is a command
   // 3. Letter must precede one of: 'letter', 'space', '\0';
   // 3a. 'letter' concatenates a string character
@@ -4158,8 +4175,8 @@ static cmd_validator parse_command(const char *command) {
     } else {
       const intptr_t pos = p - command;
       assert(pos >= 0);
-      set_preview(false, L"unexpected character '%c' at position %zd,"
-                         L" expected: alphanumeric, space, enter",
+      set_preview(false, "unexpected character '%c' at position %zd,"
+                         " expected: alphanumeric, space, enter",
                   *p, pos + 1);
       return NULL;
     }
@@ -4179,15 +4196,15 @@ static cmd_validator parse_command(const char *command) {
     // 3c. possible command
     cmd_validator validator = patricia_query(cmd_ctx.trie, start);
     if (!validator) {
-      set_preview(false, L"'%s' is not a valid command", start);
+      set_preview(false, "'%s' is not a valid command", start);
     }
     return validator;
   }
   if (*p != ' ') {
     const intptr_t pos = p - command;
     assert(pos >= 0);
-    set_preview(false, L"unexpected character '%c' at position %zd,"
-                       L" expected: letter, space, enter",
+    set_preview(false, "unexpected character '%c' at position %zd,"
+                       " expected: letter, space, enter",
                 *p, pos + 1);
     return NULL;
   }
@@ -4195,7 +4212,7 @@ static cmd_validator parse_command(const char *command) {
   *(char *)p = '\0';
   cmd_validator validator = patricia_query(cmd_ctx.trie, start);
   if (!validator) {
-    set_preview(false, L"'%s' is not a valid command", start);
+    set_preview(false, "'%s' is not a valid command", start);
   }
   *(char *)p = ' ';
   ++p;
@@ -4332,22 +4349,21 @@ static void cmd_tag_validator(void) {
   const uint8_t *tag_name = NULL;
   if (cmd_ctx.unicode) {
     const size_t len = strlen(cmd_ctx.unicode);
-    tag = radix_query(tag_tree, (uint8_t *)cmd_ctx.unicode, len - 1, &tag_name);
+    tag = radix_query(tag_tree, (uint8_t *)cmd_ctx.unicode, len, &tag_name);
     if (!tag) {
-      set_preview(false, L"tag does not exist: '%ls'", cmd_ctx.unicode);
+      set_preview(false, "tag does not exist: '%s'", cmd_ctx.unicode);
       return;
     }
   } else {
     tag = radix_query(tag_tree, (const uint8_t *)"", 0, &tag_name);
     if (!tag) {
-      set_preview(false, L"configuration does not contain any tags");
+      set_preview(false, "configuration does not contain any tags");
       return;
     }
   }
   assert(tag);
   assert(tag_name);
-  utf8_to_utf16_raw((char *)tag_name);
-  set_preview(true, L"tag '%s' %s", utf16_buf_raw.items, cmd_ctx.targets.items);
+  set_preview(true, "tag '%s' %s", (char *)tag_name, cmd_ctx.targets.items);
   cmd_ctx.tag = (Tag_Items *)tag;
   cmd_ctx.executor = cmd_tag_executor;
 }
@@ -4357,8 +4373,9 @@ static void cmd_search_executor(void) {
   int32_t len = 0;
   if (cmd_ctx.unicode && (len = (int32_t)strlen(cmd_ctx.unicode))) {
 #ifdef _WIN32
-    setup_file_path(cmd_ctx.unicode, &len);
+    setup_file_path_char(cmd_ctx.unicode, &len);
 #endif
+    ++len; // null-terminator
     uint8_t *pattern = (uint8_t *)cmd_ctx.unicode;
     const table_key_len len_u32 = (table_key_len)len;
     log_message(LOG_DEBUG, "Search with pattern: '%s', len: %d", pattern, len);
@@ -4402,13 +4419,13 @@ static void cmd_search_executor(void) {
 
 static void cmd_search_validator(void) {
   if (!validate_screens()) return;
-  set_preview(true, L"search '%s' %s", cmd_ctx.unicode ? cmd_ctx.unicode : L"", cmd_ctx.targets.items);
+  set_preview(true, "search '%s' %s", cmd_ctx.unicode ? cmd_ctx.unicode : "", cmd_ctx.targets.items);
   cmd_ctx.executor = cmd_search_executor;
 }
 
 static void cmd_hide_executor(void) {
   if (!cmd_ctx.unicode) return;
-  const size_t len = strlen(cmd_ctx.unicode);
+  const size_t len = strlen(cmd_ctx.unicode) + 1;
   uint8_t *pattern = (uint8_t *)cmd_ctx.unicode;
   if (len <= 1) return;
   const uint32_t len_u32 = (uint32_t)len;
@@ -4502,9 +4519,9 @@ static void cmd_hide_executor(void) {
 
 static void cmd_hide_validator(void) {
   if (cmd_ctx.unicode && *cmd_ctx.unicode) {
-    set_preview(true, L"hide '%s'", cmd_ctx.unicode);
+    set_preview(true, "hide '%s'", cmd_ctx.unicode);
   } else {
-    set_preview(true, L"hide '' (nothing)");
+    set_preview(true, "hide '' (nothing)");
   }
   cmd_ctx.executor = cmd_hide_executor;
 }
@@ -4514,7 +4531,7 @@ static void cmd_idle_executor(void) {
 }
 
 static void cmd_idle_validator(void) {
-  set_preview(true, cin_idle ? L"allow commands to play media" : L"set screens to idle");
+  set_preview(true, cin_idle ? "allow commands to play media" : "set screens to idle");
   cmd_ctx.executor = cmd_idle_executor;
 }
 
@@ -4528,7 +4545,7 @@ static void cmd_kill_executor(void) {
 
 static void cmd_kill_validator(void) {
   if (!validate_screens()) return;
-  set_preview(true, L"kill  %s", cmd_ctx.targets.items);
+  set_preview(true, "kill  %s", cmd_ctx.targets.items);
   cmd_ctx.executor = cmd_kill_executor;
 }
 
@@ -4549,20 +4566,20 @@ static void cmd_maximize_executor(void) {
 static void cmd_maximize_validator(void) {
   const size_t n = cmd_ctx.numbers.count;
   if (n > 1) {
-    set_preview(false, L"maximize supports 1 screen, not %zu", n);
+    set_preview(false, "maximize supports 1 screen, not %zu", n);
     return;
   }
   size_t screen = 1;
   if (n) {
     const size_t target = cmd_ctx.numbers.items[0];
     if (target > cmd_ctx.layout->count) {
-      set_preview(false, L"cannot maximize screen %zu, layout only has %zu screens",
+      set_preview(false, "cannot maximize screen %zu, layout only has %zu screens",
                   target, cmd_ctx.layout->count);
       return;
     }
     screen = target;
   }
-  set_preview(true, L"maximize screen %zu", screen);
+  set_preview(true, "maximize screen %zu", screen);
   cmd_ctx.executor = cmd_maximize_executor;
 }
 
@@ -4574,19 +4591,19 @@ static void cmd_mute_executor(void) {
 
 static void cmd_mute_validator(void) {
   if (!validate_screens()) return;
-  set_preview(true, L"mute/unmute %s", cmd_ctx.targets.items);
+  set_preview(true, "mute/unmute %s", cmd_ctx.targets.items);
   cmd_ctx.executor = cmd_mute_executor;
 }
 
 static void cmd_autoplay_executor(void) {
-  wchar_t *p = cmd_ctx.unicode;
+  char *p = cmd_ctx.unicode;
   int64_t seconds = -1;
-  if (p && cin_wisnum(*p)) {
-    seconds = *p - L'0';
+  if (p && cin_isnum(*p)) {
+    seconds = *p - '0';
     ++p;
-    while (cin_wisnum(*p)) {
+    while (cin_isnum(*p)) {
       seconds *= 10;
-      seconds += *p - L'0';
+      seconds += *p - '0';
       ++p;
     }
   }
@@ -4625,25 +4642,25 @@ static void cmd_autoplay_validator(void) {
   if (!validate_screens()) return;
   int64_t seconds = -1;
   if (cmd_ctx.unicode) {
-    wchar_t *p = cmd_ctx.unicode;
-    if (cin_wisnum(*p)) {
-      seconds = *p - L'0';
+    char *p = cmd_ctx.unicode;
+    if (cin_isnum(*p)) {
+      seconds = *p - '0';
       ++p;
     }
-    while (cin_wisnum(*p)) {
+    while (cin_isnum(*p)) {
       seconds *= 10;
-      seconds += *p - L'0';
+      seconds += *p - '0';
       ++p;
     }
     if (*p) {
       const ptrdiff_t pos = p - cmd_ctx.unicode;
-      set_preview(false, L"unexpected character '%c' at position %lld in argument", *p, pos + 1);
+      set_preview(false, "unexpected character '%c' at position %lld in argument", *p, pos + 1);
       return;
     }
   }
-  if (seconds < 0) set_preview(true, L"autoplay when media ends %s", cmd_ctx.targets.items);
-  else if (seconds == 0) set_preview(true, L"turn off autoplay %s", cmd_ctx.targets.items);
-  else set_preview(true, L"autoplay with '%lld' second delay %s", seconds, cmd_ctx.targets.items);
+  if (seconds < 0) set_preview(true, "autoplay when media ends %s", cmd_ctx.targets.items);
+  else if (seconds == 0) set_preview(true, "turn off autoplay %s", cmd_ctx.targets.items);
+  else set_preview(true, "autoplay with '%lld' second delay %s", seconds, cmd_ctx.targets.items);
   cmd_ctx.executor = cmd_autoplay_executor;
 }
 
@@ -4659,11 +4676,12 @@ static void cmd_lock_executor(void) {
 
 static void cmd_lock_validator(void) {
   if (!validate_screens()) return;
-  set_preview(true, L"lock/unlock %s", cmd_ctx.targets.items);
+  set_preview(true, "lock/unlock %s", cmd_ctx.targets.items);
   cmd_ctx.executor = cmd_lock_executor;
 }
 
 #define CIN_CONF_FILENAME "cinema.conf"
+
 #define FSTR_RECT "%ldx%ld%+ld%+ld"
 #define FSTR_NAME "name = %s" CRLF
 #define FSTR_SCREEN "screen = %s" CRLF
@@ -4860,21 +4878,19 @@ static void cmd_store_validator(void) {
   const uint8_t *layout_name = NULL;
   (void)cmd_ctx.unicode;
   if (cmd_ctx.unicode) {
-    const int32_t len = utf16_to_utf8(cmd_ctx.unicode);
-    layout = radix_query(layout_tree, utf8_buf.items, (size_t)len - 1, &layout_name);
+    const size_t len = strlen(cmd_ctx.unicode);
+    layout = radix_query(layout_tree, (uint8_t *)cmd_ctx.unicode, len, &layout_name);
     if (layout) {
-      utf8_to_utf16_raw((char *)layout_name);
       assert(layout);
       assert(layout_name);
-      set_preview(true, L"store layout '%s' (overwrite)", utf16_buf_raw.items);
+      set_preview(true, "store layout '%s' (overwrite)", (char *)layout_name);
     } else {
-      set_preview(true, L"store new layout: '%s'", cmd_ctx.unicode);
+      set_preview(true, "store new layout: '%s'", cmd_ctx.unicode);
     }
   } else {
     Cin_Layout *curr = cmd_ctx.layout;
     char *curr_name = (char *)layout_strings.items + curr->name_offset;
-    utf8_to_utf16_nraw(curr_name, (int32_t)curr->name_len);
-    set_preview(true, L"store layout '%s' (overwrite current)", utf16_buf_raw.items);
+    set_preview(true, "store layout '%s' (overwrite current)", curr_name);
     layout = curr;
   }
   cmd_ctx.queued_layout = (Cin_Layout *)layout;
@@ -4914,7 +4930,7 @@ static void cmd_swap_validator(void) {
   const size_t n = cmd_ctx.numbers.count;
   const size_t screen_count = cmd_ctx.layout->count;
   if (screen_count < 2) {
-    set_preview(false, L"swap requires a layout with at least 2 screens");
+    set_preview(false, "swap requires a layout with at least 2 screens");
     return;
   }
   switch (n) {
@@ -4922,32 +4938,32 @@ static void cmd_swap_validator(void) {
     const size_t first = cmd_ctx.numbers.items[0];
     const size_t second = cmd_ctx.numbers.items[1];
     if (first == second) {
-      set_preview(false, L"swap needs 2 unique screens, not both %zu", first);
+      set_preview(false, "swap needs 2 unique screens, not both %zu", first);
       return;
     }
     if (first > screen_count || second > screen_count) {
-      set_preview(false, L"cannot swap screen %zu with %zu, layout only has %zu screens",
+      set_preview(false, "cannot swap screen %zu with %zu, layout only has %zu screens",
                   first, second, screen_count);
       return;
     }
     break;
   case 1:
-    set_preview(false, L"swap misses another number: %zu ... swap", cmd_ctx.numbers.items[0]);
+    set_preview(false, "swap misses another number: %zu ... swap", cmd_ctx.numbers.items[0]);
     return;
   case 0:
     if (cmd_ctx.layout->count != 2) {
-      set_preview(false, L"swap requires 2 numbers or a layout with 2 screens");
+      set_preview(false, "swap requires 2 numbers or a layout with 2 screens");
       return;
     }
     array_push(&arena_console, &cmd_ctx.numbers, 1);
     array_push(&arena_console, &cmd_ctx.numbers, 2);
     break;
   default:
-    set_preview(false, L"swap must have 2 or 0 numbers, not %zu", n);
+    set_preview(false, "swap must have 2 or 0 numbers, not %zu", n);
     return;
   }
   cmd_ctx.executor = cmd_swap_executor;
-  set_preview(true, L"swap screen %zu with %zu", cmd_ctx.numbers.items[0], cmd_ctx.numbers.items[1]);
+  set_preview(true, "swap screen %zu with %zu", cmd_ctx.numbers.items[0], cmd_ctx.numbers.items[1]);
 }
 
 static void cmd_clear_executor(void) {
@@ -4959,15 +4975,16 @@ static void cmd_clear_executor(void) {
 
 static void cmd_clear_validator(void) {
   if (!validate_screens()) return;
-  set_preview(true, L"clear %s", cmd_ctx.targets.items);
+  set_preview(true, "clear %s", cmd_ctx.targets.items);
   cmd_ctx.executor = cmd_clear_executor;
 }
 
 static void cmd_macro_executor(void) {
   Cin_Macro *macro = cmd_ctx.macro;
   if (macro) {
-    const wchar_t *p = macro->items;
-    const wchar_t *tail = macro->items + macro->count - 1;
+    // TODO: continue hereee
+    const char *p = macro->items;
+    const char *tail = macro->items + macro->count - 1;
     do {
       cmd_ctx.executor = NULL;
       cmd_validator validator_fn = parse_command(p);
@@ -4976,14 +4993,14 @@ static void cmd_macro_executor(void) {
         if (cmd_ctx.executor) {
           cmd_ctx.executor();
         } else {
-          log_wmessage(LOG_ERROR, L"Failed to validate macro command '%s': %s", p, preview.items);
+          log_message(LOG_ERROR, "Failed to validate macro command '%s': %s", p, preview.items);
           return;
         }
       } else {
-        log_wmessage(LOG_ERROR, L"Failed to parse macro command '%s': %s", p, preview.items);
+        log_message(LOG_ERROR, "Failed to parse macro command '%s': %s", p, preview.items);
         return;
       }
-    } while ((p = wmemchr(p, L'\0', (size_t)(tail - p))) && *++p);
+    } while ((p = memchr(p, '\0', (size_t)(tail - p))) && *++p);
   }
 }
 
@@ -4991,18 +5008,17 @@ static void cmd_macro_validator(void) {
   radix_v macro = NULL;
   const uint8_t *macro_name = NULL;
   if (cmd_ctx.unicode) {
-    const int32_t len = utf16_to_utf8(cmd_ctx.unicode);
-    macro = radix_query(macro_tree, utf8_buf.items, (size_t)len - 1, &macro_name);
+    const size_t len = strlen(cmd_ctx.unicode);
+    macro = radix_query(macro_tree, (uint8_t *)cmd_ctx.unicode, len, &macro_name);
     if (!macro) {
-      set_preview(false, L"macro does not exist: '%s'", cmd_ctx.unicode);
+      set_preview(false, "macro does not exist: '%s'", cmd_ctx.unicode);
       return;
     }
-    utf8_to_utf16_raw((char *)macro_name);
     assert(macro);
     assert(macro_name);
-    set_preview(true, L"execute macro '%s'", utf16_buf_raw.items);
+    set_preview(true, "execute macro '%s'", (char *)macro_name);
   } else {
-    set_preview(true, L"execute macro '' (nothing)");
+    set_preview(true, "execute macro '' (nothing)");
   }
   cmd_ctx.macro = (Cin_Macro *)macro;
   cmd_ctx.executor = cmd_macro_executor;
@@ -5015,10 +5031,9 @@ static void cmd_macro_validator(void) {
 static void cmd_twitch_executor(void) {
   if (!cmd_ctx.unicode || cin_idle) return;
   static char twitch_buf[TWITCH_BUF_SIZE] = {TWITCH_PREFIX};
-  const int32_t len = utf16_to_utf8(cmd_ctx.unicode);
-  assert(len >= 0);
-  const char *channel = (const char *)utf8_buf.items;
-  memcpy(twitch_buf + cin_strlen(TWITCH_PREFIX), channel, (size_t)len);
+  const size_t len = strlen(cmd_ctx.unicode) + 1;
+  const char *channel = (const char *)cmd_ctx.unicode;
+  memcpy(twitch_buf + cin_strlen(TWITCH_PREFIX), channel, len);
   mpv_target_foreach(i, instance) {
     overlap_write(instance, MPV_LOADFILE, "loadfile", twitch_buf, NULL);
   }
@@ -5026,11 +5041,11 @@ static void cmd_twitch_executor(void) {
 
 static void cmd_twitch_validator(void) {
   if (!validate_screens()) return;
-  if (cmd_ctx.unicode && wcslen(cmd_ctx.unicode) > TWITCH_CHANNEL_MAX_CHARS) {
-    set_preview(false, L"twitch channel name is too long (max is %d characters)", TWITCH_CHANNEL_MAX_CHARS);
+  if (cmd_ctx.unicode && strlen(cmd_ctx.unicode) > TWITCH_CHANNEL_MAX_CHARS) {
+    set_preview(false, "twitch channel name is too long (max is %d characters)", TWITCH_CHANNEL_MAX_CHARS);
     return;
   }
-  set_preview(true, L"" TWITCH_PREFIX "%s %s", cmd_ctx.unicode ? cmd_ctx.unicode : L"", cmd_ctx.targets.items);
+  set_preview(true, "" TWITCH_PREFIX "%s %s", cmd_ctx.unicode ? cmd_ctx.unicode : "", cmd_ctx.targets.items);
   cmd_ctx.executor = cmd_twitch_executor;
 }
 
@@ -5047,7 +5062,7 @@ static void cmd_copy_executor(void) {
 
 static void cmd_copy_validator(void) {
   if (!validate_screens()) return;
-  set_preview(true, L"copy to clipboard %s", cmd_ctx.targets.items);
+  set_preview(true, "copy to clipboard %s", cmd_ctx.targets.items);
   cmd_ctx.executor = cmd_copy_executor;
 }
 
@@ -5070,7 +5085,7 @@ static void cmd_extra_executor(void) {
 }
 
 static void cmd_extra_validator(void) {
-  set_preview(true, L"add extra screen to layout");
+  set_preview(true, "add extra screen to layout");
   cmd_ctx.executor = cmd_extra_executor;
 }
 
@@ -5094,7 +5109,7 @@ static void cmd_chat_executor(void) {
 
 static void cmd_chat_validator(void) {
   const bool is_showing = IsWindow(chat.window);
-  set_preview(true, L"%s chat", is_showing ? L"reposition" : L"show");
+  set_preview(true, "%s chat", is_showing ? "reposition" : "show");
   cmd_ctx.executor = cmd_chat_executor;
 }
 
@@ -5125,7 +5140,7 @@ static void cmd_list_executor(void) {
 }
 
 static void cmd_list_validator(void) {
-  set_preview(true, L"list all tags");
+  set_preview(true, "list all tags");
   cmd_ctx.executor = cmd_list_executor;
 }
 
@@ -5141,19 +5156,20 @@ static void cmd_quit_executor(void) {
 }
 
 static void cmd_quit_validator(void) {
-  set_preview(true, L"quit (also closes screens)");
+  set_preview(true, "quit (also closes screens)");
   cmd_ctx.executor = cmd_quit_executor;
 }
+
+#define FSTR_CMD CRLF "  %-10s %s"
 
 static inline void register_cmd(const char *name, const char *help, cmd_validator validator) {
   assert(memchr(help, PREFIX_TOKEN, strlen(help)) == NULL);
   patricia_insert(cmd_ctx.trie, name, validator);
-  const char *v_str = CRLF "  %-10s %s";
-  const int32_t len_i32 = _scprintf(v_str, name, help);
+  const int32_t len_i32 = _scprintf(FSTR_CMD, name, help);
   assert(len_i32);
   const uint32_t len = (uint32_t)len_i32 + 1;
   array_reserve(&arena_console, &cmd_ctx.help, len);
-  sprintf(cmd_ctx.help.items + cmd_ctx.help.count, len, v_str, name, help);
+  snprintf(cmd_ctx.help.items + cmd_ctx.help.count, len, FSTR_CMD, name, help);
   cmd_ctx.help.count += len - 1;
 }
 
@@ -5167,9 +5183,10 @@ static bool init_commands(void) {
   cmd_ctx.queued_layout = cmd_ctx.layout;
   cmd_ctx.trie = patricia_node(NULL, 0);
   array_init(&arena_console, &cmd_ctx.numbers, COMMAND_NUMBERS_CAP);
-  array_wsextend(&arena_console, &cmd_ctx.help,
-                 CR "Available commands:" CRLF "  "
-                    "Note: optional arguments before/after in brackets []" CRLF);
+  const char *commands_note = CR "Available commands:" CRLF "  "
+                                 "Note: optional arguments before/after in brackets []" CRLF;
+  const uint32_t commands_note_len = (uint32_t)strlen(commands_note);
+  array_extend(&arena_console, &cmd_ctx.help, commands_note, commands_note_len);
   register_cmd("autoplay", "Autoplay media [(1 2 ..) autoplay (seconds)]", cmd_autoplay_validator);
   register_cmd("chat", "Show chat (see store command)", cmd_chat_validator);
   register_cmd("clear", "Clear tag/term [(1 2 ..) clear]", cmd_clear_validator);
@@ -5178,7 +5195,7 @@ static bool init_commands(void) {
   register_cmd("help", "Show all commands", cmd_help_validator);
   register_cmd("hide", "Hide media with term [hide term]", cmd_hide_validator);
   register_cmd("idle", "Make commands (not) play media [idle]", cmd_idle_validator);
-  register_cmd("kil", "Kill screen(s) and chat [(1 2 ..) kill]", cmd_kill_validator);
+  register_cmd("kill", "Kill screen(s) and chat [(1 2 ..) kill]", cmd_kill_validator);
   register_cmd("layout", "Change layout to name [layout (name)]", cmd_layout_validator);
   register_cmd("list", "Show all tags", cmd_list_validator);
   register_cmd("lock", "Lock/unlock screen contents [(1 2 ..) lock]", cmd_lock_validator);
@@ -5186,7 +5203,7 @@ static bool init_commands(void) {
   register_cmd("maximize", "Maximize and close others [(1) maximize]", cmd_maximize_validator);
   register_cmd("mute", "Mute screen(s) [(1 2 ..) mute]", cmd_mute_validator);
   register_cmd("quit", "Close screens and quit Cinema", cmd_quit_validator);
-  register_cmd("rerol", "Shuffle media [(1 2 ..) (reroll)]", cmd_reroll_validator);
+  register_cmd("reroll", "Shuffle media [(1 2 ..) (reroll)]", cmd_reroll_validator);
   register_cmd("search", "Limit media to term [(1 2 ..) search (term)]", cmd_search_validator);
   register_cmd("store", "Store layout in cinema.conf [store (layout)]", cmd_store_validator);
   register_cmd("swap", "Swap screen contents [(1 2) swap]", cmd_swap_validator);
@@ -5202,7 +5219,7 @@ static void execute_startup_macros(void) {
   }
   array_clear(&cmd_ctx.numbers);
   cmd_reroll_validator();
-  set_preview(true, L"press enter to shuffle (h for help)");
+  set_preview(true, "press enter to shuffle (h for help)");
   set_preview_pos(repl.home.Y + 1);
   log_preview();
 }
