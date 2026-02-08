@@ -34,10 +34,13 @@
 #pragma comment(lib, "user32")
 #pragma comment(lib, "advapi32")
 #else
+#include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <stdarg.h>
 #include <sys/mman.h>
 #include <sys/param.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
 
@@ -112,7 +115,7 @@ static inline bool init_os(void) {
 #define max(a, b) (((a) > (b)) ? (a) : (b))
 #endif
 
-#define align(a, b) (((a) + (b) - 1) & (~((b) - 1)))
+#define align(a, b) (((a) + (b)-1) & (~((b)-1)))
 #define CIN_PTR ((uint32_t)__SIZEOF_POINTER__)
 #define align_size(T) max(CIN_PTR, __alignof(T))
 #define align_to_size(n) align((n), CIN_PTR)
@@ -125,7 +128,7 @@ static inline bool init_os(void) {
 #define gigabytes(n) ((n) << 30)
 #define CIN_ARENA_CAP megabytes(2)
 #define CIN_ARENA_BYTES align(sizeof(Arena), 64)
-#define cin_ispow2(n) ((n) && ((n) & ((n) - 1)) == 0)
+#define cin_ispow2(n) ((n) && ((n) & ((n)-1)) == 0)
 
 static inline uint32_t log2_floor(uint32_t n) {
   assert(n > 0U && "0 is undefined behavior");
@@ -206,7 +209,7 @@ static inline Arena_Chunk *arena_chunk_init(Arena *arena, uint32_t bytes) {
   Arena_Chunk *chunk = mmap(NULL, dwSize, PROT_READ | PROT_WRITE,
                             (int32_t)cin_system.alloc_type, -1, 0);
   if (chunk == MAP_FAILED) {
-    printf("Cinema crashed with code %d trying to allocate memory with mmap", errno);
+    printf("Cinema crashed trying to allocate memory with mmap: %s", strerror(errno));
     // https://kernel.googlesource.com/pub/scm/linux/kernel/git/nico/archive/+/v0.97/include/linux/errno.h
     assert(false);
     exit(1);
@@ -776,11 +779,13 @@ static inline int32_t utf8_to_utf16_norm(const char *str) {
 #endif
 
 static inline int32_t utf8_norm(char *str) {
+  // does not include null-terminator in return value length
   int32_t len = 0;
   for (; *str; ++len, ++str) *str = (char)tolower(*str);
   return len;
 }
 
+#ifdef _WIN32
 // https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
 // A path can have 248 "characters" (260 - 12 = 248)
 // with 12 reserved for 8.3 file name.
@@ -795,10 +800,10 @@ static inline int32_t utf8_norm(char *str) {
 // 260 (MAX_PATH) so surrogate pairs get truncated
 #define CIN_MAX_PATH MAX_PATH
 #define CIN_MAX_PATH_BYTES (MAX_PATH * 4)
-#define CIN_MAX_WRITABLE_PATH (MAX_PATH - 12)
-#define CIN_MAX_WRITABLE_PATH_BYTES ((MAX_PATH - 12) * 4)
-#define CIN_COMMAND_PROMPT_LIMIT 8191
-#define CIN_MAX_LOG_MESSAGE 1024
+#else
+#define CIN_MAX_PATH PATH_MAX
+#define CIN_MAX_PATH_BYTES CIN_MAX_PATH
+#endif
 
 typedef struct Console_Message {
   array_struct_members(wchar_t);
@@ -2070,7 +2075,12 @@ static inline bool conf_scopeget(void) {
 static bool parse_config(const char *filename) {
   bool ok = false;
   FILE *file;
+#ifdef _WIN32
   const int32_t err = fopen_s(&file, filename, "rt");
+#else
+  file = fopen(filename, "rt");
+  const int32_t err = file ? 0 : errno;
+#endif
   if (err) {
     log_fopen_error(filename, err);
     goto end;
@@ -2215,7 +2225,11 @@ typedef struct Directory_Node {
 } Directory_Node;
 
 typedef struct Directory_Path {
+#ifdef _WIN32
   wchar_t path[CIN_MAX_PATH];
+#else
+  char path[CIN_MAX_PATH];
+#endif
   size_t len;
 } Directory_Path;
 
@@ -2329,9 +2343,33 @@ static Radix_Tree *macro_tree = NULL;
 
 DEFINE_SETUP_FILE_PATH(char, '\\', '/', '\0', memcpy)
 DEFINE_SETUP_FILE_PATH(wchar_t, L'\\', L'/', L'\0', wmemcpy)
+#else
+static inline void setup_file_path(char *dst, char *src, size_t size) {
+  const bool expand = *src == '~';
+  const bool only_root = expand && !*(src + 1);
+  const bool valid_expand = expand && *(src + 1) == '/';
+  if (expand && (only_root || valid_expand)) {
+    char *home = getenv("HOME");
+    if (!home) {
+      log_message(LOG_ERROR, "Failed to expand '~'for path '%s': %s", src, strerror(errno));
+      return;
+    }
+    assert(*home);
+    const char *path_tail = src + (only_root ? 1 : 2);
+    const size_t home_len = strlen(home);
+    const size_t path_len = *path_tail ? strlen(path_tail) : 0;
+    const size_t new_path_len = home_len + path_len + 1;
+    if (size < new_path_len) {
+      log_message(LOG_ERROR, "Buffer too small to expand '~': %zu < %zu", size, new_path_len);
+      return;
+    }
+    memcpy(dst, home, home_len);
+    memcpy(dst + home_len, path_tail, path_len);
+  }
+}
 #endif
 
-static void setup_directory(const char *path, Tag_Directories *tag_dirs) {
+static void setup_directory(char *path, Tag_Directories *tag_dirs) {
 #ifdef _WIN32
   int32_t len_utf16 = utf8_to_utf16_norm(path);
   assert(len_utf16);
@@ -2339,20 +2377,37 @@ static void setup_directory(const char *path, Tag_Directories *tag_dirs) {
   const size_t len = (size_t)len_utf16;
   Directory_Path root_dir = {.len = len};
   wmemcpy(root_dir.path, utf16_buf_norm.items, len);
+#else
+  char new_path[CIN_MAX_PATH];
+  setup_file_path(path, new_path, CIN_MAX_PATH);
+  path = new_path;
+  const int32_t len_i32 = utf8_norm(path) + 1;
+  assert(len_i32 > 0);
+  const size_t len = (size_t)len_i32;
+  Directory_Path root_dir = {.len = len};
+  memcpy(root_dir.path, path, len);
+  const size_t bytes = len;
+#endif
   array_push(&arena_console, &dir_stack, root_dir);
   while (dir_stack.count > 0) {
     Directory_Path dir = dir_stack.items[--dir_stack.count];
-    log_wmessage(LOG_DEBUG, L"Path: %ls", dir.path);
     assert(dir.path);
     assert(dir.len > 0);
     assert(dir.path[dir.len - 1] == L'\0');
+#ifdef _WIN32
+    log_wmessage(LOG_DEBUG, L"Path: %s", dir.path);
     const int32_t bytes_i32 = utf16_to_utf8(dir.path);
     assert(bytes_i32 > 0);
     const uint32_t bytes = (uint32_t)bytes_i32;
+    char *str_src = utf8_buf.items;
+#else
+    log_message(LOG_DEBUG, "Path: %s", dir.path);
+    char *str_src = dir.path;
+#endif
     array_reserve(&arena_console, &directory_strings, bytes + 1);
     uint8_t *strings = directory_strings.items;
     const uint32_t str_offset = directory_strings.count;
-    memcpy(strings + str_offset, utf8_buf.items, bytes);
+    memcpy(strings + str_offset, str_src, bytes);
     const uint32_t node_tail = directory_nodes.count;
     Table_Key key = {.strings = strings, .pos = str_offset, .len = bytes};
     table_value dup_index = table_find(&dir_table, &key);
@@ -2362,6 +2417,7 @@ static void setup_directory(const char *path, Tag_Directories *tag_dirs) {
       }
       continue;
     }
+#ifdef _WIN32
     if (--dir.len + 2 >= CIN_MAX_PATH) {
       // We have to append 2 chars \ and * for the correct pattern
       log_wmessage(LOG_ERROR, L"Directory name too long: %ls", dir.path);
@@ -2383,6 +2439,13 @@ static void setup_directory(const char *path, Tag_Directories *tag_dirs) {
       log_last_error("Failed to match directory '%ls'", dir.path);
       continue;
     }
+#else
+    DIR *directory = opendir(path);
+    if (!directory) {
+      log_message(LOG_ERROR, "Failed to match directory '%s':", dir.path, strerror(errno));
+      continue;
+    }
+#endif
     // Commit the new directory
     array_grow(&arena_console, &directory_strings, bytes);
     array_grow(&arena_console, &directory_nodes, 1);
@@ -2395,6 +2458,7 @@ static void setup_directory(const char *path, Tag_Directories *tag_dirs) {
     }
     table_value inserted = table_insert(&arena_console, &dir_table, &key, (table_value)node_tail);
     assert(inserted == -1);
+#ifdef _WIN32
     do {
       if (data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
         continue; // skip junction
@@ -2445,10 +2509,51 @@ static void setup_directory(const char *path, Tag_Directories *tag_dirs) {
     }
     FindClose(search);
   }
-  assert(dir_stack.count == 0);
 #else
-  // TODO: linux
+    struct dirent *entry = NULL;
+    errno = 0;
+    Directory_Path tmp_dir = dir;
+    while ((entry = readdir(directory))) {
+      char *file = entry->d_name;
+      const size_t file_len = (size_t)entry->d_reclen;
+      tmp_dir.len = dir.len;
+      const size_t path_len = tmp_dir.len + file_len;
+      if (path_len >= CIN_MAX_PATH) continue;
+      memcpy(tmp_dir.path + tmp_dir.len, file, file_len);
+      tmp_dir.len = path_len;
+      struct stat statbuf;
+      if (stat(tmp_dir.path, &statbuf) < 0) {
+        log_message(LOG_ERROR, "Failed to get stat for '%s': %s", tmp_dir.path, strerror(errno));
+        continue;
+      }
+      const bool is_dir = S_ISDIR(statbuf.st_mode);
+      if (is_dir) {
+        assert(tmp_dir.path[tmp_dir.len - 1] == '\0');
+        assert(tmp_dir.len > 0);
+        ++dir_stack.abs_count;
+        array_ensure_capacity_core(&arena_console, &dir_stack, dir_stack.abs_count, false);
+        array_push(&arena_console, &dir_stack, tmp_dir);
+      } else {
+        const table_key_pos tail_offset = array_bytes(&docs);
+        int32_t tail_doc = (int32_t)tail_offset;
+        docs_push((uint8_t *)tmp_dir.path, path_len);
+        if (conf_parser.has_patterns) {
+          Table_Key pat_key = {.strings = docs.items, .pos = tail_offset, .len = (table_key_len)path_len};
+          table_value dup_doc = table_insert(&arena_console, &pat_table, &pat_key, tail_doc);
+          if (dup_doc >= 0) {
+            docs_pop((int32_t)len);
+            tail_doc = (int32_t)dup_doc;
+          }
+        }
+        array_push(&arena_console, node, tail_doc);
+      }
+      errno = 0;
+    }
+    if (errno != 0) {
+      log_message(LOG_ERROR, "Failed to find next file: %s", strerror(errno));
+    }
 #endif
+  assert(dir_stack.count == 0);
 }
 
 static inline void setup_pattern(const char *pattern, Tag_Pattern_Items *tag_pattern_items) {
@@ -2525,7 +2630,7 @@ static inline void setup_pattern(const char *pattern, Tag_Pattern_Items *tag_pat
   }
   FindClose(search);
 #else
-  // TODO: linux?
+    // TODO: linux?
 #endif
 }
 
@@ -2617,9 +2722,9 @@ static inline void setup_macro(char *name, Cin_Macro *macro, bool startup) {
   assert(len_utf8 > 1);
   radix_insert(macro_tree, utf8_buf.items, (uint32_t)len_utf8, macro);
 #else
-  const int32_t len = utf8_norm(name);
-  assert(len > 0);
-  radix_insert(macro_tree, (uint8_t *)name, (uint32_t)len, macro);
+    const int32_t len = utf8_norm(name);
+    assert(len > 0);
+    radix_insert(macro_tree, (uint8_t *)name, (uint32_t)len, macro);
 #endif
   if (startup) array_push(&arena_console, &startup_macros, macro);
 }
@@ -2633,8 +2738,8 @@ static inline void setup_macro_command(char *command, Cin_Macro *macro) {
   const uint32_t len_u32 = (uint32_t)len;
   array_extend(&arena_console, macro, utf8_buf.items, len_u32);
 #else
-  const int32_t len = utf8_norm(command) + 1;
-  array_extend(&arena_console, macro, command, len);
+    const int32_t len = utf8_norm(command) + 1;
+    array_extend(&arena_console, macro, command, len);
 #endif
 }
 
@@ -2784,7 +2889,7 @@ static bool init_config(const char *filename) {
   if (array_bytes(&docs) == CIN_ARENA_MAX) {
     // extremely rare case where we exceed INT_MAX by 1 byte,
     // instead of trying to fix it we force a crash
-    cin_wwritef(L"Cinema crashed receiving too many file paths (exceeding %d bytes)", INT_MAX);
+    cin_writef("Cinema crashed receiving too many file paths (exceeding %d bytes)", INT_MAX);
     exit(1);
   }
   docs.bytes_mul32 = array_bytes(&docs) * (uint32_t)sizeof(int32_t);
@@ -2804,7 +2909,7 @@ static bool reinit_documents(void) {
 #ifdef LIBSAIS_OPENMP
   const int32_t result = libsais_gsa_omp(docs.items, docs.gsa, d_bytes, remainder, NULL, cin_system.threads);
 #else
-  const int32_t result = libsais_gsa(docs.items, docs.gsa, d_bytes, remainder, NULL);
+    const int32_t result = libsais_gsa(docs.items, docs.gsa, d_bytes, remainder, NULL);
 #endif
   if (result != 0) {
     log_message(LOG_ERROR, "Failed to build SA");
@@ -3778,12 +3883,12 @@ static inline void set_preview(bool success, const char *format, ...) {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wformat-nonliteral"
   const int32_t len_i32 = vsnprintf(NULL, 0, format, args);
-#pragma clang diagnostic pop
   assert(len_i32 >= 0);
   const uint32_t len = (uint32_t)len_i32;
   va_end(args);
   array_grow(&arena_console, &preview, len + 1);
-  vsnprintf_s(preview.items + start, preview.capacity, len, format, args_dup);
+  vsnprintf(preview.items + start, preview.capacity, format, args_dup);
+#pragma clang diagnostic pop
   va_end(args_dup);
 }
 
@@ -4229,8 +4334,8 @@ static void update_preview(void) {
   uint8_t *utf8_msg = utf8_buf.items;
   cmd_validator validator_fn = parse_command((char *)utf8_msg);
 #else
-  // TODO: linux
-  cmd_validator validator_fn = parse_command(repl.msg->items);
+    // TODO: linux
+    cmd_validator validator_fn = parse_command(repl.msg->items);
 #endif
   if (validator_fn) {
     validator_fn();
