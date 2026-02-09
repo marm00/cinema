@@ -39,6 +39,7 @@
 #include <errno.h>
 #include <glob.h>
 #include <stdarg.h>
+#include <stddef.h>
 #include <sys/mman.h>
 #include <sys/param.h>
 #include <sys/stat.h>
@@ -2516,7 +2517,6 @@ static void setup_directory(const char *path, Tag_Directories *tag_dirs) {
       log_last_error("Failed to find next file");
     }
     FindClose(search);
-  }
 #else
     struct dirent *entry = NULL;
     errno = 0;
@@ -2561,6 +2561,7 @@ static void setup_directory(const char *path, Tag_Directories *tag_dirs) {
       log_message(LOG_ERROR, "Failed to find next file: %s", strerror(errno));
     }
 #endif
+  }
   assert(dir_stack.count == 0);
 }
 
@@ -2638,70 +2639,83 @@ static inline void setup_pattern(const char *pattern, Tag_Pattern_Items *tag_pat
   }
   FindClose(search);
 #else
-    char new_pattern[CIN_MAX_PATH];
-    setup_file_path(new_pattern, pattern, CIN_MAX_PATH);
-    pattern = new_pattern;
-    static const int32_t GLOB_FLAGS = GLOB_NOSORT;
-    glob_t matches = {0};
-    const int32_t result = glob(new_pattern, GLOB_FLAGS, NULL, &matches);
-    if (result != 0) {
-      if (result == GLOB_NOMATCH) {
-        log_message(LOG_ERROR, "Found no results for pattern '%s'", new_pattern);
-      } else {
-        log_message(LOG_ERROR, "Failed to match pattern '%s': %s", new_pattern, strerror(errno));
-      }
-      globfree(&matches);
-      return;
-    }
-    struct stat statbuf;
-    const int32_t n = matches.gl_pathc;
-    char file_buf[CIN_MAX_PATH];
-    for (size_t i = 0; i < n; ++i) {
-      const char *file = matches.gl_pathv[i];
-      if (lstat(file, &statbuf) >= 0 && S_ISREG(statbuf.st_mode)) {
-        const size_t len = strlen(file) + 1;
-        memcpy(file_buf, file, len);
-        utf8_norm(file_buf);
-        const table_key_pos tail_offset = array_bytes(&docs);
-        const int32_t tail_doc = (int32_t)tail_offset;
-        docs_push((uint8_t *)file_buf, len);
-        Table_Key key = {.strings = docs.items, .pos = tail_offset, .len = (table_key_len)len};
-        table_value dup_doc = table_insert(&arena_console, &pat_table, &key, tail_doc);
-        if (dup_doc >= 0) {
-          docs_pop(len);
-          if (tag_pattern_items) array_push(&arena_console, tag_pattern_items, (int32_t)dup_doc);
-        } else {
-          if (tag_pattern_items) array_push(&arena_console, tag_pattern_items, tail_doc);
-        }
-      }
+  char new_pattern[CIN_MAX_PATH];
+  setup_file_path(new_pattern, pattern, CIN_MAX_PATH);
+  pattern = new_pattern;
+  static const int32_t GLOB_FLAGS = GLOB_NOSORT;
+  glob_t matches = {0};
+  const int32_t result = glob(new_pattern, GLOB_FLAGS, NULL, &matches);
+  if (result != 0) {
+    if (result == GLOB_NOMATCH) {
+      log_message(LOG_ERROR, "Found no results for pattern '%s'", new_pattern);
+    } else {
+      log_message(LOG_ERROR, "Failed to match pattern '%s': %s", new_pattern, strerror(errno));
     }
     globfree(&matches);
+    return;
+  }
+  struct stat statbuf;
+  const int32_t n = matches.gl_pathc;
+  char file_buf[CIN_MAX_PATH];
+  for (size_t i = 0; i < n; ++i) {
+    const char *file = matches.gl_pathv[i];
+    if (lstat(file, &statbuf) >= 0 && S_ISREG(statbuf.st_mode)) {
+      const size_t len = strlen(file) + 1;
+      memcpy(file_buf, file, len);
+      utf8_norm(file_buf);
+      const table_key_pos tail_offset = array_bytes(&docs);
+      const int32_t tail_doc = (int32_t)tail_offset;
+      docs_push((uint8_t *)file_buf, len);
+      Table_Key key = {.strings = docs.items, .pos = tail_offset, .len = (table_key_len)len};
+      table_value dup_doc = table_insert(&arena_console, &pat_table, &key, tail_doc);
+      if (dup_doc >= 0) {
+        docs_pop(len);
+        if (tag_pattern_items) array_push(&arena_console, tag_pattern_items, (int32_t)dup_doc);
+      } else {
+        if (tag_pattern_items) array_push(&arena_console, tag_pattern_items, tail_doc);
+      }
+    }
+  }
+  globfree(&matches);
 #endif
 }
 
-static inline void setup_url(const char *url, Tag_Url_Items *tag_url_items) {
+static inline void setup_url(char *url, Tag_Url_Items *tag_url_items) {
+#ifdef _WIN32
   const int32_t len_utf16 = utf8_to_utf16_raw(url);
-  assert(len_utf16);
-  const int32_t len_utf8 = utf16_to_utf8(utf16_buf_raw.items);
+  assert(len_utf16 > 0);
+  const int32_t len = utf16_to_utf8(utf16_buf_raw.items);
+  uint8_t *doc = utf8_buf.items;
+#else
+  const int32_t len = (int32_t)strlen(url);
+  uint8_t *doc = (uint8_t *)url;
+#endif
+  assert(len > 0);
   const table_key_pos tail_offset = array_bytes(&docs);
   const int32_t tail_doc = (int32_t)tail_offset;
-  docs_push(utf8_buf.items, len_utf8);
-  Table_Key key = {.strings = docs.items, .pos = tail_offset, .len = (table_key_len)len_utf8};
+  docs_push(doc, len);
+  Table_Key key = {.strings = docs.items, .pos = tail_offset, .len = (table_key_len)len};
   table_value dup_doc = table_insert(&arena_console, &url_table, &key, tail_doc);
   if (dup_doc >= 0) {
-    docs_pop(len_utf8);
+    docs_pop(len);
     if (tag_url_items) array_push(&arena_console, tag_url_items, (int32_t)dup_doc);
   } else {
     if (tag_url_items) array_push(&arena_console, tag_url_items, tail_doc);
   }
 }
 
-static inline void setup_tag(const char *tag, Tag_Items *tag_items) {
+static inline void setup_tag(char *tag, Tag_Items *tag_items) {
+#ifdef _WIN32
   const int32_t len_utf16 = utf8_to_utf16_norm(tag);
-  assert(len_utf16);
-  const int32_t len_utf8 = utf16_to_utf8(utf16_buf_norm.items);
-  assert(len_utf8);
-  radix_insert(tag_tree, utf8_buf.items, (size_t)len_utf8, tag_items);
+  assert(len_utf16 > 0);
+  const int32_t len = utf16_to_utf8(utf16_buf_norm.items);
+  uint8_t *name = utf8_buf.items;
+#else
+  const int32_t len = utf8_norm(tag);
+  uint8_t *name = (uint8_t *)tag;
+#endif
+  assert(len > 0);
+  radix_insert(tag_tree, name, (size_t)len, tag_items);
 }
 
 static inline bool setup_chat(const char *geometry, uint32_t len, Cin_Layout *layout) {
@@ -2747,16 +2761,21 @@ static inline void setup_screen(const char *geometry, Cin_Layout *layout) {
   array_push(&arena_console, layout, screen);
 }
 
-static inline void setup_layout(const char *name, Cin_Layout *layout) {
+static inline void setup_layout(char *name, Cin_Layout *layout) {
+#ifdef _WIN32
   const int32_t len_utf16 = utf8_to_utf16_norm(name);
   assert(len_utf16 > 1);
-  const int32_t len_utf8 = utf16_to_utf8(utf16_buf_norm.items);
-  assert(len_utf8 > 1);
-  const uint32_t len_utf8_u32 = (uint32_t)len_utf8;
+  const uint32_t len = (uint32_t)utf16_to_utf8(utf16_buf_norm.items);
+  uint8_t *layout_name = utf16_buf_norm.items;
+#else
+  const uint32_t len = (uint32_t)utf8_norm(name);
+  uint8_t *layout_name = (uint8_t *)name;
+#endif
+  assert(len > 1);
   layout->name_offset = layout_strings.count;
-  layout->name_len = len_utf8_u32;
-  array_extend(&arena_console, &layout_strings, utf8_buf.items, len_utf8_u32);
-  radix_insert(layout_tree, utf8_buf.items, len_utf8_u32, layout);
+  layout->name_len = len;
+  array_extend(&arena_console, &layout_strings, layout_name, len);
+  radix_insert(layout_tree, layout_name, len, layout);
 }
 
 static inline void setup_macro(char *name, Cin_Macro *macro, bool startup) {
@@ -2767,9 +2786,9 @@ static inline void setup_macro(char *name, Cin_Macro *macro, bool startup) {
   assert(len_utf8 > 1);
   radix_insert(macro_tree, utf8_buf.items, (uint32_t)len_utf8, macro);
 #else
-    const int32_t len = utf8_norm(name);
-    assert(len > 0);
-    radix_insert(macro_tree, (uint8_t *)name, (uint32_t)len, macro);
+  const int32_t len = utf8_norm(name);
+  assert(len > 0);
+  radix_insert(macro_tree, (uint8_t *)name, (uint32_t)len, macro);
 #endif
   if (startup) array_push(&arena_console, &startup_macros, macro);
 }
@@ -2783,8 +2802,8 @@ static inline void setup_macro_command(char *command, Cin_Macro *macro) {
   const uint32_t len_u32 = (uint32_t)len;
   array_extend(&arena_console, macro, utf8_buf.items, len_u32);
 #else
-    const int32_t len = utf8_norm(command) + 1;
-    array_extend(&arena_console, macro, command, len);
+  const int32_t len = utf8_norm(command) + 1;
+  array_extend(&arena_console, macro, command, len);
 #endif
 }
 
@@ -2954,7 +2973,7 @@ static bool reinit_documents(void) {
 #ifdef LIBSAIS_OPENMP
   const int32_t result = libsais_gsa_omp(docs.items, docs.gsa, d_bytes, remainder, NULL, cin_system.threads);
 #else
-    const int32_t result = libsais_gsa(docs.items, docs.gsa, d_bytes, remainder, NULL);
+  const int32_t result = libsais_gsa(docs.items, docs.gsa, d_bytes, remainder, NULL);
 #endif
   if (result != 0) {
     log_message(LOG_ERROR, "Failed to build SA");
@@ -3970,7 +3989,7 @@ static inline bool validate_screens(void) {
     }
     for (size_t i = 0; i < n_count; ++i) {
       const size_t number = cmd_ctx.numbers.items[i];
-      const int32_t len_i32 = _scprintf(FSTR_CIN_SCREEN, number);
+      const int32_t len_i32 = snprintf(NULL, 0, FSTR_CIN_SCREEN, number);
       assert(len_i32);
       const uint32_t len = (uint32_t)len_i32 + 1;
       array_reserve(&arena_console, &cmd_ctx.targets, len);
@@ -3983,6 +4002,8 @@ static inline bool validate_screens(void) {
   }
   return true;
 }
+
+#ifdef _WIN32
 
 static wchar_t exe_path_mpv[CIN_MAX_PATH] = {0};
 static wchar_t exe_path_ytdlp[CIN_MAX_PATH] = {0};
@@ -4031,6 +4052,7 @@ static bool init_executables(void) {
   find_exe(L"Chatterino", L"chatterino", exe_path_chatterino);
   return true;
 }
+#endif
 
 struct Chat {
   STARTUPINFOW si;
@@ -4379,8 +4401,8 @@ static void update_preview(void) {
   uint8_t *utf8_msg = utf8_buf.items;
   cmd_validator validator_fn = parse_command((char *)utf8_msg);
 #else
-    // TODO: linux
-    cmd_validator validator_fn = parse_command(repl.msg->items);
+  // TODO: linux
+  cmd_validator validator_fn = parse_command(repl.msg->items);
 #endif
   if (validator_fn) {
     validator_fn();
@@ -5084,7 +5106,7 @@ static void cmd_swap_validator(void) {
     return;
   }
   switch (n) {
-  case 2:
+  case 2: {
     const size_t first = cmd_ctx.numbers.items[0];
     const size_t second = cmd_ctx.numbers.items[1];
     if (first == second) {
@@ -5096,18 +5118,18 @@ static void cmd_swap_validator(void) {
                   first, second, screen_count);
       return;
     }
-    break;
+  } break;
   case 1:
     set_preview(false, "swap misses another number: %zu ... swap", cmd_ctx.numbers.items[0]);
     return;
-  case 0:
+  case 0: {
     if (cmd_ctx.layout->count != 2) {
       set_preview(false, "swap requires 2 numbers or a layout with 2 screens");
       return;
     }
     array_push(&arena_console, &cmd_ctx.numbers, 1);
     array_push(&arena_console, &cmd_ctx.numbers, 2);
-    break;
+  } break;
   default:
     set_preview(false, "swap must have 2 or 0 numbers, not %zu", n);
     return;
@@ -5315,7 +5337,7 @@ static void cmd_quit_validator(void) {
 static inline void register_cmd(const char *name, const char *help, cmd_validator validator) {
   assert(memchr(help, PREFIX_TOKEN, strlen(help)) == NULL);
   patricia_insert(cmd_ctx.trie, name, validator);
-  const int32_t len_i32 = _scprintf(FSTR_CMD, name, help);
+  const int32_t len_i32 = snprintf(NULL, 0, FSTR_CMD, name, help);
   assert(len_i32);
   const uint32_t len = (uint32_t)len_i32 + 1;
   array_reserve(&arena_console, &cmd_ctx.help, len);
@@ -5377,16 +5399,17 @@ static void execute_startup_macros(void) {
 int main(int argc, char **argv) {
   (void)argc;
   (void)argv;
-#ifndef _WIN32
-  printf("Error: Your operating system is not supported, Windows-only currently.\n");
-  return 1;
-#endif
   if (!init_os()) exit(1);
   if (!init_repl()) exit(1);
+#ifdef _WIN32
   if (!InitializeCriticalSectionAndSpinCount(&log_lock, 0)) exit(1);
+#endif
   if (!init_config(CIN_CONF_FILENAME)) exit(1);
   if (!init_commands()) exit(1);
+#ifdef _WIN32
   if (!init_executables()) exit(1);
+// on linux we run the exes without searching
+#endif
   if (!init_documents()) exit(1);
   if (!init_timers()) exit(1);
   if (!init_mpv()) exit(1);
