@@ -37,6 +37,7 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
+#include <glob.h>
 #include <stdarg.h>
 #include <sys/mman.h>
 #include <sys/param.h>
@@ -2210,6 +2211,7 @@ struct Document_Collection {
 } docs = {0};
 
 static inline void docs_push(const uint8_t *utf8, int32_t len) {
+  // len should include null-terminator
   array_extend_zero(&arena_docs, &docs, utf8, (uint32_t)len);
   ++docs.doc_count;
 }
@@ -2344,7 +2346,13 @@ static Radix_Tree *macro_tree = NULL;
 DEFINE_SETUP_FILE_PATH(char, '\\', '/', '\0', memcpy)
 DEFINE_SETUP_FILE_PATH(wchar_t, L'\\', L'/', L'\0', wmemcpy)
 #else
-static inline void setup_file_path(char *dst, char *src, size_t size) {
+static inline void setup_file_path(char *dst, const char *src, size_t size) {
+  // tilde expansion
+  // TODO: If an initial tilde is followed by a username (e.g., "~andrea/bin"),
+  // then the tilde and username are substituted by the home
+  // directory of that user.  If the username is invalid, or the
+  // home directory cannot be determined, then no substitution
+  // is performed.
   const bool expand = *src == '~';
   const bool only_root = expand && !*(src + 1);
   const bool valid_expand = expand && *(src + 1) == '/';
@@ -2369,7 +2377,7 @@ static inline void setup_file_path(char *dst, char *src, size_t size) {
 }
 #endif
 
-static void setup_directory(char *path, Tag_Directories *tag_dirs) {
+static void setup_directory(const char *path, Tag_Directories *tag_dirs) {
 #ifdef _WIN32
   int32_t len_utf16 = utf8_to_utf16_norm(path);
   assert(len_utf16);
@@ -2379,9 +2387,9 @@ static void setup_directory(char *path, Tag_Directories *tag_dirs) {
   wmemcpy(root_dir.path, utf16_buf_norm.items, len);
 #else
   char new_path[CIN_MAX_PATH];
-  setup_file_path(path, new_path, CIN_MAX_PATH);
+  setup_file_path(new_path, path, CIN_MAX_PATH);
+  const int32_t len_i32 = utf8_norm(new_path) + 1;
   path = new_path;
-  const int32_t len_i32 = utf8_norm(path) + 1;
   assert(len_i32 > 0);
   const size_t len = (size_t)len_i32;
   Directory_Path root_dir = {.len = len};
@@ -2522,7 +2530,7 @@ static void setup_directory(char *path, Tag_Directories *tag_dirs) {
       memcpy(tmp_dir.path + tmp_dir.len, file, file_len);
       tmp_dir.len = path_len;
       struct stat statbuf;
-      if (stat(tmp_dir.path, &statbuf) < 0) {
+      if (lstat(tmp_dir.path, &statbuf) < 0) {
         log_message(LOG_ERROR, "Failed to get stat for '%s': %s", tmp_dir.path, strerror(errno));
         continue;
       }
@@ -2630,7 +2638,44 @@ static inline void setup_pattern(const char *pattern, Tag_Pattern_Items *tag_pat
   }
   FindClose(search);
 #else
-    // TODO: linux?
+    char new_pattern[CIN_MAX_PATH];
+    setup_file_path(new_pattern, pattern, CIN_MAX_PATH);
+    pattern = new_pattern;
+    static const int32_t GLOB_FLAGS = GLOB_NOSORT;
+    glob_t matches = {0};
+    const int32_t result = glob(new_pattern, GLOB_FLAGS, NULL, &matches);
+    if (result != 0) {
+      if (result == GLOB_NOMATCH) {
+        log_message(LOG_ERROR, "Found no results for pattern '%s'", new_pattern);
+      } else {
+        log_message(LOG_ERROR, "Failed to match pattern '%s': %s", new_pattern, strerror(errno));
+      }
+      globfree(&matches);
+      return;
+    }
+    struct stat statbuf;
+    const int32_t n = matches.gl_pathc;
+    char file_buf[CIN_MAX_PATH];
+    for (size_t i = 0; i < n; ++i) {
+      const char *file = matches.gl_pathv[i];
+      if (lstat(file, &statbuf) >= 0 && S_ISREG(statbuf.st_mode)) {
+        const size_t len = strlen(file) + 1;
+        memcpy(file_buf, file, len);
+        utf8_norm(file_buf);
+        const table_key_pos tail_offset = array_bytes(&docs);
+        const int32_t tail_doc = (int32_t)tail_offset;
+        docs_push((uint8_t *)file_buf, len);
+        Table_Key key = {.strings = docs.items, .pos = tail_offset, .len = (table_key_len)len};
+        table_value dup_doc = table_insert(&arena_console, &pat_table, &key, tail_doc);
+        if (dup_doc >= 0) {
+          docs_pop(len);
+          if (tag_pattern_items) array_push(&arena_console, tag_pattern_items, (int32_t)dup_doc);
+        } else {
+          if (tag_pattern_items) array_push(&arena_console, tag_pattern_items, tail_doc);
+        }
+      }
+    }
+    globfree(&matches);
 #endif
 }
 
