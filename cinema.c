@@ -42,7 +42,10 @@
 #include <stddef.h>
 #include <sys/mman.h>
 #include <sys/param.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
 #endif
 
@@ -2408,7 +2411,7 @@ static void setup_directory(const char *path, Tag_Directories *tag_dirs) {
     const int32_t bytes_i32 = utf16_to_utf8(dir.path);
     assert(bytes_i32 > 0);
     const uint32_t bytes = (uint32_t)bytes_i32;
-    char *str_src = utf8_buf.items;
+    char *str_src = (char *)utf8_buf.items;
 #else
     log_message(LOG_DEBUG, "Path: %s", dir.path);
     char *str_src = dir.path;
@@ -2766,7 +2769,7 @@ static inline void setup_layout(char *name, Cin_Layout *layout) {
   const int32_t len_utf16 = utf8_to_utf16_norm(name);
   assert(len_utf16 > 1);
   const uint32_t len = (uint32_t)utf16_to_utf8(utf16_buf_norm.items);
-  uint8_t *layout_name = utf16_buf_norm.items;
+  uint8_t *layout_name = utf8_buf.items;
 #else
   const uint32_t len = (uint32_t)utf8_norm(name);
   uint8_t *layout_name = (uint8_t *)name;
@@ -3195,6 +3198,7 @@ static bool create_pipe(Instance *instance, const wchar_t *name) {
   static const int FOUND_TIMEOUT = 20000;
   static const int UNFOUND_TIMEOUT = 20000;
   static const int UNFOUND_WAIT = 50;
+  log_wmessage(LOG_ERROR, L"creating pipe: %s", name);
   int unfound_duration = 0;
   HANDLE hPipe = INVALID_HANDLE_VALUE;
   for (;;) {
@@ -4106,30 +4110,44 @@ static inline void chat_reposition(const Cin_Layout *layout) {
   }
 }
 
-#define CIN_MPVCALL_START "mpv --idle --config-dir=./ --input-ipc-server="
-#define CIN_MPVCALL_START_LEN cin_strlen(CIN_MPVCALL_START)
-#define CIN_MPVCALL_PIPE "\\\\.\\pipe\\cinema_mpv_"
-#define CIN_MPVCALL_PIPE_LEN cin_strlen(CIN_MPVCALL_PIPE)
-#define CIN_MPVCALL (CIN_MPVCALL_START CIN_MPVCALL_PIPE)
-#define CIN_MPVCALL_LEN cin_strlen(CIN_MPVCALL)
+#define CIN_MPVCALL_PIPE_ROOT "cinema_mpv_"
 #define CIN_MPVCALL_DIGITS 19
-#define CIN_MPVCALL_GEOMETRY_LEN block_bytes(2)
-#define CIN_MPVCALL_BUF align_to_block(CIN_MPVCALL_LEN + CIN_MPVCALL_DIGITS + CIN_MPVCALL_GEOMETRY_LEN)
+#define CIN_MPVCALL_SERVER_LEN 64
+#define CIN_MPVCALL_GEOMETRY_LEN 128
+
+#ifdef _WIN32
+#define CIN_MPVCALL_PIPE "\\\\.\\pipe\\" CIN_MPVCALL_PIPE_ROOT
+#else
+#define CIN_MPVCALL_PIPE "/tmp/" CIN_MPVCALL_PIPE_ROOT
+#endif
 
 static void mpv_spawn(Instance *instance, size_t index) {
-  static char mpv_command[CIN_MPVCALL_BUF] = {CIN_MPVCALL};
+  char geometry_str[CIN_MPVCALL_GEOMETRY_LEN] = {"--geometry="};
+  char server_str[CIN_MPVCALL_SERVER_LEN] = {"--input-ipc-server=" CIN_MPVCALL_PIPE};
+  char *mpv_flags[] = {
+      "mpv",
+      "--idle",
+      "--config-dir=./",
+      server_str,
+      geometry_str,
+      NULL};
+  static_assert((sizeof(mpv_flags) / CIN_PTR) == 6, "expected 6 elements");
   const bool extra = index == SIZE_MAX;
   if (extra) index = cmd_ctx.layout->count;
   instance->ovl_ctx.type = MPV_READ;
-  const size_t right = CIN_MPVCALL_LEN + CIN_MPVCALL_DIGITS;
+  char *server_flag = mpv_flags[3];
+  assert(strstr(server_flag, "ipc-server") && "check flags");
+  const size_t server_buf_len = strlen(server_flag);
+  const size_t right = server_buf_len + CIN_MPVCALL_DIGITS;
   size_t left = right;
   size_t j = index;
   do {
-    mpv_command[left--] = '0' + (j % 10);
+    server_flag[left--] = '0' + (j % 10);
     j /= 10;
   } while (j);
   const size_t digits = right - left++;
-  for (; j < digits; ++j) mpv_command[CIN_MPVCALL_LEN + j] = mpv_command[left + j];
+  const size_t start = server_buf_len;
+  for (; j < digits; ++j) server_flag[start + j] = server_flag[left + j];
   Cin_Screen screen = cmd_ctx.layout->items[extra ? 0 : index];
   if (extra) array_push(&arena_console, cmd_ctx.layout, screen);
   // screen.len actually includes null-terminator
@@ -4143,14 +4161,29 @@ static void mpv_spawn(Instance *instance, size_t index) {
            screen_utf8, CIN_MPVCALL_GEOMETRY_LEN);
     exit(1);
   }
-  snprintf(mpv_command + CIN_MPVCALL_LEN + digits, CIN_MPVCALL_GEOMETRY_LEN, " --geometry=%.*s", len, screen_utf8);
-  log_message(LOG_DEBUG, "Spawning instance: %s", mpv_command);
+  char *geometry_flag = mpv_flags[4];
+  assert(strstr(geometry_flag, "geometry") && "check flags");
+  const size_t geometry_buf_len = strlen(geometry_flag);
+  snprintf(geometry_flag + geometry_buf_len, (size_t)len, "%.*s", len, screen_utf8);
+  log_message(LOG_DEBUG, "Spawning instance: %s %s %s %s %s",
+              mpv_flags[0], mpv_flags[1], mpv_flags[2], mpv_flags[3], mpv_flags[4]);
+  char *socket_name = strchr(server_flag, '=');
+  assert(socket_name);
+  assert(socket_name + 1);
+  ++socket_name;
 #ifdef _WIN32
+  const int32_t mpv_buf_len = snprintf(NULL, 0, "%s %s %s %s %s",
+                                       mpv_flags[0], mpv_flags[1], mpv_flags[2], mpv_flags[3], mpv_flags[4]) +
+                              1;
+  char mpv_command[mpv_buf_len];
+  snprintf(mpv_command, (size_t)mpv_buf_len, "%s %s %s %s %s",
+           mpv_flags[0], mpv_flags[1], mpv_flags[2], mpv_flags[3], mpv_flags[4]);
   utf8_to_utf16_raw(mpv_command);
+  wchar_t mpv_command_utf16[mpv_buf_len];
+  wmemcpy(mpv_command_utf16, utf16_buf_raw.items, (size_t)mpv_buf_len);
   STARTUPINFOW si = {0};
   si.cb = sizeof(si);
   PROCESS_INFORMATION pi = {0};
-  wchar_t *mpv_command_utf16 = utf16_buf_raw.items;
   if (!CreateProcessW(exe_path_mpv, mpv_command_utf16, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
     if (GetLastError() == ERROR_FILE_NOT_FOUND) {
       log_last_error("Failed to find mpv executable");
@@ -4161,14 +4194,49 @@ static void mpv_spawn(Instance *instance, size_t index) {
   }
   instance->si = si;
   instance->pi = pi;
-  mpv_command_utf16[CIN_MPVCALL_LEN + digits] = L'\0';
-  const bool ok_pipe = create_pipe(instance, mpv_command_utf16 + CIN_MPVCALL_START_LEN);
+  const int32_t socket_name_len = utf8_to_utf16_raw(socket_name);
+  assert(socket_name_len);
+  wmemcpy(mpv_command_utf16, utf16_buf_raw.items, (size_t)socket_name_len);
+  const bool ok_pipe = create_pipe(instance, mpv_command_utf16);
   assert(ok_pipe);
   const bool ok_iocp = CreateIoCompletionPort(instance->pipe, cin_io.iocp, (ULONG_PTR)instance, 0) != NULL;
   assert(ok_iocp);
 #else
-// TODO: linux
+  pid_t pid = fork();
+  if (pid < 0) {
+    log_message(LOG_ERROR, "Failed to fork process: %s", strerror(errno));
+    return;
+  }
+  if (pid == 0) {
+    if (execvp(mpv_flags[0], mpv_flags) < 0) {
+      printf("Failed to start mpv: %s", strerror(errno));
+      exit(1);
+    }
+    assert(0);
+  }
+  struct sockaddr_un addr = {0};
+  addr.sun_family = AF_UNIX;
+  assert(strlen(socket_name) <= sizeof(addr.sun_path) - 1);
+  strncpy(addr.sun_path, socket_name, sizeof(addr.sun_path) - 1);
+  static const size_t MPV_SPAWN_TRIES = 20;
+  static const long MPV_SPAWN_DELAY = 100;
+  long nanos = MPV_SPAWN_DELAY * 1000 * 1000;
+  struct timespec duration = {
+      .tv_sec = nanos / (1000 * 1000 * 1000),
+      .tv_nsec = nanos % (1000 * 1000 * 1000)};
+  for (size_t i = 0; i < MPV_SPAWN_TRIES; ++i) {
+    const int32_t fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+      log_message(LOG_ERROR, "Socket creation failed: %s", strerror(errno));
+    }
+    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+      log_message(LOG_ERROR, "Socket connection failed: %s", strerror(errno));
+      close(fd);
+    }
+    nanosleep(&duration, 0);
+  }
 #endif
+  // TODO: linux io
   instance->buf_head = arena_bump_T1(&arena_io, Read_Buffer);
   instance->buf_tail = instance->buf_head;
   const bool ok_read = overlap_read(instance);
