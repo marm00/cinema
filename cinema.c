@@ -38,6 +38,8 @@
 #include <dirent.h>
 #include <errno.h>
 #include <glob.h>
+#include <poll.h>
+#include <pthread.h>
 #include <stdarg.h>
 #include <stddef.h>
 #include <sys/mman.h>
@@ -3142,7 +3144,11 @@ typedef enum {
 } MPV_Packet;
 
 typedef struct Overlapped_Context {
+#ifdef _WIN32
   OVERLAPPED ovl;
+#else
+  int32_t fd_index;
+#endif
   MPV_Packet type;
 } Overlapped_Context;
 
@@ -3168,13 +3174,15 @@ typedef struct Console_Timer_Ctx {
 
 typedef struct Instance {
   Overlapped_Context ovl_ctx;
-  HANDLE pipe;
   Read_Buffer *buf_head;
   Read_Buffer *buf_tail;
+#ifdef _WIN32
+  HANDLE pipe;
   STARTUPINFOW si;
   PROCESS_INFORMATION pi;
   HWND window;
   RECT rect;
+#endif
   Playlist *playlist;
   Console_Timer_Ctx *timer;
   bool full_screen;
@@ -3455,6 +3463,12 @@ static inline void playlist_insert(Instance *instance) {
 #define CIN_MPVKEY_DATA CIN_MPVKEY("data")
 #define CIN_MPVKEY_REASON CIN_MPVKEY("reason")
 
+#ifndef _WIN32
+static int32_t iocp_thread_pipe[2];
+static pthread_mutex_t iocp_thread_lock;
+static array_struct(struct pollfd) pfds = {0};
+#endif
+
 static inline void mpv_kill(Instance *instance) {
   assert(instance->playlist);
   --instance->playlist->targets;
@@ -3618,6 +3632,7 @@ static inline void iocp_parse(Instance *instance, const char *buf_start, size_t 
   }
 }
 
+#ifdef _WIN32
 static DWORD WINAPI iocp_listener(LPVOID lp_param) {
   HANDLE iocp = (HANDLE)lp_param;
   for (;;) {
@@ -3695,6 +3710,97 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
   }
   return 0;
 }
+#else
+static void *mpv_listener(void *arg) {
+  (void)arg;
+  for (;;) {
+    nfds_t ndd;
+    const int32_t poll_result = poll(pfds.items, ndd, 0);
+    if (poll_result == 0) {
+      log_message(LOG_ERROR, "Listener thread timed out polling");
+      break;
+    } else if (poll_result < 0) {
+      log_message(LOG_ERROR, "Listener thread failed poll: %s", strerror(errno));
+      break;
+    }
+    if (pfds[0].revents & POLLIN) {
+      char _val;
+      read(iocp_thread_pipe[0], &_val, 1);
+      pthread_mutex_lock(&iocp_thread_lock);
+      // realloc pfds
+      pthread_mutex_unlock(&iocp_thread_lock);
+    }
+    for (nfds_t i = 1; i < ndd; ++i) {
+      struct pollfd pfd = pfds[i];
+    }
+    Instance *instance = (Instance *)completion_key;
+    Overlapped_Context *ctx = (Overlapped_Context *)ovl;
+    if (ctx->type != MPV_READ) {
+      Overlapped_Write *msg = (Overlapped_Write *)ctx;
+      if (msg->bytes != bytes) {
+        log_message(LOG_ERROR, "Expected '%zu' bytes but received '%ld': %s", msg->bytes, bytes, msg->buf);
+      }
+    } else {
+      if (bytes) {
+        assert(!memchr(instance->buf_tail->buf, '\0', instance->buf_tail->bytes));
+        assert(sizeof(instance->buf_tail->buf) - instance->buf_tail->bytes >= bytes);
+        char *lf = memchr(instance->buf_tail->buf + instance->buf_tail->bytes, '\n', bytes);
+        instance->buf_tail->bytes += bytes;
+        if (lf) {
+          bool multi = instance->buf_tail != instance->buf_head;
+          assert((lf - instance->buf_tail->buf) >= 0);
+          size_t tail_pos = (size_t)(lf - instance->buf_tail->buf);
+          char *buf = instance->buf_head->buf;
+          size_t len = instance->buf_head->bytes;
+          if (multi) {
+            for (Read_Buffer *b = instance->buf_head->next; b; b = b->next) {
+              assert(!memchr(b->buf, '\0', b->bytes));
+              len += b->bytes;
+            }
+            char *contiguous_buf = arena_bump_T(&arena_iocp_thread, char, (uint32_t)len);
+            size_t offset = 0;
+            for (Read_Buffer *b = instance->buf_head; b != instance->buf_tail; b = b->next) {
+              assert(b);
+              memcpy(contiguous_buf + offset, b->buf, b->bytes);
+              offset += b->bytes;
+              b->bytes = 0;
+            }
+            memcpy(contiguous_buf + offset, instance->buf_tail, instance->buf_tail->bytes);
+            instance->buf_tail->bytes -= tail_pos;
+            instance->buf_tail->bytes -= 1;
+            tail_pos += offset;
+            buf = contiguous_buf;
+          }
+          size_t buf_offset = 0;
+          for (;;) {
+            *lf = '\0';
+            ++tail_pos;
+            log_message(LOG_DEBUG, "Message (%p): %.*s", instance, tail_pos, buf + buf_offset);
+            iocp_parse(instance, buf, buf_offset);
+            if (tail_pos >= len) break;
+            lf = memchr(buf + tail_pos, '\n', len - tail_pos);
+            if (!lf) break;
+            buf_offset = tail_pos;
+            assert((lf - buf) >= 0);
+            tail_pos = (size_t)(lf - buf);
+          }
+          const size_t remainder = tail_pos < len ? len - tail_pos : 0;
+          memcpy(instance->buf_head, buf + tail_pos, remainder);
+          instance->buf_head->bytes = remainder;
+          instance->buf_tail = instance->buf_head;
+          if (multi) arena_free_pos(&arena_iocp_thread, (uint8_t *)buf, (uint32_t)len);
+        } else {
+          if (instance->buf_tail->next) instance->buf_tail->next->bytes = 0;
+          else instance->buf_tail->next = arena_bump_T1(&arena_iocp_thread, Read_Buffer);
+          instance->buf_tail = instance->buf_tail->next;
+        }
+      }
+      overlap_read(instance);
+    }
+  }
+  return 0;
+}
+#endif
 
 static inline bool bounded_console(HANDLE console) {
   assert(console);
@@ -4220,10 +4326,10 @@ static void mpv_spawn(Instance *instance, size_t index) {
   strncpy(addr.sun_path, socket_name, sizeof(addr.sun_path) - 1);
   static const size_t MPV_SPAWN_TRIES = 20;
   static const long MPV_SPAWN_DELAY = 100;
-  long nanos = MPV_SPAWN_DELAY * 1000 * 1000;
+  static const long MPV_SPAWN_NANOS = MPV_SPAWN_DELAY * 1000 * 1000;
   struct timespec duration = {
-      .tv_sec = nanos / (1000 * 1000 * 1000),
-      .tv_nsec = nanos % (1000 * 1000 * 1000)};
+      .tv_sec = MPV_SPAWN_NANOS / (1000 * 1000 * 1000),
+      .tv_nsec = MPV_SPAWN_NANOS % (1000 * 1000 * 1000)};
   for (size_t i = 0; i < MPV_SPAWN_TRIES; ++i) {
     const int32_t fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) {
@@ -4258,6 +4364,7 @@ static inline bool init_mpv(void) {
   playlist_setup_shuffle(default_playlist);
   Instance *head_instance = cin_io.instances.head;
   playlist_set_default(head_instance);
+#ifdef _WIN32
   cin_io.iocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
   if (!cin_io.iocp) {
     log_last_error("Failed to create iocp");
@@ -4267,6 +4374,9 @@ static inline bool init_mpv(void) {
     log_last_error("Failed to create iocp listener");
     return false;
   }
+#else
+
+#endif
   return true;
 }
 
@@ -5222,7 +5332,6 @@ static void cmd_clear_validator(void) {
 static void cmd_macro_executor(void) {
   Cin_Macro *macro = cmd_ctx.macro;
   if (macro) {
-    // TODO: continue hereee
     const char *p = macro->items;
     const char *tail = macro->items + macro->count - 1;
     do {
