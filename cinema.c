@@ -3182,6 +3182,8 @@ typedef struct Instance {
   PROCESS_INFORMATION pi;
   HWND window;
   RECT rect;
+#else
+  int32_t fd;
 #endif
   Playlist *playlist;
   Console_Timer_Ctx *timer;
@@ -3464,9 +3466,10 @@ static inline void playlist_insert(Instance *instance) {
 #define CIN_MPVKEY_REASON CIN_MPVKEY("reason")
 
 #ifndef _WIN32
-static int32_t iocp_thread_pipe[2];
-static pthread_mutex_t iocp_thread_lock;
-static array_struct(struct pollfd) pfds = {0};
+static int32_t listener_pipe[2];
+static pthread_mutex_t listener_lock;
+static array_struct(struct pollfd) listener_pfds = {0};
+static array_struct(Instance *) listener_pfds_to_instances = {0};
 #endif
 
 static inline void mpv_kill(Instance *instance) {
@@ -3632,6 +3635,61 @@ static inline void iocp_parse(Instance *instance, const char *buf_start, size_t 
   }
 }
 
+static inline void iocp_process(Instance *instance, size_t bytes) {
+  assert(!memchr(instance->buf_tail->buf, '\0', instance->buf_tail->bytes));
+  assert(sizeof(instance->buf_tail->buf) - instance->buf_tail->bytes >= bytes);
+  char *lf = memchr(instance->buf_tail->buf + instance->buf_tail->bytes, '\n', bytes);
+  instance->buf_tail->bytes += bytes;
+  if (lf) {
+    bool multi = instance->buf_tail != instance->buf_head;
+    assert((lf - instance->buf_tail->buf) >= 0);
+    size_t tail_pos = (size_t)(lf - instance->buf_tail->buf);
+    char *buf = instance->buf_head->buf;
+    size_t len = instance->buf_head->bytes;
+    if (multi) {
+      for (Read_Buffer *b = instance->buf_head->next; b; b = b->next) {
+        assert(!memchr(b->buf, '\0', b->bytes));
+        len += b->bytes;
+      }
+      char *contiguous_buf = arena_bump_T(&arena_iocp_thread, char, (uint32_t)len);
+      size_t offset = 0;
+      for (Read_Buffer *b = instance->buf_head; b != instance->buf_tail; b = b->next) {
+        assert(b);
+        memcpy(contiguous_buf + offset, b->buf, b->bytes);
+        offset += b->bytes;
+        b->bytes = 0;
+      }
+      memcpy(contiguous_buf + offset, instance->buf_tail, instance->buf_tail->bytes);
+      instance->buf_tail->bytes -= tail_pos;
+      instance->buf_tail->bytes -= 1;
+      tail_pos += offset;
+      buf = contiguous_buf;
+    }
+    size_t buf_offset = 0;
+    for (;;) {
+      *lf = '\0';
+      ++tail_pos;
+      log_message(LOG_DEBUG, "Message (%p): %.*s", instance, tail_pos, buf + buf_offset);
+      iocp_parse(instance, buf, buf_offset);
+      if (tail_pos >= len) break;
+      lf = memchr(buf + tail_pos, '\n', len - tail_pos);
+      if (!lf) break;
+      buf_offset = tail_pos;
+      assert((lf - buf) >= 0);
+      tail_pos = (size_t)(lf - buf);
+    }
+    const size_t remainder = tail_pos < len ? len - tail_pos : 0;
+    memcpy(instance->buf_head, buf + tail_pos, remainder);
+    instance->buf_head->bytes = remainder;
+    instance->buf_tail = instance->buf_head;
+    if (multi) arena_free_pos(&arena_iocp_thread, (uint8_t *)buf, (uint32_t)len);
+  } else {
+    if (instance->buf_tail->next) instance->buf_tail->next->bytes = 0;
+    else instance->buf_tail->next = arena_bump_T1(&arena_iocp_thread, Read_Buffer);
+    instance->buf_tail = instance->buf_tail->next;
+  }
+}
+
 #ifdef _WIN32
 static DWORD WINAPI iocp_listener(LPVOID lp_param) {
   HANDLE iocp = (HANDLE)lp_param;
@@ -3652,58 +3710,7 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
       }
     } else {
       if (bytes) {
-        assert(!memchr(instance->buf_tail->buf, '\0', instance->buf_tail->bytes));
-        assert(sizeof(instance->buf_tail->buf) - instance->buf_tail->bytes >= bytes);
-        char *lf = memchr(instance->buf_tail->buf + instance->buf_tail->bytes, '\n', bytes);
-        instance->buf_tail->bytes += bytes;
-        if (lf) {
-          bool multi = instance->buf_tail != instance->buf_head;
-          assert((lf - instance->buf_tail->buf) >= 0);
-          size_t tail_pos = (size_t)(lf - instance->buf_tail->buf);
-          char *buf = instance->buf_head->buf;
-          size_t len = instance->buf_head->bytes;
-          if (multi) {
-            for (Read_Buffer *b = instance->buf_head->next; b; b = b->next) {
-              assert(!memchr(b->buf, '\0', b->bytes));
-              len += b->bytes;
-            }
-            char *contiguous_buf = arena_bump_T(&arena_iocp_thread, char, (uint32_t)len);
-            size_t offset = 0;
-            for (Read_Buffer *b = instance->buf_head; b != instance->buf_tail; b = b->next) {
-              assert(b);
-              memcpy(contiguous_buf + offset, b->buf, b->bytes);
-              offset += b->bytes;
-              b->bytes = 0;
-            }
-            memcpy(contiguous_buf + offset, instance->buf_tail, instance->buf_tail->bytes);
-            instance->buf_tail->bytes -= tail_pos;
-            instance->buf_tail->bytes -= 1;
-            tail_pos += offset;
-            buf = contiguous_buf;
-          }
-          size_t buf_offset = 0;
-          for (;;) {
-            *lf = '\0';
-            ++tail_pos;
-            log_message(LOG_DEBUG, "Message (%p): %.*s", instance, tail_pos, buf + buf_offset);
-            iocp_parse(instance, buf, buf_offset);
-            if (tail_pos >= len) break;
-            lf = memchr(buf + tail_pos, '\n', len - tail_pos);
-            if (!lf) break;
-            buf_offset = tail_pos;
-            assert((lf - buf) >= 0);
-            tail_pos = (size_t)(lf - buf);
-          }
-          const size_t remainder = tail_pos < len ? len - tail_pos : 0;
-          memcpy(instance->buf_head, buf + tail_pos, remainder);
-          instance->buf_head->bytes = remainder;
-          instance->buf_tail = instance->buf_head;
-          if (multi) arena_free_pos(&arena_iocp_thread, (uint8_t *)buf, (uint32_t)len);
-        } else {
-          if (instance->buf_tail->next) instance->buf_tail->next->bytes = 0;
-          else instance->buf_tail->next = arena_bump_T1(&arena_iocp_thread, Read_Buffer);
-          instance->buf_tail = instance->buf_tail->next;
-        }
+        iocp_process(instance, (size_t)bytes);
       }
       overlap_read(instance);
     }
@@ -3713,89 +3720,46 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
 #else
 static void *mpv_listener(void *arg) {
   (void)arg;
+  struct pollfd root_pfd = {.fd = listener_pipe[0], .events = POLLIN};
+  array_push(&arena_iocp_thread, &listener_pfds, root_pfd);
   for (;;) {
-    nfds_t ndd;
-    const int32_t poll_result = poll(pfds.items, ndd, 0);
+    const nfds_t nfds = (nfds_t)listener_pfds.count;
+    const int32_t poll_result = poll(listener_pfds.items, nfds, 1000);
     if (poll_result == 0) {
       log_message(LOG_ERROR, "Listener thread timed out polling");
+      assert(false);
       break;
     } else if (poll_result < 0) {
       log_message(LOG_ERROR, "Listener thread failed poll: %s", strerror(errno));
+      assert(false);
       break;
     }
-    if (pfds[0].revents & POLLIN) {
+    if (listener_pfds.items[0].revents & POLLIN) {
       char _val;
-      read(iocp_thread_pipe[0], &_val, 1);
-      pthread_mutex_lock(&iocp_thread_lock);
-      // realloc pfds
-      pthread_mutex_unlock(&iocp_thread_lock);
+      read(listener_pipe[0], &_val, 1);
+      pthread_mutex_lock(&listener_lock);
+      const uint32_t next_index = listener_pfds.count;
+      // main thread has added 1 or more instances
+      // map so next poll includes them
+      assert(listener_pfds_to_instances.count >= next_index);
+      Instance *instance = listener_pfds_to_instances.items[next_index];
+      struct pollfd new_pfd = {.fd = instance->fd, .events = POLLIN};
+      array_push(&arena_iocp_thread, &listener_pfds, new_pfd);
+      pthread_mutex_unlock(&listener_lock);
     }
-    for (nfds_t i = 1; i < ndd; ++i) {
-      struct pollfd pfd = pfds[i];
-    }
-    Instance *instance = (Instance *)completion_key;
-    Overlapped_Context *ctx = (Overlapped_Context *)ovl;
-    if (ctx->type != MPV_READ) {
-      Overlapped_Write *msg = (Overlapped_Write *)ctx;
-      if (msg->bytes != bytes) {
-        log_message(LOG_ERROR, "Expected '%zu' bytes but received '%ld': %s", msg->bytes, bytes, msg->buf);
-      }
-    } else {
-      if (bytes) {
-        assert(!memchr(instance->buf_tail->buf, '\0', instance->buf_tail->bytes));
-        assert(sizeof(instance->buf_tail->buf) - instance->buf_tail->bytes >= bytes);
-        char *lf = memchr(instance->buf_tail->buf + instance->buf_tail->bytes, '\n', bytes);
-        instance->buf_tail->bytes += bytes;
-        if (lf) {
-          bool multi = instance->buf_tail != instance->buf_head;
-          assert((lf - instance->buf_tail->buf) >= 0);
-          size_t tail_pos = (size_t)(lf - instance->buf_tail->buf);
-          char *buf = instance->buf_head->buf;
-          size_t len = instance->buf_head->bytes;
-          if (multi) {
-            for (Read_Buffer *b = instance->buf_head->next; b; b = b->next) {
-              assert(!memchr(b->buf, '\0', b->bytes));
-              len += b->bytes;
-            }
-            char *contiguous_buf = arena_bump_T(&arena_iocp_thread, char, (uint32_t)len);
-            size_t offset = 0;
-            for (Read_Buffer *b = instance->buf_head; b != instance->buf_tail; b = b->next) {
-              assert(b);
-              memcpy(contiguous_buf + offset, b->buf, b->bytes);
-              offset += b->bytes;
-              b->bytes = 0;
-            }
-            memcpy(contiguous_buf + offset, instance->buf_tail, instance->buf_tail->bytes);
-            instance->buf_tail->bytes -= tail_pos;
-            instance->buf_tail->bytes -= 1;
-            tail_pos += offset;
-            buf = contiguous_buf;
-          }
-          size_t buf_offset = 0;
-          for (;;) {
-            *lf = '\0';
-            ++tail_pos;
-            log_message(LOG_DEBUG, "Message (%p): %.*s", instance, tail_pos, buf + buf_offset);
-            iocp_parse(instance, buf, buf_offset);
-            if (tail_pos >= len) break;
-            lf = memchr(buf + tail_pos, '\n', len - tail_pos);
-            if (!lf) break;
-            buf_offset = tail_pos;
-            assert((lf - buf) >= 0);
-            tail_pos = (size_t)(lf - buf);
-          }
-          const size_t remainder = tail_pos < len ? len - tail_pos : 0;
-          memcpy(instance->buf_head, buf + tail_pos, remainder);
-          instance->buf_head->bytes = remainder;
-          instance->buf_tail = instance->buf_head;
-          if (multi) arena_free_pos(&arena_iocp_thread, (uint8_t *)buf, (uint32_t)len);
+    for (nfds_t i = 1; i < nfds; ++i) {
+      struct pollfd pfd = listener_pfds.items[i];
+      if (pfd.revents & POLLIN) {
+        Instance *instance = listener_pfds_to_instances.items[i - 1];
+        char *start = instance->buf_tail->buf + instance->buf_tail->bytes;
+        const size_t to_read = sizeof(instance->buf_tail->buf) - instance->buf_tail->bytes;
+        const ssize_t bytes = read(pfd.fd, start, to_read);
+        if (bytes > 0) {
+          iocp_process(instance, (size_t)bytes);
         } else {
-          if (instance->buf_tail->next) instance->buf_tail->next->bytes = 0;
-          else instance->buf_tail->next = arena_bump_T1(&arena_iocp_thread, Read_Buffer);
-          instance->buf_tail = instance->buf_tail->next;
+          assert(false && "reading terminated socket");
         }
       }
-      overlap_read(instance);
     }
   }
   return 0;
@@ -4334,10 +4298,16 @@ static void mpv_spawn(Instance *instance, size_t index) {
     const int32_t fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) {
       log_message(LOG_ERROR, "Socket creation failed: %s", strerror(errno));
-    }
-    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+    } else if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
       log_message(LOG_ERROR, "Socket connection failed: %s", strerror(errno));
       close(fd);
+    } else {
+      pthread_mutex_lock(&listener_lock);
+      instance->fd = fd;
+      array_push(&arena_console, &listener_pfds_to_instances, instance);
+      pthread_mutex_unlock(&listener_lock);
+      write(listener_pipe[1], "x", 1);
+      break;
     }
     nanosleep(&duration, 0);
   }
