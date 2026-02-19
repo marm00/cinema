@@ -2385,8 +2385,8 @@ static inline void setup_file_path(char *dst, const char *src, size_t size) {
   const bool expand = *src == '~';
   if (expand) {
     const char *src_pos = src + 1;
-    const bool only_root = expand && !*(src_pos);
-    const bool valid_expand = expand && *(src_pos) == '/';
+    const bool only_root = !*(src_pos);
+    const bool valid_expand = *(src_pos) == '/';
     char *home = NULL;
     if (only_root || valid_expand) {
       home = getenv("HOME");
@@ -3220,13 +3220,13 @@ typedef struct Instance {
   Read_Buffer *buf_tail;
 #ifdef _WIN32
   OVERLAPPED ovl;
-  HANDLE pipe;
+  HANDLE socket;
   STARTUPINFOW si;
   PROCESS_INFORMATION pi;
   HWND window;
   RECT rect;
 #else
-  int32_t fd;
+  int32_t socket;
   int32_t listener_index;
 #endif
   Playlist *playlist;
@@ -3283,8 +3283,8 @@ static bool create_pipe(Instance *instance, const wchar_t *name) {
       }
     }
   }
-  instance->pipe = hPipe;
-  log_message(LOG_TRACE, "Successfully created pipe (HANDLE) %p", (void *)instance->pipe);
+  instance->socket = hPipe;
+  log_message(LOG_TRACE, "Successfully created pipe (HANDLE) %p", (void *)instance->socket);
   return true;
 }
 
@@ -3292,7 +3292,7 @@ static bool overlap_read(Instance *instance) {
   memset(&instance->ovl, 0, sizeof(OVERLAPPED));
   char *start = instance->buf_tail->buf + instance->buf_tail->bytes;
   const uint32_t to_read = (uint32_t)(sizeof(instance->buf_tail->buf) - instance->buf_tail->bytes);
-  if (instance->pipe && !ReadFile(instance->pipe, start, to_read, NULL, &instance->ovl)) {
+  if (instance->socket && !ReadFile(instance->socket, start, to_read, NULL, &instance->ovl)) {
     if (GetLastError() != ERROR_IO_PENDING) {
       log_last_error("Failed to initialize read");
       return false;
@@ -3325,7 +3325,7 @@ static bool overlap_write(Instance *instance, MPV_Packet type, const char *cmd, 
   log_message(LOG_DEBUG, "Writing message (%p) (%zu bytes): %.*s",
               instance, msg->bytes, msg->bytes - 1, msg->buf);
 #ifdef _WIN32
-  if (instance->pipe && !WriteFile(instance->pipe, msg->buf, (uint32_t)msg->bytes, NULL, &msg->ovl_ctx.ovl)) {
+  if (instance->socket && !WriteFile(instance->socket, msg->buf, (uint32_t)msg->bytes, NULL, &msg->ovl_ctx.ovl)) {
     switch (GetLastError()) {
     case ERROR_IO_PENDING:
       // iocp will free write
@@ -4336,7 +4336,7 @@ static void mpv_spawn(Instance *instance, size_t index) {
   wmemcpy(mpv_command_utf16, utf16_buf_raw.items, (size_t)socket_name_len);
   const bool ok_pipe = create_pipe(instance, mpv_command_utf16);
   assert(ok_pipe);
-  const bool ok_iocp = CreateIoCompletionPort(instance->pipe, cin_io.iocp, (ULONG_PTR)instance, 0) != NULL;
+  const bool ok_iocp = CreateIoCompletionPort(instance->socket, cin_io.iocp, (ULONG_PTR)instance, 0) != NULL;
   assert(ok_iocp);
   instance->buf_head = arena_bump_T1(&arena_io, Read_Buffer);
   instance->buf_tail = instance->buf_head;
@@ -4424,7 +4424,7 @@ static inline bool init_mpv(void) {
 static inline bool timer_autoplay(Console_Timer_Ctx *ctx) {
   bool targets = false;
   cache_foreach(&cin_io.instances, Instance, i, o) {
-    if (o->pipe && o->timer == ctx) {
+    if (o->socket && o->timer == ctx) {
       targets = true;
       playlist_play(o);
     }
@@ -4440,7 +4440,7 @@ static inline bool timer_autoplay(Console_Timer_Ctx *ctx) {
     for (Instance *instance = cin_io.instances.head;            \
          _j <= _s && instance;                                  \
          instance = instance->next, ++_j)                       \
-      if (_j == _s && instance->pipe)
+      if (_j == _s && instance->socket)
 
 static void cmd_help_executor(void) {
   wwrite_safe(cmd_ctx.help.items, (uint32_t)cmd_ctx.help.count);
@@ -4460,8 +4460,8 @@ static void cmd_layout_executor(void) {
   chat_reposition(layout);
   cache_foreach(&cin_io.instances, Instance, i, old) {
     if (screen >= next_count) {
-      if (old->pipe) overlap_write(old, MPV_QUIT, "quit", NULL, NULL);
-    } else if (old->pipe) {
+      if (old->socket) overlap_write(old, MPV_QUIT, "quit", NULL, NULL);
+    } else if (old->socket) {
       log_message(LOG_INFO, "i=%u, screen=%zu", i);
       assert(IsWindow(old->window));
       const char *geometry = (char *)screen_strings.items + layout->items[screen].offset;
@@ -4903,7 +4903,7 @@ static void cmd_hide_executor(void) {
   cache_foreach(&cin_io.instances, Instance, i, o) {
     if (o->playlist && !o->playlist->from_tag) {
       playlist_set_default(o);
-      if (o->pipe) playlist_play(o);
+      if (o->socket) playlist_play(o);
     }
   }
 }
@@ -4943,7 +4943,7 @@ static void cmd_kill_validator(void) {
 static void cmd_maximize_executor(void) {
   const size_t target = cmd_ctx.numbers.count ? cmd_ctx.numbers.items[0] - 1 : 0;
   cache_foreach(&cin_io.instances, Instance, i, instance) {
-    if (instance->pipe) {
+    if (instance->socket) {
       if (i == target) {
         instance->full_screen = !instance->full_screen;
         overlap_write(instance, MPV_WRITE, "cycle", "fullscreen", NULL);
@@ -5097,7 +5097,7 @@ static void cmd_store_executor(void) {
   cmd_ctx.layout = layout;
   array_clear(&geometry_buf);
   cache_foreach(&cin_io.instances, Instance, i, instance) {
-    if (instance->pipe && IsWindow(instance->window)) {
+    if (instance->socket && IsWindow(instance->window)) {
       GetWindowRect(instance->window, &instance->rect);
       const int32_t bytes = snprintf(NULL, 0, FSTR_RECT, FSTR_RECT_ARGS(instance->rect)) + 1;
       assert(bytes > 1);
@@ -5460,7 +5460,7 @@ static void cmd_extra_executor(void) {
   bool reuse = false;
   mpv_lock();
   cache_foreach(&cin_io.instances, Instance, i, old) {
-    if (!old->pipe) {
+    if (!old->socket) {
       // reuse if free instance available
       reuse = true;
       mpv_spawn(old, SIZE_MAX);
