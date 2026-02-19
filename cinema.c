@@ -634,6 +634,17 @@ static_assert(CIN_PTR == 8 ? (CIN_ARRAY_SIZE == 24) : true, "bytes updated (poss
     (a)->count++;                                        \
   } while (0)
 
+#define array_remove(a, i)                               \
+  do {                                                   \
+    assert((i) <= (a)->count);                           \
+    if ((i) < (a)->count) {                              \
+      memmove((a)->items + (i) + 1,                      \
+              (a)->items + (i),                          \
+              ((a)->count - (i)) * sizeof(*(a)->items)); \
+    }                                                    \
+    --(a)->count;                                        \
+  } while (0)
+
 #define array_pop(a)    \
   do {                  \
     assert((a)->count); \
@@ -3146,8 +3157,6 @@ typedef enum {
 typedef struct Overlapped_Context {
 #ifdef _WIN32
   OVERLAPPED ovl;
-#else
-  int32_t fd_index;
 #endif
   MPV_Packet type;
 } Overlapped_Context;
@@ -3173,10 +3182,10 @@ typedef struct Console_Timer_Ctx {
 } Console_Timer_Ctx;
 
 typedef struct Instance {
-  Overlapped_Context ovl_ctx;
   Read_Buffer *buf_head;
   Read_Buffer *buf_tail;
 #ifdef _WIN32
+  OVERLAPPED ovl;
   HANDLE pipe;
   STARTUPINFOW si;
   PROCESS_INFORMATION pi;
@@ -3184,6 +3193,7 @@ typedef struct Instance {
   RECT rect;
 #else
   int32_t fd;
+  int32_t listener_index;
 #endif
   Playlist *playlist;
   Console_Timer_Ctx *timer;
@@ -3199,9 +3209,14 @@ cache_define(Instance_Cache, Instance);
 static struct {
   Write_Cache writes;
   Instance_Cache instances;
+#ifdef _WIN32
   HANDLE iocp;
+#else
+  pthread_t listener;
+#endif
 } cin_io = {0};
 
+#ifdef _WIN32
 static bool create_pipe(Instance *instance, const wchar_t *name) {
   // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilea
   // https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-client
@@ -3240,10 +3255,10 @@ static bool create_pipe(Instance *instance, const wchar_t *name) {
 }
 
 static bool overlap_read(Instance *instance) {
-  memset(&instance->ovl_ctx.ovl, 0, sizeof(OVERLAPPED));
+  memset(&instance->ovl, 0, sizeof(OVERLAPPED));
   char *start = instance->buf_tail->buf + instance->buf_tail->bytes;
   const uint32_t to_read = (uint32_t)(sizeof(instance->buf_tail->buf) - instance->buf_tail->bytes);
-  if (instance->pipe && !ReadFile(instance->pipe, start, to_read, NULL, &instance->ovl_ctx.ovl)) {
+  if (instance->pipe && !ReadFile(instance->pipe, start, to_read, NULL, &instance->ovl)) {
     if (GetLastError() != ERROR_IO_PENDING) {
       log_last_error("Failed to initialize read");
       return false;
@@ -3252,8 +3267,9 @@ static bool overlap_read(Instance *instance) {
   // Read is queued for iocp
   return true;
 }
+#endif
 
-#define CIN_WRITE_CMD_LEFT "{async:true,request_id:%lld,command:[\"%s\""
+#define CIN_WRITE_CMD_LEFT "{async:true,request_id:%ld,command:[\"%s\""
 #define CIN_WRITE_CMD_MID ",\"%s\""
 #define CIN_WRITE_CMD_RIGHT "]}\n"
 #define CIN_WRITE_CMD_0ARG (CIN_WRITE_CMD_LEFT CIN_WRITE_CMD_RIGHT)
@@ -3272,8 +3288,9 @@ static bool overlap_write(Instance *instance, MPV_Packet type, const char *cmd, 
   assert(bytes > 0);
   assert((size_t)bytes < sizeof(msg->buf) - 1);
   msg->bytes = (size_t)bytes;
-  log_message(LOG_DEBUG, "Writing message (PID %lu) (%zu bytes): %.*s",
-              instance->pi.dwProcessId, msg->bytes, msg->bytes - 1, msg->buf);
+  log_message(LOG_DEBUG, "Writing message (%p) (%zu bytes): %.*s",
+              instance, msg->bytes, msg->bytes - 1, msg->buf);
+#ifdef _WIN32
   if (instance->pipe && !WriteFile(instance->pipe, msg->buf, (uint32_t)msg->bytes, NULL, &msg->ovl_ctx.ovl)) {
     switch (GetLastError()) {
     case ERROR_IO_PENDING:
@@ -3293,6 +3310,14 @@ static bool overlap_write(Instance *instance, MPV_Packet type, const char *cmd, 
     assert(false);
     return false;
   }
+#else
+  const ssize_t write_result = write(instance->fd, msg->buf, msg->bytes);
+  if (write_result < 0) {
+    log_message(LOG_ERROR, "Failed to write to file descriptor %d: %s", instance->fd, strerror(errno));
+  } else if (write_result < (ssize_t)msg->bytes) {
+    log_message(LOG_ERROR, "Expected '%zu' bytes but received '%ld': %s", msg->bytes, bytes, msg->buf);
+  }
+#endif
   log_message(LOG_TRACE, "Write call completed immediately.");
   return true;
 }
@@ -3475,6 +3500,14 @@ static array_struct(Instance *) listener_pfds_to_instances = {0};
 static inline void mpv_kill(Instance *instance) {
   assert(instance->playlist);
   --instance->playlist->targets;
+#ifndef _WIN32
+  close(instance->fd);
+  pthread_mutex_lock(&listener_lock);
+  const int32_t fd_index = instance->listener_index;
+  array_remove(&listener_pfds_to_instances, fd_index);
+  array_remove(&listener_pfds, fd_index);
+  pthread_mutex_unlock(&listener_lock);
+#endif
   Read_Buffer *buf_head = instance->buf_head;
   Read_Buffer *buf_tail = instance->buf_tail;
   Instance *next = instance->next;
@@ -3743,6 +3776,7 @@ static void *mpv_listener(void *arg) {
       // map so next poll includes them
       assert(listener_pfds_to_instances.count >= next_index);
       Instance *instance = listener_pfds_to_instances.items[next_index];
+      instance->listener_index = next_index;
       struct pollfd new_pfd = {.fd = instance->fd, .events = POLLIN};
       array_push(&arena_iocp_thread, &listener_pfds, new_pfd);
       pthread_mutex_unlock(&listener_lock);
@@ -4201,10 +4235,9 @@ static void mpv_spawn(Instance *instance, size_t index) {
       server_str,
       geometry_str,
       NULL};
-  static_assert((sizeof(mpv_flags) / CIN_PTR) == 6, "expected 6 elements");
+  static_assert((sizeof(mpv_flags) / CIN_PTR) == 6, "expected 6 elements including sentinel");
   const bool extra = index == SIZE_MAX;
   if (extra) index = cmd_ctx.layout->count;
-  instance->ovl_ctx.type = MPV_READ;
   char *server_flag = mpv_flags[3];
   assert(strstr(server_flag, "ipc-server") && "check flags");
   const size_t server_buf_len = strlen(server_flag);
@@ -4271,6 +4304,10 @@ static void mpv_spawn(Instance *instance, size_t index) {
   assert(ok_pipe);
   const bool ok_iocp = CreateIoCompletionPort(instance->pipe, cin_io.iocp, (ULONG_PTR)instance, 0) != NULL;
   assert(ok_iocp);
+  instance->buf_head = arena_bump_T1(&arena_io, Read_Buffer);
+  instance->buf_tail = instance->buf_head;
+  const bool ok_read = overlap_read(instance);
+  assert(ok_read);
 #else
   pid_t pid = fork();
   if (pid < 0) {
@@ -4279,7 +4316,7 @@ static void mpv_spawn(Instance *instance, size_t index) {
   }
   if (pid == 0) {
     if (execvp(mpv_flags[0], mpv_flags) < 0) {
-      printf("Failed to start mpv: %s", strerror(errno));
+      log_message(LOG_ERROR, "Failed to start mpv: %s", strerror(errno));
       exit(1);
     }
     assert(0);
@@ -4302,8 +4339,10 @@ static void mpv_spawn(Instance *instance, size_t index) {
       log_message(LOG_ERROR, "Socket connection failed: %s", strerror(errno));
       close(fd);
     } else {
-      pthread_mutex_lock(&listener_lock);
       instance->fd = fd;
+      instance->buf_head = arena_bump_T1(&arena_io, Read_Buffer);
+      instance->buf_tail = instance->buf_head;
+      pthread_mutex_lock(&listener_lock);
       array_push(&arena_console, &listener_pfds_to_instances, instance);
       pthread_mutex_unlock(&listener_lock);
       write(listener_pipe[1], "x", 1);
@@ -4312,11 +4351,6 @@ static void mpv_spawn(Instance *instance, size_t index) {
     nanosleep(&duration, 0);
   }
 #endif
-  // TODO: linux io
-  instance->buf_head = arena_bump_T1(&arena_io, Read_Buffer);
-  instance->buf_tail = instance->buf_head;
-  const bool ok_read = overlap_read(instance);
-  assert(ok_read);
   assert(instance->playlist);
   playlist_play(instance);
   overlap_write(instance, MPV_WINDOW_ID, "get_property", "window-id", NULL);
@@ -4345,7 +4379,10 @@ static inline bool init_mpv(void) {
     return false;
   }
 #else
-
+  if (pthread_create(&cin_io.listener, NULL, mpv_listener, NULL) != 0) {
+    log_message(LOG_ERROR, "Failed to create listener thread: %s", strerror(errno));
+    return false;
+  }
 #endif
   return true;
 }
