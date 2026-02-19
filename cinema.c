@@ -40,6 +40,7 @@
 #include <glob.h>
 #include <poll.h>
 #include <pthread.h>
+#include <pwd.h>
 #include <stdarg.h>
 #include <stddef.h>
 #include <sys/mman.h>
@@ -2380,21 +2381,38 @@ DEFINE_SETUP_FILE_PATH(char, '\\', '/', '\0', memcpy)
 DEFINE_SETUP_FILE_PATH(wchar_t, L'\\', L'/', L'\0', wmemcpy)
 #else
 static inline void setup_file_path(char *dst, const char *src, size_t size) {
-  // tilde expansion
-  // TODO: If an initial tilde is followed by a username (e.g., "~andrea/bin"),
-  // then the tilde and username are substituted by the home
-  // directory of that user.  If the username is invalid, or the
-  // home directory cannot be determined, then no substitution
-  // is performed.
+  // tilde expansion, username substitution
   const bool expand = *src == '~';
-  const bool only_root = expand && !*(src + 1);
-  const bool valid_expand = expand && *(src + 1) == '/';
-  if (expand && (only_root || valid_expand)) {
-    char *home = getenv("HOME");
-    if (!home) {
-      log_message(LOG_ERROR, "Failed to expand '~'for path '%s': %s", src, strerror(errno));
-      return;
+  if (expand) {
+    const char *src_pos = src + 1;
+    const bool only_root = expand && !*(src_pos);
+    const bool valid_expand = expand && *(src_pos) == '/';
+    char *home = NULL;
+    if (only_root || valid_expand) {
+      home = getenv("HOME");
+      if (!home) {
+        log_message(LOG_ERROR, "Failed to expand '~'for path '%s': %s", src, strerror(errno));
+        return;
+      }
+    } else {
+      char *username_tail = strchr(src_pos, '/');
+      struct passwd *pw = NULL;
+      errno = 0;
+      if (username_tail) {
+        char tmp = *username_tail;
+        *username_tail = '\0';
+        pw = getpwnam(src_pos);
+        *username_tail = tmp;
+      } else {
+        pw = getpwnam(src_pos);
+      }
+      if (!pw) {
+        log_message(LOG_ERROR, "Username not found in '%s': %s", src, strerror(errno));
+        return;
+      }
+      home = pw->pw_dir;
     }
+    assert(home);
     assert(*home);
     const char *path_tail = src + (only_root ? 1 : 2);
     const size_t home_len = strlen(home);
