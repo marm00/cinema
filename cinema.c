@@ -1730,8 +1730,24 @@ static inline uint32_t rand_between(uint32_t min, uint32_t max) {
   assert(range);
   const uint32_t upper = UINT_MAX - (UINT_MAX % range);
   uint32_t random;
+#ifdef _WIN32
   do rand_s(&random);
   while (random >= upper);
+#else
+  FILE *f = fopen("/dev/urandom", "rb");
+  if (!f) {
+    log_message(LOG_ERROR, "Failed to open /dev/urandom: %s", strerror(errno));
+    return min;
+  }
+  do {
+    if (fread(&random, sizeof(random), 1, f) != 1) {
+      log_message(LOG_ERROR, "Failed to read /dev/urandom: %s", strerror(errno));
+      fclose(f);
+      return min;
+    }
+  } while (random >= upper);
+  fclose(f);
+#endif
   return min + (random % range);
 }
 
