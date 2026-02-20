@@ -123,7 +123,7 @@ static inline bool init_os(void) {
 #define max(a, b) (((a) > (b)) ? (a) : (b))
 #endif
 
-#define align(a, b) (((a) + (b)-1) & (~((b)-1)))
+#define align(a, b) (((a) + (b) - 1) & (~((b) - 1)))
 #define CIN_PTR ((uint32_t)__SIZEOF_POINTER__)
 #define align_size(T) max(CIN_PTR, __alignof(T))
 #define align_to_size(n) align((n), CIN_PTR)
@@ -136,7 +136,7 @@ static inline bool init_os(void) {
 #define gigabytes(n) ((n) << 30)
 #define CIN_ARENA_CAP megabytes(2)
 #define CIN_ARENA_BYTES align(sizeof(Arena), 64)
-#define cin_ispow2(n) ((n) && ((n) & ((n)-1)) == 0)
+#define cin_ispow2(n) ((n) && ((n) & ((n) - 1)) == 0)
 
 static inline uint32_t log2_floor(uint32_t n) {
   assert(n > 0U && "0 is undefined behavior");
@@ -3219,7 +3219,7 @@ typedef struct Instance {
   Read_Buffer *buf_head;
   Read_Buffer *buf_tail;
 #ifdef _WIN32
-  OVERLAPPED ovl;
+  Overlapped_Context ovl_ctx;
   HANDLE socket;
   STARTUPINFOW si;
   PROCESS_INFORMATION pi;
@@ -3289,10 +3289,10 @@ static bool create_pipe(Instance *instance, const wchar_t *name) {
 }
 
 static bool overlap_read(Instance *instance) {
-  memset(&instance->ovl, 0, sizeof(OVERLAPPED));
+  memset(&instance->ovl_ctx.ovl, 0, sizeof(OVERLAPPED));
   char *start = instance->buf_tail->buf + instance->buf_tail->bytes;
   const uint32_t to_read = (uint32_t)(sizeof(instance->buf_tail->buf) - instance->buf_tail->bytes);
-  if (instance->socket && !ReadFile(instance->socket, start, to_read, NULL, &instance->ovl)) {
+  if (instance->socket && !ReadFile(instance->socket, start, to_read, NULL, &instance->ovl_ctx.ovl)) {
     if (GetLastError() != ERROR_IO_PENDING) {
       log_last_error("Failed to initialize read");
       return false;
@@ -3303,7 +3303,7 @@ static bool overlap_read(Instance *instance) {
 }
 #endif
 
-#define CIN_WRITE_CMD_LEFT "{async:true,request_id:%ld,command:[\"%s\""
+#define CIN_WRITE_CMD_LEFT "{async:true,request_id:%" PRId64 ",command:[\"%s\""
 #define CIN_WRITE_CMD_MID ",\"%s\""
 #define CIN_WRITE_CMD_RIGHT "]}\n"
 #define CIN_WRITE_CMD_0ARG (CIN_WRITE_CMD_LEFT CIN_WRITE_CMD_RIGHT)
@@ -3325,7 +3325,7 @@ static bool overlap_write(Instance *instance, MPV_Packet type, const char *cmd, 
   log_message(LOG_DEBUG, "Writing message (%p) (%zu bytes): %.*s",
               instance, msg->bytes, msg->bytes - 1, msg->buf);
 #ifdef _WIN32
-  if (instance->socket && !WriteFile(instance->socket, msg->buf, (uint32_t)msg->bytes, NULL, &msg->ovl_ctx.ovl)) {
+  if (instance->socket && !WriteFile(instance->socket, msg->buf, (DWORD)msg->bytes, NULL, &msg->ovl_ctx.ovl)) {
     switch (GetLastError()) {
     case ERROR_IO_PENDING:
       // iocp will free write
@@ -4336,6 +4336,7 @@ static void mpv_spawn(Instance *instance, size_t index) {
   wmemcpy(mpv_command_utf16, utf16_buf_raw.items, (size_t)socket_name_len);
   const bool ok_pipe = create_pipe(instance, mpv_command_utf16);
   assert(ok_pipe);
+  instance->ovl_ctx.type = MPV_READ;
   const bool ok_iocp = CreateIoCompletionPort(instance->socket, cin_io.iocp, (ULONG_PTR)instance, 0) != NULL;
   assert(ok_iocp);
   instance->buf_head = arena_bump_T1(&arena_io, Read_Buffer);
