@@ -852,6 +852,7 @@ static struct REPL {
   DWORD dwSize_X;
   DWORD _filled;
   DWORD in_mode;
+  DWORD out_mode;
   int32_t viewport_bound;
 } repl = {0};
 
@@ -3834,42 +3835,23 @@ static void *mpv_listener(void *arg) {
 }
 #endif
 
-static inline bool bounded_console(HANDLE console) {
-  assert(console);
-  SHORT prev_bot = 0;
-  SHORT next_bot = 0;
-  CONSOLE_CURSOR_INFO cursor_info = {0};
-  GetConsoleCursorInfo(console, &cursor_info);
-  const int32_t prev_vis = cursor_info.bVisible;
-  cursor_info.bVisible = false;
-  SetConsoleCursorInfo(console, &cursor_info);
-  CONSOLE_SCREEN_BUFFER_INFO info = {0};
-  GetConsoleScreenBufferInfo(console, &info);
-  prev_bot = info.srWindow.Bottom;
-  COORD prev_pos = info.dwCursorPosition;
-  COORD next_pos = {.X = 0, .Y = prev_bot + 1};
-  SetConsoleCursorPosition(console, next_pos);
-  GetConsoleScreenBufferInfo(console, &info);
-  SetConsoleCursorPosition(console, prev_pos);
-  cursor_info.bVisible = prev_vis;
-  SetConsoleCursorInfo(console, &cursor_info);
-  next_bot = info.srWindow.Bottom;
-  return prev_bot == next_bot;
-}
-
-#define viewport_warning L"Large inputs can cause minor scrollback issues in your console. " \
-                         "You can use vanilla cmd.exe (Command Prompt), "                    \
-                         "which works correctly." WCRLF
-
 static inline bool init_repl(void) {
   repl.window = GetForegroundWindow();
   if (!SetConsoleCP(CP_UTF8)) goto code_page;
   if (!SetConsoleOutputCP(CP_UTF8)) goto code_page;
   if ((repl.in = GetStdHandle(STD_INPUT_HANDLE)) == INVALID_HANDLE_VALUE) goto handle_in;
   if (!GetConsoleMode(repl.in, &repl.in_mode)) goto handle_in;
-  if (!SetConsoleMode(repl.in, repl.in_mode | ENABLE_PROCESSED_INPUT | ENABLE_WINDOW_INPUT)) goto handle_in;
+  DWORD new_in_mode = repl.in_mode;
+  new_in_mode &= ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT);
+  new_in_mode |= ENABLE_VIRTUAL_TERMINAL_INPUT;
+  if (!SetConsoleMode(repl.in, new_in_mode)) goto handle_in;
   if ((repl.out = GetStdHandle(STD_OUTPUT_HANDLE)) == INVALID_HANDLE_VALUE) goto handle_out;
-  repl.viewport_bound = bounded_console(repl.out);
+  if (!GetConsoleMode(repl.out, &repl.out_mode)) goto handle_out;
+  DWORD new_out_mode = repl.out_mode;
+  new_out_mode |= ENABLE_PROCESSED_OUTPUT;
+  new_out_mode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+  if (!SetConsoleMode(repl.out, new_out_mode)) goto handle_out;
+  repl.viewport_bound = TRUE;
   if (!arena_chunk_init(&arena_console, CIN_ARENA_CAP)) goto memory;
   repl.msg = create_console_message();
   repl.msg_index = 0;
@@ -5543,6 +5525,8 @@ static void cmd_quit_executor(void) {
   }
   clear_preview(0);
   show_cursor();
+  SetConsoleMode(repl.in, repl.in_mode);
+  SetConsoleMode(repl.out, repl.out_mode);
   exit(1);
 }
 
@@ -5893,10 +5877,6 @@ int main(int argc, char **argv) {
     clear_preview(0);
     update_preview();
     log_preview();
-  }
-  if (!SetConsoleMode(repl.in, repl.in_mode)) {
-    log_last_error("Failed to reset in console mode");
-    return 1;
   }
   return 0;
 }
