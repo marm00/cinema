@@ -5599,6 +5599,40 @@ static void execute_startup_macros(void) {
   log_preview();
 }
 
+#define ESC "\x1b"
+#define CSI "\x1b["
+#define CHAR_ESC '\x1b'
+#define TERM_SEQUENCE_MAX 8
+#define TERM_READ_WAIT_MS 5
+
+static inline int32_t term_read(char *buf, const int32_t n, bool peek) {
+  int32_t read = 0;
+  assert(n > 0);
+#ifdef _WIN32
+  DWORD _read = 0;
+  if (!peek) {
+    if (ReadFile(repl.in, buf, (DWORD)n, &_read, NULL)) {
+      read = n;
+    } else {
+      log_last_error("Failed to read from terminal");
+    }
+  } else {
+    for (int32_t i = 0; i < n; ++i) {
+      DWORD code = WaitForSingleObject(repl.in, TERM_READ_WAIT_MS);
+      if (code != WAIT_OBJECT_0) break;
+      if (!ReadFile(repl.in, buf + i, 1, &_read, NULL)) {
+        log_last_error("Failed to read %d from terminal", n);
+        break;
+      }
+      if (!_read) break;
+      ++read;
+    }
+  }
+#else
+#endif
+  return read;
+}
+
 int main(int argc, char **argv) {
   (void)argc;
   (void)argv;
@@ -5620,12 +5654,27 @@ int main(int argc, char **argv) {
   Console_Message *msg_tail = NULL;
   for (;;) {
     show_cursor();
+    char input_byte;
     INPUT_RECORD input;
-    DWORD read;
-    if (!ReadConsoleInputW(repl.in, &input, 1, &read)) {
-      log_last_error("Failed to read console input");
+    if (!term_read(&input_byte, 1, false)) {
       break;
     }
+    if (input_byte == CHAR_ESC) {
+      char term_sequence[TERM_SEQUENCE_MAX];
+      const int32_t len = term_read(term_sequence, sizeof(term_sequence), true);
+      log_message(LOG_DEBUG, "Terminal sequence (len %d): %.*s", len, len, term_sequence);
+    } else if ((input_byte & 0x80) != 0) {
+      int32_t bytes = 1;
+      if ((input_byte & 0xE0) == 0xC0) bytes = 2;
+      else if ((input_byte & 0xF0) == 0xE0) bytes = 3;
+      else if ((input_byte & 0xF8) == 0xF0) bytes = 4;
+      char unicode[4] = {input_byte};
+      term_read(unicode + 1, bytes - 1, false);
+      log_message(LOG_DEBUG, "Unicode input (len %d): %.*s", bytes, bytes, unicode);
+    } else {
+      log_message(LOG_DEBUG, "Char input: %02hhx", input_byte);
+    }
+    continue;
     wchar_t c = input.Event.KeyEvent.uChar.UnicodeChar;
     const wchar_t vk = input.Event.KeyEvent.wVirtualKeyCode;
     if (!input.Event.KeyEvent.bKeyDown && (!c || vk != VK_MENU)) continue;
