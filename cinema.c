@@ -825,7 +825,7 @@ static inline int32_t utf8_norm(char *str) {
 #endif
 
 typedef struct Console_Message {
-  array_struct_members(wchar_t);
+  array_struct_members(char);
   struct Console_Message *prev;
   struct Console_Message *next;
 } Console_Message;
@@ -868,6 +868,7 @@ static array_struct(char) write_buf = {0};
 
 #ifdef _WIN32
 static inline void cin_wwrite_utf8(const char *str, uint32_t len) {
+  assert(len);
   const int32_t len_i32 = utf8_to_utf16_nraw(str, (int32_t)len);
   assert(len_i32 > 0);
   wchar_t *utf16_str = utf16_buf_raw.items;
@@ -970,7 +971,6 @@ static void cin_wvwritef(const wchar_t *format, va_list args) {
 #endif
 
 #define cin_strlen(str) (sizeof((str)) / sizeof(*(str)) - 1)
-#define CIN_SPACE 0x20
 #define PREFIX_TOKEN L'>'
 #define PREFIX 2
 #define PREFIX_STR L"\r> "
@@ -984,6 +984,30 @@ static void cin_wvwritef(const wchar_t *format, va_list args) {
 #define CR "\r"
 #define CR_LEN 1
 #define CRLF "\r\n"
+
+#define ESC "\x1b"
+#define CSI "\x1b["
+#define TERM_ESC 0x1b
+#define TERM_LBRACKET 0x5b
+#define TERM_HOME 0x48
+#define TERM_END 0x46
+#define TERM_DELETE 0x33
+#define TERM_TILDE 0x7e
+#define TERM_SEMICOLON 0x3b
+#define TERM_UP 0x41
+#define TERM_DOWN 0x42
+#define TERM_PAGEUP 0x35
+#define TERM_PAGEDOWN 0x36
+#define TERM_LEFT 0x44
+#define TERM_RIGHT 0x43
+#define TERM_DEFAULT 0x31
+#define TERM_TAB 0x09
+#define TERM_RETURN 0x0d
+#define TERM_BACK 0x7f
+#define TERM_BACK_CTRL 0x08
+#define TERM_SPACE 0x20
+#define TERM_SEQUENCE_MAX 8
+#define TERM_READ_WAIT_MS 5
 
 static inline void hide_cursor(void) {
   repl.cursor_info.bVisible = false;
@@ -1056,11 +1080,11 @@ static inline void cursor_set(COORD cursor) {
 }
 
 static inline void clear_tail(uint32_t count) {
-  FillConsoleOutputCharacterW(repl.out, CIN_SPACE, count, tail_cursor(), &repl._filled);
+  FillConsoleOutputCharacterW(repl.out, TERM_SPACE, count, tail_cursor(), &repl._filled);
 }
 
 static inline void clear_full(void) {
-  FillConsoleOutputCharacterW(repl.out, CIN_SPACE, repl.msg->count, repl.home, &repl._filled);
+  FillConsoleOutputCharacterW(repl.out, TERM_SPACE, repl.msg->count, repl.home, &repl._filled);
 }
 
 static inline void clear_preview(SHORT pos) {
@@ -1068,7 +1092,7 @@ static inline void clear_preview(SHORT pos) {
   assert((uint32_t)pos < repl.dwSize_X);
   preview.pos.X = pos;
   const uint32_t leftover = preview.len - (uint32_t)pos;
-  FillConsoleOutputCharacterW(repl.out, CIN_SPACE, leftover, preview.pos, &repl._filled);
+  FillConsoleOutputCharacterW(repl.out, TERM_SPACE, leftover, preview.pos, &repl._filled);
 }
 
 static inline void set_preview_pos(SHORT y) {
@@ -1151,11 +1175,12 @@ static inline bool cin_isloweralpha(char c) {
   return c <= 'z' && c >= 'a';
 }
 
+static inline char cin_lower(char c) {
+  return (char)tolower(c);
+}
+
 static inline bool cin_lower_isalpha(char *out) {
-  if (*out <= 'Z' && *out >= 'A') {
-    *out += ('a' - 'A');
-    return true;
-  }
+  *out = cin_lower(*out);
   return cin_isloweralpha(*out);
 }
 
@@ -1239,7 +1264,7 @@ static inline void rewrite_post_log(void) {
   const SHORT tail_x = buffer_info.dwCursorPosition.X;
   if (repl.msg->count + PREFIX > (uint32_t)tail_x) {
     const uint32_t leftover = repl.msg->count + PREFIX - (uint32_t)tail_x;
-    FillConsoleOutputCharacterW(repl.out, CIN_SPACE, leftover, buffer_info.dwCursorPosition, &repl._filled);
+    FillConsoleOutputCharacterW(repl.out, TERM_SPACE, leftover, buffer_info.dwCursorPosition, &repl._filled);
   }
   repl.home.Y += buffer_info.dwCursorPosition.Y - repl.home.Y + 1;
   const SHORT y_diff = preview.pos.Y - repl.home.Y;
@@ -1261,7 +1286,9 @@ static inline void rewrite_post_log(void) {
     SetConsoleCursorPosition(repl.out, (COORD){.X = 0, .Y = repl.home.Y});
   }
   cin_wwrite(PREFIX_STR, PREFIX_STRLEN);
-  cin_wwrite(repl.msg->items, repl.msg->count);
+  if (repl.msg->count) {
+    cin_write(repl.msg->items, repl.msg->count);
+  }
   const SHORT preview_offset = (SHORT)((repl.msg->count + PREFIX) / repl.dwSize_X) + 1;
   const SHORT preview_line = repl.home.Y + preview_offset;
   set_preview_pos(preview_line);
@@ -3843,7 +3870,8 @@ static inline bool init_repl(void) {
   if ((repl.in = GetStdHandle(STD_INPUT_HANDLE)) == INVALID_HANDLE_VALUE) goto handle_in;
   if (!GetConsoleMode(repl.in, &repl.in_mode)) goto handle_in;
   DWORD new_in_mode = repl.in_mode;
-  new_in_mode &= ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT);
+  new_in_mode &= ~(DWORD)ENABLE_LINE_INPUT;
+  new_in_mode &= ~(DWORD)ENABLE_ECHO_INPUT;
   new_in_mode |= ENABLE_VIRTUAL_TERMINAL_INPUT;
   if (!SetConsoleMode(repl.in, new_in_mode)) goto handle_in;
   if ((repl.out = GetStdHandle(STD_OUTPUT_HANDLE)) == INVALID_HANDLE_VALUE) goto handle_out;
@@ -3977,7 +4005,7 @@ static inline bool resize_console(Console_Timer_Ctx *ctx) {
     preview.pos.X = 0;
     ++preview.pos.Y;
     const uint32_t leftover = preview.len - buf_dwSize_X;
-    FillConsoleOutputCharacterW(repl.out, CIN_SPACE, leftover, preview.pos, &repl._filled);
+    FillConsoleOutputCharacterW(repl.out, TERM_SPACE, leftover, preview.pos, &repl._filled);
     --preview.pos.Y;
   }
   repl.dwSize_X = buf_dwSize_X;
@@ -4598,15 +4626,8 @@ static cmd_validator parse_command(const char *command) {
 
 static void update_preview(void) {
   array_reserve(&arena_console, repl.msg, 1);
-  repl.msg->items[repl.msg->count] = L'\0';
-#ifdef _WIN32
-  utf16_to_utf8(repl.msg->items);
-  uint8_t *utf8_msg = utf8_buf.items;
-  cmd_validator validator_fn = parse_command((char *)utf8_msg);
-#else
-  // TODO: linux
+  repl.msg->items[repl.msg->count] = '\0';
   cmd_validator validator_fn = parse_command(repl.msg->items);
-#endif
   if (validator_fn) {
     validator_fn();
   }
@@ -5600,29 +5621,6 @@ static void execute_startup_macros(void) {
   log_preview();
 }
 
-#define ESC "\x1b"
-#define CSI "\x1b["
-#define TERM_ESC '\x1b'
-#define TERM_LBRACKET '\x5b'
-#define TERM_HOME '\x48'
-#define TERM_END '\x46'
-#define TERM_DELETE '\x33'
-#define TERM_TILDE '\x7e'
-#define TERM_SEMICOLON '\x3b'
-#define TERM_UP '\x41'
-#define TERM_DOWN '\x42'
-#define TERM_PAGEUP '\x35'
-#define TERM_PAGEDOWN '\x36'
-#define TERM_LEFT '\x44'
-#define TERM_RIGHT '\x43'
-#define TERM_DEFAULT '\x31'
-#define TERM_TAB '\x09'
-#define TERM_RETURN '\x0d'
-#define TERM_BACK '\x7f'
-#define TERM_BACK_CTRL '\x08'
-#define TERM_SEQUENCE_MAX 8
-#define TERM_READ_WAIT_MS 5
-
 static inline int32_t term_read(char *buf, const int32_t n, bool peek) {
   int32_t read = 0;
   assert(n > 0);
@@ -5654,7 +5652,7 @@ static inline int32_t term_read(char *buf, const int32_t n, bool peek) {
 static bool term_proc_sequence(const char *sequence, int32_t len) {
   assert(len >= 0);
   bool redraw = true;
-  log_message(LOG_DEBUG, "Terminal sequence (len %d): %.*s", len, len, sequence);
+  log_message(LOG_TRACE, "Terminal sequence (len %d): %.*s", len, len, sequence);
   if (len == 0) {
     // ESC
     clear_full();
@@ -5690,8 +5688,8 @@ static bool term_proc_sequence(const char *sequence, int32_t len) {
         if (++i != len) goto fail;
         DWORD right = repl.msg_index;
         if (control) {
-          while (right < repl.msg->count && repl.msg->items[right] != CIN_SPACE) ++right;
-          while (right < repl.msg->count && repl.msg->items[++right] == CIN_SPACE) {
+          while (right < repl.msg->count && repl.msg->items[right] != TERM_SPACE) ++right;
+          while (right < repl.msg->count && repl.msg->items[++right] == TERM_SPACE) {
           };
         } else {
           ++right;
@@ -5701,8 +5699,8 @@ static bool term_proc_sequence(const char *sequence, int32_t len) {
         repl.msg->count -= deleted;
         clear_tail(deleted);
         if (leftover) {
-          wmemmove(&repl.msg->items[repl.msg_index], &repl.msg->items[right], leftover);
-          cin_wwrite(repl.msg->items + repl.msg_index, leftover);
+          memmove(&repl.msg->items[repl.msg_index], &repl.msg->items[right], leftover);
+          cin_write(repl.msg->items + repl.msg_index, leftover);
           cursor_curr();
         }
       } break;
@@ -5714,13 +5712,13 @@ static bool term_proc_sequence(const char *sequence, int32_t len) {
         }
         const uint32_t prev_count = repl.msg->count;
         array_resize(&arena_console, repl.msg, repl.msg->prev->count);
-        wmemcpy(repl.msg->items, repl.msg->prev->items, repl.msg->prev->count);
+        memcpy(repl.msg->items, repl.msg->prev->items, repl.msg->prev->count);
         repl.msg_index = repl.msg->count;
         repl.msg->next = repl.msg->prev->next;
         repl.msg->prev = repl.msg->prev->prev;
         if (repl.msg->count < prev_count) clear_tail(prev_count - repl.msg->count);
         cursor_home();
-        cin_wwrite(repl.msg->items, repl.msg->count);
+        cin_write(repl.msg->items, repl.msg->count);
       } break;
       case TERM_DOWN: {
         if (++i != len) goto fail;
@@ -5728,10 +5726,10 @@ static bool term_proc_sequence(const char *sequence, int32_t len) {
           const uint32_t prev_count = repl.msg->count;
           repl.msg->capacity = repl.msg->next->capacity;
           repl.msg->count = repl.msg->next->count;
-          wmemcpy(repl.msg->items, repl.msg->next->items, repl.msg->next->count);
+          memcpy(repl.msg->items, repl.msg->next->items, repl.msg->next->count);
           if (repl.msg->count < prev_count) clear_tail(prev_count - repl.msg->count);
           cursor_home();
-          cin_wwrite(repl.msg->items, repl.msg->count);
+          cin_write(repl.msg->items, repl.msg->count);
           repl.msg->prev = repl.msg->next->prev;
           repl.msg->next = repl.msg->next->next;
           repl.msg_index = repl.msg->count;
@@ -5753,12 +5751,12 @@ static bool term_proc_sequence(const char *sequence, int32_t len) {
         while (head->prev) head = head->prev;
         const uint32_t prev_count = repl.msg->count;
         array_resize(&arena_console, repl.msg, head->count);
-        wmemcpy(repl.msg->items, head->items, head->count);
+        memcpy(repl.msg->items, head->items, head->count);
         repl.msg_index = repl.msg->count;
         repl.msg->next = head->next;
         if (repl.msg->count < prev_count) clear_tail(prev_count - repl.msg->count);
         cursor_home();
-        cin_wwrite(repl.msg->items, repl.msg->count);
+        cin_write(repl.msg->items, repl.msg->count);
       } break;
       case TERM_PAGEDOWN: {
         if (++i == len || sequence[i] != TERM_TILDE || ++i != len) goto fail;
@@ -5766,10 +5764,10 @@ static bool term_proc_sequence(const char *sequence, int32_t len) {
           const uint32_t prev_count = repl.msg->count;
           repl.msg->capacity = repl.msg_tail->capacity;
           repl.msg->count = repl.msg_tail->count;
-          wmemcpy(repl.msg->items, repl.msg_tail->items, repl.msg_tail->count);
+          memcpy(repl.msg->items, repl.msg_tail->items, repl.msg_tail->count);
           if (repl.msg->count < prev_count) clear_tail(prev_count - repl.msg->count);
           cursor_home();
-          cin_wwrite(repl.msg->items, repl.msg->count);
+          cin_write(repl.msg->items, repl.msg->count);
           repl.msg->prev = repl.msg_tail->prev;
           repl.msg->next = repl.msg_tail->next;
           repl.msg_index = repl.msg->count;
@@ -5804,15 +5802,15 @@ static bool term_proc_sequence(const char *sequence, int32_t len) {
         if (sequence[i] == TERM_LEFT) {
           if (repl.msg_index) {
             --repl.msg_index;
-            while (repl.msg_index && repl.msg->items[repl.msg_index] == CIN_SPACE) --repl.msg_index;
-            while (repl.msg_index && repl.msg->items[repl.msg_index - 1] != CIN_SPACE) --repl.msg_index;
+            while (repl.msg_index && repl.msg->items[repl.msg_index] == TERM_SPACE) --repl.msg_index;
+            while (repl.msg_index && repl.msg->items[repl.msg_index - 1] != TERM_SPACE) --repl.msg_index;
             cursor_curr();
           }
           redraw = false;
         } else if (sequence[i] == TERM_RIGHT) {
           if (repl.msg_index < repl.msg->count) {
-            while (repl.msg_index < repl.msg->count && repl.msg->items[repl.msg_index] != CIN_SPACE) ++repl.msg_index;
-            while (repl.msg_index < repl.msg->count && repl.msg->items[++repl.msg_index] == CIN_SPACE) {
+            while (repl.msg_index < repl.msg->count && repl.msg->items[repl.msg_index] != TERM_SPACE) ++repl.msg_index;
+            while (repl.msg_index < repl.msg->count && repl.msg->items[++repl.msg_index] == TERM_SPACE) {
             };
             cursor_curr();
           }
@@ -5836,13 +5834,14 @@ fail:
 
 static bool term_proc_unicode(const char *unicode, int32_t len) {
   assert(len > 0);
-  log_message(LOG_DEBUG, "Unicode input (len %d): %.*s", len, len, unicode);
+  log_message(LOG_TRACE, "Unicode input (len %d): %.*s", len, len, unicode);
   if (len == 1) {
     log_message(LOG_ERROR, "Failed to parse unicode");
     return false;
   }
-  array_splice(&arena_console, repl.msg, repl.msg_index, unicode, len);
-  cin_wwrite(repl.msg->items + repl.msg_index, repl.msg->count - repl.msg_index);
+  const uint32_t len_u32 = (uint32_t)len;
+  array_splice(&arena_console, repl.msg, repl.msg_index, unicode, len_u32);
+  cin_write(repl.msg->items + repl.msg_index, repl.msg->count - repl.msg_index);
   repl.msg_index += 4;
   cursor_curr();
   return true;
@@ -5850,7 +5849,7 @@ static bool term_proc_unicode(const char *unicode, int32_t len) {
 
 static bool term_proc_char(char byte) {
   assert(byte);
-  log_message(LOG_DEBUG, "Char input: %02hhx", byte);
+  log_message(LOG_TRACE, "Char input: %02hhx", byte);
   bool redraw = true;
   switch (byte) {
   case TERM_TAB:
@@ -5862,7 +5861,7 @@ static bool term_proc_char(char byte) {
     while (i && iswspace(repl.msg->items[i - 1])) --i;
     const bool empty = !i;
     const bool dup = !empty && repl.msg_tail && repl.msg->count == repl.msg_tail->count &&
-                     !wcsncmp(repl.msg->items, repl.msg_tail->items, repl.msg->count);
+                     !strncmp(repl.msg->items, repl.msg_tail->items, repl.msg->count);
     if (empty || dup) {
       if (repl.msg_tail) repl.msg->prev = repl.msg_tail;
       repl.msg->next = NULL;
@@ -5893,11 +5892,11 @@ static bool term_proc_char(char byte) {
     }
     uint32_t left = repl.msg_index - 1;
     if (byte == TERM_BACK_CTRL) {
-      while (left && repl.msg->items[left] == CIN_SPACE) --left;
-      while (left && repl.msg->items[left - 1] != CIN_SPACE) --left;
+      while (left && repl.msg->items[left] == TERM_SPACE) --left;
+      while (left && repl.msg->items[left - 1] != TERM_SPACE) --left;
     }
     if (repl.msg_index < repl.msg->count) {
-      wmemmove(&repl.msg->items[left], &repl.msg->items[repl.msg_index], repl.msg->count - repl.msg_index);
+      memmove(&repl.msg->items[left], &repl.msg->items[repl.msg_index], repl.msg->count - repl.msg_index);
     }
     const uint32_t deleted = repl.msg_index - left;
     repl.msg->count -= deleted;
@@ -5906,7 +5905,7 @@ static bool term_proc_char(char byte) {
     const uint32_t leftover = repl.msg->count - repl.msg_index;
     clear_tail(deleted);
     if (leftover) {
-      cin_wwrite(repl.msg->items + repl.msg_index, leftover);
+      cin_write(repl.msg->items + repl.msg_index, leftover);
       cursor_curr();
     }
   } break;
@@ -5915,9 +5914,9 @@ static bool term_proc_char(char byte) {
       redraw = false;
       break;
     }
-    byte = cin_wlower(byte);
-    array_winsert(&arena_console, repl.msg, repl.msg_index, byte);
-    cin_wwrite(repl.msg->items + repl.msg_index, repl.msg->count - repl.msg_index);
+    byte = cin_lower(byte);
+    array_insert(&arena_console, repl.msg, repl.msg_index, byte);
+    cin_write(repl.msg->items + repl.msg_index, repl.msg->count - repl.msg_index);
     ++repl.msg_index;
     cursor_curr();
     break;
@@ -5943,11 +5942,9 @@ int main(int argc, char **argv) {
   if (!init_timers()) exit(1);
   if (!init_mpv()) exit(1);
   execute_startup_macros();
-  Console_Message *msg_tail = NULL;
   for (;;) {
     show_cursor();
     char byte;
-    INPUT_RECORD input;
     if (!term_read(&byte, 1, false)) {
       break;
     }
@@ -5967,243 +5964,9 @@ int main(int argc, char **argv) {
     } else {
       redraw = term_proc_char(byte);
     }
-    continue;
-    wchar_t c = input.Event.KeyEvent.uChar.UnicodeChar;
-    const wchar_t vk = input.Event.KeyEvent.wVirtualKeyCode;
-    if (!input.Event.KeyEvent.bKeyDown && (!c || vk != VK_MENU)) continue;
-    switch (input.EventType) {
-    case KEY_EVENT:
-      hide_cursor();
-      break;
-    case WINDOW_BUFFER_SIZE_EVENT:
-      reset_console_timer(console_timers[CIN_TIMER_RESIZE]);
-      continue;
-    default:
-      continue;
-    }
-    switch (vk) {
-    case VK_TAB:
-    case VK_RETURN: {
-      clear_full();
-      cursor_home();
-      assert(repl.msg->items);
-      uint32_t i = repl.msg->count;
-      while (i && iswspace(repl.msg->items[i - 1])) --i;
-      const bool empty = !i;
-      const bool dup = !empty && msg_tail && repl.msg->count == msg_tail->count &&
-                       !wcsncmp(repl.msg->items, msg_tail->items, repl.msg->count);
-      if (empty || dup) {
-        if (msg_tail) repl.msg->prev = msg_tail;
-        repl.msg->next = NULL;
-        repl.msg_index = 0;
-        array_clear(repl.msg);
-      } else {
-        // commit to history
-        if (msg_tail) {
-          msg_tail->next = repl.msg;
-          repl.msg->prev = msg_tail;
-        }
-        repl.msg->next = NULL;
-        msg_tail = repl.msg;
-        repl.msg = create_console_message();
-        repl.msg->prev = msg_tail;
-        repl.msg_index = 0;
-        array_clear(repl.msg);
-      }
-      if (cmd_ctx.executor) {
-        cmd_ctx.executor();
-      }
-    } break;
-    case VK_ESCAPE: {
-      clear_full();
-      cursor_home();
-      repl.msg_index = 0;
-      array_clear(repl.msg);
-    } break;
-    case VK_HOME:
-      cursor_home();
-      repl.msg_index = 0;
-      continue;
-    case VK_END:
-      repl.msg_index = repl.msg->count;
-      cursor_curr();
-      continue;
-    case VK_BACK: {
-      if (!repl.msg_index) continue;
-      uint32_t left = repl.msg_index - 1;
-      if (ctrl_on(&input)) {
-        while (left && repl.msg->items[left] == CIN_SPACE) --left;
-        while (left && repl.msg->items[left - 1] != CIN_SPACE) --left;
-      }
-      if (repl.msg_index < repl.msg->count) {
-        wmemmove(&repl.msg->items[left], &repl.msg->items[repl.msg_index], repl.msg->count - repl.msg_index);
-      }
-      const uint32_t deleted = repl.msg_index - left;
-      repl.msg->count -= deleted;
-      repl.msg_index = left;
-      cursor_curr();
-      const uint32_t leftover = repl.msg->count - repl.msg_index;
-      clear_tail(deleted);
-      if (leftover) {
-        cin_wwrite(repl.msg->items + repl.msg_index, leftover);
-        cursor_curr();
-      }
-    } break;
-    case VK_DELETE: {
-      if (repl.msg_index == repl.msg->count) continue;
-      DWORD right = repl.msg_index;
-      if (ctrl_on(&input)) {
-        while (right < repl.msg->count && repl.msg->items[right] != CIN_SPACE) ++right;
-        while (right < repl.msg->count && repl.msg->items[++right] == CIN_SPACE) {
-        };
-      } else {
-        ++right;
-      }
-      const uint32_t leftover = repl.msg->count - right;
-      const uint32_t deleted = right - repl.msg_index;
-      repl.msg->count -= deleted;
-      clear_tail(deleted);
-      if (leftover) {
-        wmemmove(&repl.msg->items[repl.msg_index], &repl.msg->items[right], leftover);
-        cin_wwrite(repl.msg->items + repl.msg_index, leftover);
-        cursor_curr();
-      }
-    } break;
-    case VK_UP: {
-      if (!repl.msg->prev) continue;
-      const uint32_t prev_count = repl.msg->count;
-      array_resize(&arena_console, repl.msg, repl.msg->prev->count);
-      wmemcpy(repl.msg->items, repl.msg->prev->items, repl.msg->prev->count);
-      repl.msg_index = repl.msg->count;
-      repl.msg->next = repl.msg->prev->next;
-      repl.msg->prev = repl.msg->prev->prev;
-      if (repl.msg->count < prev_count) clear_tail(prev_count - repl.msg->count);
-      cursor_home();
-      cin_wwrite(repl.msg->items, repl.msg->count);
-    } break;
-    case VK_DOWN: {
-      if (repl.msg->next) {
-        const uint32_t prev_count = repl.msg->count;
-        repl.msg->capacity = repl.msg->next->capacity;
-        repl.msg->count = repl.msg->next->count;
-        wmemcpy(repl.msg->items, repl.msg->next->items, repl.msg->next->count);
-        if (repl.msg->count < prev_count) clear_tail(prev_count - repl.msg->count);
-        cursor_home();
-        cin_wwrite(repl.msg->items, repl.msg->count);
-        repl.msg->prev = repl.msg->next->prev;
-        repl.msg->next = repl.msg->next->next;
-        repl.msg_index = repl.msg->count;
-      } else {
-        clear_full();
-        cursor_home();
-        repl.msg->prev = msg_tail;
-        array_clear(repl.msg);
-        repl.msg_index = 0;
-      }
-    } break;
-    case VK_PRIOR: {
-      if (!repl.msg->prev) continue;
-      Console_Message *head = repl.msg->prev;
-      while (head->prev) head = head->prev;
-      const uint32_t prev_count = repl.msg->count;
-      array_resize(&arena_console, repl.msg, head->count);
-      wmemcpy(repl.msg->items, head->items, head->count);
-      repl.msg_index = repl.msg->count;
-      repl.msg->next = head->next;
-      if (repl.msg->count < prev_count) clear_tail(prev_count - repl.msg->count);
-      cursor_home();
-      cin_wwrite(repl.msg->items, repl.msg->count);
-    } break;
-    case VK_NEXT: {
-      if (msg_tail) {
-        const uint32_t prev_count = repl.msg->count;
-        repl.msg->capacity = msg_tail->capacity;
-        repl.msg->count = msg_tail->count;
-        wmemcpy(repl.msg->items, msg_tail->items, msg_tail->count);
-        if (repl.msg->count < prev_count) clear_tail(prev_count - repl.msg->count);
-        cursor_home();
-        cin_wwrite(repl.msg->items, repl.msg->count);
-        repl.msg->prev = msg_tail->prev;
-        repl.msg->next = msg_tail->next;
-        repl.msg_index = repl.msg->count;
-      } else {
-        clear_full();
-        cursor_home();
-        array_clear(repl.msg);
-        repl.msg_index = 0;
-      }
-    } break;
-    case VK_LEFT:
-      if (repl.msg_index) {
-        --repl.msg_index;
-        if (ctrl_on(&input)) {
-          while (repl.msg_index && repl.msg->items[repl.msg_index] == CIN_SPACE) --repl.msg_index;
-          while (repl.msg_index && repl.msg->items[repl.msg_index - 1] != CIN_SPACE) --repl.msg_index;
-        }
-        cursor_curr();
-      }
-      continue;
-    case VK_RIGHT:
-      if (repl.msg_index < repl.msg->count) {
-        if (ctrl_on(&input)) {
-          while (repl.msg_index < repl.msg->count && repl.msg->items[repl.msg_index] != CIN_SPACE) ++repl.msg_index;
-          while (repl.msg_index < repl.msg->count && repl.msg->items[++repl.msg_index] == CIN_SPACE) {
-          };
-        } else {
-          ++repl.msg_index;
-        }
-        cursor_curr();
-      }
-      continue;
-    default:
-      if (!c || c == PREFIX_TOKEN) continue;
-      // NOTE: When a surrogate is encountered, build a grapheme cluster.
-      // This ensures that, not only do we store the wchar_t properly, we also
-      // print it accurately as it arrives - the console normally appends a space
-      // after every single surrogate, so a pair will be 4 cells (now 2).
-      // Unfortunately, surrogate pairs still corrupt cursor positioning, which
-      // you could try to alleviate by tracking cells.
-      static wchar_t surrogates[4] = {0};
-      static wchar_t surrogate_count = 0;
-      assert(surrogate_count < 4);
-      if (surrogate_count == 3) {
-        // completed grapheme cluster
-        // overwrite first written pair
-        assert(IS_LOW_SURROGATE(c));
-        surrogates[surrogate_count] = c;
-        array_wsplice(&arena_console, repl.msg, repl.msg_index, surrogates + 2, 2);
-        repl.msg_index -= 2;
-        cursor_curr();
-        cin_wwrite(repl.msg->items + repl.msg_index, repl.msg->count - repl.msg_index);
-        repl.msg_index += 4;
-        cursor_curr();
-        surrogate_count = 0;
-      } else if (surrogate_count == 1) {
-        // pair might be completed, write just in case
-        assert(IS_LOW_SURROGATE(c));
-        surrogates[surrogate_count++] = c;
-        array_wsplice(&arena_console, repl.msg, repl.msg_index, surrogates, 2);
-        cin_wwrite(repl.msg->items + repl.msg_index, repl.msg->count - repl.msg_index);
-        repl.msg_index += 2;
-        cursor_curr();
-      } else {
-        if (IS_HIGH_SURROGATE(c)) {
-          surrogates[surrogate_count++] = c;
-          continue;
-        } else {
-          assert(!IS_LOW_SURROGATE(c));
-          c = cin_wlower(c);
-          array_winsert(&arena_console, repl.msg, repl.msg_index, c);
-          cin_wwrite(repl.msg->items + repl.msg_index, repl.msg->count - repl.msg_index);
-          ++repl.msg_index;
-          cursor_curr();
-          surrogate_count = 0;
-        }
-      }
-      log_wmessage(LOG_TRACE, L"char=%hu (%lc), v=%hu (%lc), pressed=%d, ctrl=%d",
-                   c, c, vk, vk ? vk : L' ', input.Event.KeyEvent.bKeyDown, ctrl_on(&input));
-      break;
-    }
+    hide_cursor();
+    // TODO: reset_console_timer(console_timers[CIN_TIMER_RESIZE]);
+    if (!redraw) continue;
     const SHORT preview_offset = (SHORT)((repl.msg->count + PREFIX) / repl.dwSize_X) + 1;
     const SHORT preview_line = repl.home.Y + preview_offset;
     const SHORT y_diff = preview_line - preview.pos.Y;
