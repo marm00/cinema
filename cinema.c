@@ -5616,6 +5616,10 @@ static void execute_startup_macros(void) {
 #define TERM_LEFT '\x44'
 #define TERM_RIGHT '\x43'
 #define TERM_DEFAULT '\x31'
+#define TERM_TAB '\x09'
+#define TERM_RETURN '\x0d'
+#define TERM_BACK '\x7f'
+#define TERM_BACK_CTRL '\x08'
 #define TERM_SEQUENCE_MAX 8
 #define TERM_READ_WAIT_MS 5
 
@@ -5647,10 +5651,10 @@ static inline int32_t term_read(char *buf, const int32_t n, bool peek) {
   return read;
 }
 
-static inline bool process_term_sequence(const char *term_sequence, int32_t len) {
+static bool term_proc_sequence(const char *sequence, int32_t len) {
   assert(len >= 0);
   bool redraw = true;
-  log_message(LOG_DEBUG, "Terminal sequence (len %d): %.*s", len, len, term_sequence);
+  log_message(LOG_DEBUG, "Terminal sequence (len %d): %.*s", len, len, sequence);
   if (len == 0) {
     // ESC
     clear_full();
@@ -5659,9 +5663,9 @@ static inline bool process_term_sequence(const char *term_sequence, int32_t len)
     array_clear(repl.msg);
   } else {
     int32_t i = 0;
-    if (term_sequence[i] == TERM_LBRACKET) {
+    if (sequence[i] == TERM_LBRACKET) {
       if (++i == len) goto fail;
-      switch (term_sequence[i]) {
+      switch (sequence[i]) {
       case TERM_HOME:
         if (++i != len) goto fail;
         cursor_home();
@@ -5680,9 +5684,9 @@ static inline bool process_term_sequence(const char *term_sequence, int32_t len)
           redraw = false;
           break;
         }
-        bool control = term_sequence[i] == TERM_SEMICOLON;
+        bool control = sequence[i] == TERM_SEMICOLON;
         if (control) i += 2;
-        if (term_sequence[i] != TERM_TILDE) goto fail;
+        if (sequence[i] != TERM_TILDE) goto fail;
         if (++i != len) goto fail;
         DWORD right = repl.msg_index;
         if (control) {
@@ -5740,7 +5744,7 @@ static inline bool process_term_sequence(const char *term_sequence, int32_t len)
         }
       } break;
       case TERM_PAGEUP: {
-        if (++i == len || term_sequence[i] != TERM_TILDE || ++i != len) goto fail;
+        if (++i == len || sequence[i] != TERM_TILDE || ++i != len) goto fail;
         if (!repl.msg->prev) {
           redraw = false;
           break;
@@ -5757,7 +5761,7 @@ static inline bool process_term_sequence(const char *term_sequence, int32_t len)
         cin_wwrite(repl.msg->items, repl.msg->count);
       } break;
       case TERM_PAGEDOWN: {
-        if (++i == len || term_sequence[i] != TERM_TILDE || ++i != len) goto fail;
+        if (++i == len || sequence[i] != TERM_TILDE || ++i != len) goto fail;
         if (repl.msg_tail) {
           const uint32_t prev_count = repl.msg->count;
           repl.msg->capacity = repl.msg_tail->capacity;
@@ -5794,10 +5798,10 @@ static inline bool process_term_sequence(const char *term_sequence, int32_t len)
         break;
       case TERM_DEFAULT:
         // handle possible control arrow keys
-        if (++i == len || term_sequence[i] != TERM_SEMICOLON ||
-            ++i == len || term_sequence[i] != TERM_PAGEUP ||
+        if (++i == len || sequence[i] != TERM_SEMICOLON ||
+            ++i == len || sequence[i] != TERM_PAGEUP ||
             ++i + 1 != len) goto fail;
-        if (term_sequence[i] == TERM_LEFT) {
+        if (sequence[i] == TERM_LEFT) {
           if (repl.msg_index) {
             --repl.msg_index;
             while (repl.msg_index && repl.msg->items[repl.msg_index] == CIN_SPACE) --repl.msg_index;
@@ -5805,7 +5809,7 @@ static inline bool process_term_sequence(const char *term_sequence, int32_t len)
             cursor_curr();
           }
           redraw = false;
-        } else if (term_sequence[i] == TERM_RIGHT) {
+        } else if (sequence[i] == TERM_RIGHT) {
           if (repl.msg_index < repl.msg->count) {
             while (repl.msg_index < repl.msg->count && repl.msg->items[repl.msg_index] != CIN_SPACE) ++repl.msg_index;
             while (repl.msg_index < repl.msg->count && repl.msg->items[++repl.msg_index] == CIN_SPACE) {
@@ -5830,6 +5834,97 @@ fail:
   return redraw;
 }
 
+static bool term_proc_unicode(const char *unicode, int32_t len) {
+  assert(len > 0);
+  log_message(LOG_DEBUG, "Unicode input (len %d): %.*s", len, len, unicode);
+  if (len == 1) {
+    log_message(LOG_ERROR, "Failed to parse unicode");
+    return false;
+  }
+  array_splice(&arena_console, repl.msg, repl.msg_index, unicode, len);
+  cin_wwrite(repl.msg->items + repl.msg_index, repl.msg->count - repl.msg_index);
+  repl.msg_index += 4;
+  cursor_curr();
+  return true;
+}
+
+static bool term_proc_char(char byte) {
+  assert(byte);
+  log_message(LOG_DEBUG, "Char input: %02hhx", byte);
+  bool redraw = true;
+  switch (byte) {
+  case TERM_TAB:
+  case TERM_RETURN: {
+    clear_full();
+    cursor_home();
+    assert(repl.msg->items);
+    uint32_t i = repl.msg->count;
+    while (i && iswspace(repl.msg->items[i - 1])) --i;
+    const bool empty = !i;
+    const bool dup = !empty && repl.msg_tail && repl.msg->count == repl.msg_tail->count &&
+                     !wcsncmp(repl.msg->items, repl.msg_tail->items, repl.msg->count);
+    if (empty || dup) {
+      if (repl.msg_tail) repl.msg->prev = repl.msg_tail;
+      repl.msg->next = NULL;
+      repl.msg_index = 0;
+      array_clear(repl.msg);
+    } else {
+      // commit to history
+      if (repl.msg_tail) {
+        repl.msg_tail->next = repl.msg;
+        repl.msg->prev = repl.msg_tail;
+      }
+      repl.msg->next = NULL;
+      repl.msg_tail = repl.msg;
+      repl.msg = create_console_message();
+      repl.msg->prev = repl.msg_tail;
+      repl.msg_index = 0;
+      array_clear(repl.msg);
+    }
+    if (cmd_ctx.executor) {
+      cmd_ctx.executor();
+    }
+  } break;
+  case TERM_BACK_CTRL:
+  case TERM_BACK: {
+    if (!repl.msg_index) {
+      redraw = false;
+      break;
+    }
+    uint32_t left = repl.msg_index - 1;
+    if (byte == TERM_BACK_CTRL) {
+      while (left && repl.msg->items[left] == CIN_SPACE) --left;
+      while (left && repl.msg->items[left - 1] != CIN_SPACE) --left;
+    }
+    if (repl.msg_index < repl.msg->count) {
+      wmemmove(&repl.msg->items[left], &repl.msg->items[repl.msg_index], repl.msg->count - repl.msg_index);
+    }
+    const uint32_t deleted = repl.msg_index - left;
+    repl.msg->count -= deleted;
+    repl.msg_index = left;
+    cursor_curr();
+    const uint32_t leftover = repl.msg->count - repl.msg_index;
+    clear_tail(deleted);
+    if (leftover) {
+      cin_wwrite(repl.msg->items + repl.msg_index, leftover);
+      cursor_curr();
+    }
+  } break;
+  default:
+    if (!byte || byte == PREFIX_TOKEN) {
+      redraw = false;
+      break;
+    }
+    byte = cin_wlower(byte);
+    array_winsert(&arena_console, repl.msg, repl.msg_index, byte);
+    cin_wwrite(repl.msg->items + repl.msg_index, repl.msg->count - repl.msg_index);
+    ++repl.msg_index;
+    cursor_curr();
+    break;
+  }
+  return redraw;
+}
+
 int main(int argc, char **argv) {
   (void)argc;
   (void)argv;
@@ -5851,26 +5946,26 @@ int main(int argc, char **argv) {
   Console_Message *msg_tail = NULL;
   for (;;) {
     show_cursor();
-    char input_byte;
+    char byte;
     INPUT_RECORD input;
-    if (!term_read(&input_byte, 1, false)) {
+    if (!term_read(&byte, 1, false)) {
       break;
     }
     bool redraw = true;
-    if (input_byte == TERM_ESC) {
+    if (byte == TERM_ESC) {
       char term_sequence[TERM_SEQUENCE_MAX];
       const int32_t len = term_read(term_sequence, sizeof(term_sequence), true);
-      redraw = process_term_sequence(term_sequence, len);
-    } else if ((input_byte & 0x80) != 0) {
+      redraw = term_proc_sequence(term_sequence, len);
+    } else if ((byte & 0x80) != 0) {
       int32_t bytes = 1;
-      if ((input_byte & 0xE0) == 0xC0) bytes = 2;
-      else if ((input_byte & 0xF0) == 0xE0) bytes = 3;
-      else if ((input_byte & 0xF8) == 0xF0) bytes = 4;
-      char unicode[4] = {input_byte};
-      term_read(unicode + 1, bytes - 1, false);
-      log_message(LOG_DEBUG, "Unicode input (len %d): %.*s", bytes, bytes, unicode);
+      if ((byte & 0xE0) == 0xC0) bytes = 2;
+      else if ((byte & 0xF0) == 0xE0) bytes = 3;
+      else if ((byte & 0xF8) == 0xF0) bytes = 4;
+      char unicode[4] = {byte};
+      const int32_t len = term_read(unicode + 1, bytes - 1, false);
+      redraw = term_proc_unicode(unicode, len);
     } else {
-      log_message(LOG_DEBUG, "Char input: %02hhx", input_byte);
+      redraw = term_proc_char(byte);
     }
     continue;
     wchar_t c = input.Event.KeyEvent.uChar.UnicodeChar;
