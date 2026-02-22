@@ -987,6 +987,7 @@ static void cin_wvwritef(const wchar_t *format, va_list args) {
 
 #define ESC "\x1b"
 #define CSI "\x1b["
+#define TERM_REPLACEMENT "\xEF\xBF\xBD"
 #define TERM_ESC 0x1b
 #define TERM_LBRACKET 0x5b
 #define TERM_HOME 0x48
@@ -5621,14 +5622,14 @@ static void execute_startup_macros(void) {
   log_preview();
 }
 
-static inline int32_t term_read(char *buf, const int32_t n, bool peek) {
+static inline int32_t term_read(uint8_t *buf, const int32_t n, bool peek) {
   int32_t read = 0;
   assert(n > 0);
 #ifdef _WIN32
   DWORD _read = 0;
   if (!peek) {
     if (ReadFile(repl.in, buf, (DWORD)n, &_read, NULL)) {
-      read = n;
+      read = (int32_t)_read;
     } else {
       log_last_error("Failed to read from terminal");
     }
@@ -5649,7 +5650,7 @@ static inline int32_t term_read(char *buf, const int32_t n, bool peek) {
   return read;
 }
 
-static bool term_proc_sequence(const char *sequence, int32_t len) {
+static bool term_proc_sequence(const uint8_t *sequence, int32_t len) {
   assert(len >= 0);
   bool redraw = true;
   log_message(LOG_TRACE, "Terminal sequence (len %d): %.*s", len, len, sequence);
@@ -5832,17 +5833,21 @@ fail:
   return redraw;
 }
 
-static bool term_proc_unicode(const char *unicode, int32_t len) {
+static bool term_proc_unicode(const uint8_t *unicode, int32_t len) {
   assert(len > 0);
-  log_message(LOG_TRACE, "Unicode input (len %d): %.*s", len, len, unicode);
+  log_message(LOG_DEBUG, "Unicode input (len %d): %.*s", len, len, unicode);
   if (len == 1) {
     log_message(LOG_ERROR, "Failed to parse unicode");
+    return false;
+  }
+  if (len == 3 && !memcmp(unicode, TERM_REPLACEMENT, 3)) {
+    log_message(LOG_ERROR, "This unicode character is not supported");
     return false;
   }
   const uint32_t len_u32 = (uint32_t)len;
   array_splice(&arena_console, repl.msg, repl.msg_index, unicode, len_u32);
   cin_write(repl.msg->items + repl.msg_index, repl.msg->count - repl.msg_index);
-  repl.msg_index += 4;
+  repl.msg_index += len_u32;
   cursor_curr();
   return true;
 }
@@ -5944,13 +5949,13 @@ int main(int argc, char **argv) {
   execute_startup_macros();
   for (;;) {
     show_cursor();
-    char byte;
+    uint8_t byte;
     if (!term_read(&byte, 1, false)) {
       break;
     }
     bool redraw = true;
     if (byte == TERM_ESC) {
-      char term_sequence[TERM_SEQUENCE_MAX];
+      uint8_t term_sequence[TERM_SEQUENCE_MAX];
       const int32_t len = term_read(term_sequence, sizeof(term_sequence), true);
       redraw = term_proc_sequence(term_sequence, len);
     } else if ((byte & 0x80) != 0) {
@@ -5958,11 +5963,11 @@ int main(int argc, char **argv) {
       if ((byte & 0xE0) == 0xC0) bytes = 2;
       else if ((byte & 0xF0) == 0xE0) bytes = 3;
       else if ((byte & 0xF8) == 0xF0) bytes = 4;
-      char unicode[4] = {byte};
+      uint8_t unicode[4] = {byte};
       const int32_t len = term_read(unicode + 1, bytes - 1, false);
-      redraw = term_proc_unicode(unicode, len);
+      redraw = term_proc_unicode(unicode, len + 1);
     } else {
-      redraw = term_proc_char(byte);
+      redraw = term_proc_char((char)byte);
     }
     hide_cursor();
     // TODO: reset_console_timer(console_timers[CIN_TIMER_RESIZE]);
