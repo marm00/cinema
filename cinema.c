@@ -854,6 +854,7 @@ static struct REPL {
   DWORD in_mode;
   DWORD out_mode;
   int32_t viewport_bound;
+  Console_Message *msg_tail;
 } repl = {0};
 
 static struct Console_Preview {
@@ -5601,7 +5602,20 @@ static void execute_startup_macros(void) {
 
 #define ESC "\x1b"
 #define CSI "\x1b["
-#define CHAR_ESC '\x1b'
+#define TERM_ESC '\x1b'
+#define TERM_LBRACKET '\x5b'
+#define TERM_HOME '\x48'
+#define TERM_END '\x46'
+#define TERM_DELETE '\x33'
+#define TERM_TILDE '\x7e'
+#define TERM_SEMICOLON '\x3b'
+#define TERM_UP '\x41'
+#define TERM_DOWN '\x42'
+#define TERM_PAGEUP '\x35'
+#define TERM_PAGEDOWN '\x36'
+#define TERM_LEFT '\x44'
+#define TERM_RIGHT '\x43'
+#define TERM_DEFAULT '\x31'
 #define TERM_SEQUENCE_MAX 8
 #define TERM_READ_WAIT_MS 5
 
@@ -5633,6 +5647,189 @@ static inline int32_t term_read(char *buf, const int32_t n, bool peek) {
   return read;
 }
 
+static inline bool process_term_sequence(const char *term_sequence, int32_t len) {
+  assert(len >= 0);
+  bool redraw = true;
+  log_message(LOG_DEBUG, "Terminal sequence (len %d): %.*s", len, len, term_sequence);
+  if (len == 0) {
+    // ESC
+    clear_full();
+    cursor_home();
+    repl.msg_index = 0;
+    array_clear(repl.msg);
+  } else {
+    int32_t i = 0;
+    if (term_sequence[i] == TERM_LBRACKET) {
+      if (++i == len) goto fail;
+      switch (term_sequence[i]) {
+      case TERM_HOME:
+        if (++i != len) goto fail;
+        cursor_home();
+        repl.msg_index = 0;
+        redraw = false;
+        break;
+      case TERM_END:
+        if (++i != len) goto fail;
+        repl.msg_index = repl.msg->count;
+        cursor_curr();
+        redraw = false;
+        break;
+      case TERM_DELETE: {
+        if (++i == len) goto fail;
+        if (repl.msg_index == repl.msg->count) {
+          redraw = false;
+          break;
+        }
+        bool control = term_sequence[i] == TERM_SEMICOLON;
+        if (control) i += 2;
+        if (term_sequence[i] != TERM_TILDE) goto fail;
+        if (++i != len) goto fail;
+        DWORD right = repl.msg_index;
+        if (control) {
+          while (right < repl.msg->count && repl.msg->items[right] != CIN_SPACE) ++right;
+          while (right < repl.msg->count && repl.msg->items[++right] == CIN_SPACE) {
+          };
+        } else {
+          ++right;
+        }
+        const uint32_t leftover = repl.msg->count - right;
+        const uint32_t deleted = right - repl.msg_index;
+        repl.msg->count -= deleted;
+        clear_tail(deleted);
+        if (leftover) {
+          wmemmove(&repl.msg->items[repl.msg_index], &repl.msg->items[right], leftover);
+          cin_wwrite(repl.msg->items + repl.msg_index, leftover);
+          cursor_curr();
+        }
+      } break;
+      case TERM_UP: {
+        if (++i != len) goto fail;
+        if (!repl.msg->prev) {
+          redraw = false;
+          break;
+        }
+        const uint32_t prev_count = repl.msg->count;
+        array_resize(&arena_console, repl.msg, repl.msg->prev->count);
+        wmemcpy(repl.msg->items, repl.msg->prev->items, repl.msg->prev->count);
+        repl.msg_index = repl.msg->count;
+        repl.msg->next = repl.msg->prev->next;
+        repl.msg->prev = repl.msg->prev->prev;
+        if (repl.msg->count < prev_count) clear_tail(prev_count - repl.msg->count);
+        cursor_home();
+        cin_wwrite(repl.msg->items, repl.msg->count);
+      } break;
+      case TERM_DOWN: {
+        if (++i != len) goto fail;
+        if (repl.msg->next) {
+          const uint32_t prev_count = repl.msg->count;
+          repl.msg->capacity = repl.msg->next->capacity;
+          repl.msg->count = repl.msg->next->count;
+          wmemcpy(repl.msg->items, repl.msg->next->items, repl.msg->next->count);
+          if (repl.msg->count < prev_count) clear_tail(prev_count - repl.msg->count);
+          cursor_home();
+          cin_wwrite(repl.msg->items, repl.msg->count);
+          repl.msg->prev = repl.msg->next->prev;
+          repl.msg->next = repl.msg->next->next;
+          repl.msg_index = repl.msg->count;
+        } else {
+          clear_full();
+          cursor_home();
+          repl.msg->prev = repl.msg_tail;
+          array_clear(repl.msg);
+          repl.msg_index = 0;
+        }
+      } break;
+      case TERM_PAGEUP: {
+        if (++i == len || term_sequence[i] != TERM_TILDE || ++i != len) goto fail;
+        if (!repl.msg->prev) {
+          redraw = false;
+          break;
+        }
+        Console_Message *head = repl.msg->prev;
+        while (head->prev) head = head->prev;
+        const uint32_t prev_count = repl.msg->count;
+        array_resize(&arena_console, repl.msg, head->count);
+        wmemcpy(repl.msg->items, head->items, head->count);
+        repl.msg_index = repl.msg->count;
+        repl.msg->next = head->next;
+        if (repl.msg->count < prev_count) clear_tail(prev_count - repl.msg->count);
+        cursor_home();
+        cin_wwrite(repl.msg->items, repl.msg->count);
+      } break;
+      case TERM_PAGEDOWN: {
+        if (++i == len || term_sequence[i] != TERM_TILDE || ++i != len) goto fail;
+        if (repl.msg_tail) {
+          const uint32_t prev_count = repl.msg->count;
+          repl.msg->capacity = repl.msg_tail->capacity;
+          repl.msg->count = repl.msg_tail->count;
+          wmemcpy(repl.msg->items, repl.msg_tail->items, repl.msg_tail->count);
+          if (repl.msg->count < prev_count) clear_tail(prev_count - repl.msg->count);
+          cursor_home();
+          cin_wwrite(repl.msg->items, repl.msg->count);
+          repl.msg->prev = repl.msg_tail->prev;
+          repl.msg->next = repl.msg_tail->next;
+          repl.msg_index = repl.msg->count;
+        } else {
+          clear_full();
+          cursor_home();
+          array_clear(repl.msg);
+          repl.msg_index = 0;
+        }
+      } break;
+      case TERM_LEFT:
+        if (++i != len) goto fail;
+        if (repl.msg_index) {
+          --repl.msg_index;
+          cursor_curr();
+        }
+        redraw = false;
+        break;
+      case TERM_RIGHT:
+        if (++i != len) goto fail;
+        if (repl.msg_index < repl.msg->count) {
+          ++repl.msg_index;
+          cursor_curr();
+        }
+        redraw = false;
+        break;
+      case TERM_DEFAULT:
+        // handle possible control arrow keys
+        if (++i == len || term_sequence[i] != TERM_SEMICOLON ||
+            ++i == len || term_sequence[i] != TERM_PAGEUP ||
+            ++i + 1 != len) goto fail;
+        if (term_sequence[i] == TERM_LEFT) {
+          if (repl.msg_index) {
+            --repl.msg_index;
+            while (repl.msg_index && repl.msg->items[repl.msg_index] == CIN_SPACE) --repl.msg_index;
+            while (repl.msg_index && repl.msg->items[repl.msg_index - 1] != CIN_SPACE) --repl.msg_index;
+            cursor_curr();
+          }
+          redraw = false;
+        } else if (term_sequence[i] == TERM_RIGHT) {
+          if (repl.msg_index < repl.msg->count) {
+            while (repl.msg_index < repl.msg->count && repl.msg->items[repl.msg_index] != CIN_SPACE) ++repl.msg_index;
+            while (repl.msg_index < repl.msg->count && repl.msg->items[++repl.msg_index] == CIN_SPACE) {
+            };
+            cursor_curr();
+          }
+          redraw = false;
+        } else {
+          goto fail;
+        }
+        break;
+      default:
+        goto fail;
+        break;
+      }
+    }
+  }
+  return redraw;
+fail:
+  redraw = false;
+  log_message(LOG_DEBUG, "Terminal sequence incomplete or not supported");
+  return redraw;
+}
+
 int main(int argc, char **argv) {
   (void)argc;
   (void)argv;
@@ -5659,10 +5856,11 @@ int main(int argc, char **argv) {
     if (!term_read(&input_byte, 1, false)) {
       break;
     }
-    if (input_byte == CHAR_ESC) {
+    bool redraw = true;
+    if (input_byte == TERM_ESC) {
       char term_sequence[TERM_SEQUENCE_MAX];
       const int32_t len = term_read(term_sequence, sizeof(term_sequence), true);
-      log_message(LOG_DEBUG, "Terminal sequence (len %d): %.*s", len, len, term_sequence);
+      redraw = process_term_sequence(term_sequence, len);
     } else if ((input_byte & 0x80) != 0) {
       int32_t bytes = 1;
       if ((input_byte & 0xE0) == 0xC0) bytes = 2;
