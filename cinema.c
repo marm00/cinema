@@ -121,6 +121,10 @@ static inline bool init_os(void) {
 #ifndef _WIN32
 #define min(a, b) (((a) < (b)) ? (a) : (b))
 #define max(a, b) (((a) > (b)) ? (a) : (b))
+typedef struct COORD {
+  short X;
+  short Y;
+} COORD;
 #endif
 
 #define align(a, b) (((a) + (b) - 1) & (~((b) - 1)))
@@ -1012,12 +1016,12 @@ static void cin_wvwritef(const wchar_t *format, va_list args) {
 
 static inline void hide_cursor(void) {
   repl.cursor_info.bVisible = false;
-  SetConsoleCursorInfo(repl.out, &repl.cursor_info);
+  cin_swrite(CSI "?25l");
 }
 
 static inline void show_cursor(void) {
   repl.cursor_info.bVisible = true;
-  SetConsoleCursorInfo(repl.out, &repl.cursor_info);
+  cin_swrite(CSI "?25h");
 }
 
 static inline SHORT index_x(uint32_t index, uint32_t dwSize_X) {
@@ -1064,28 +1068,47 @@ static inline COORD home_cursor(void) {
   return repl.home;
 }
 
+static inline COORD preview_cursor(void) {
+  return preview.pos;
+}
+
+static inline void term_set_cursor(COORD coord) {
+  cin_writef(CSI "%hd;%hdf", coord.Y + 1, coord.X + 1);
+}
+
 static inline void cursor_home(void) {
-  SetConsoleCursorPosition(repl.out, repl.home);
+  term_set_cursor(repl.home);
 }
 
 static inline void cursor_curr(void) {
-  SetConsoleCursorPosition(repl.out, curr_cursor());
+  term_set_cursor(curr_cursor());
 }
 
 static inline void cursor_tail(void) {
-  SetConsoleCursorPosition(repl.out, tail_cursor());
+  term_set_cursor(tail_cursor());
+}
+
+static inline void cursor_preview(void) {
+  term_set_cursor(preview.pos);
 }
 
 static inline void cursor_set(COORD cursor) {
-  SetConsoleCursorPosition(repl.out, cursor);
+  term_set_cursor(cursor);
+}
+
+static inline void term_clear(COORD pos, uint32_t count) {
+  cursor_set(pos);
+  cin_writef(CSI "%uX", count);
+  // TODO: GetConsoleCursorInfo instead? for safer future use
+  cursor_curr();
 }
 
 static inline void clear_tail(uint32_t count) {
-  FillConsoleOutputCharacterW(repl.out, TERM_SPACE, count, tail_cursor(), &repl._filled);
+  term_clear(tail_cursor(), count);
 }
 
 static inline void clear_full(void) {
-  FillConsoleOutputCharacterW(repl.out, TERM_SPACE, repl.msg->count, repl.home, &repl._filled);
+  term_clear(home_cursor(), repl.msg->count);
 }
 
 static inline void clear_preview(SHORT pos) {
@@ -1093,7 +1116,7 @@ static inline void clear_preview(SHORT pos) {
   assert((uint32_t)pos < repl.dwSize_X);
   preview.pos.X = pos;
   const uint32_t leftover = preview.len - (uint32_t)pos;
-  FillConsoleOutputCharacterW(repl.out, TERM_SPACE, leftover, preview.pos, &repl._filled);
+  term_clear(preview_cursor(), leftover);
 }
 
 static inline void set_preview_pos(SHORT y) {
@@ -1127,7 +1150,7 @@ static inline int32_t GetConsoleScreenBufferInfo_safe(HANDLE hConsoleOutput, PCO
   SetConsoleMode(fresh_buffer, mode);
   repl.out = fresh_buffer;
   repl.dwSize_X = max_x;
-  SetConsoleCursorPosition(repl.out, (COORD){.X = 0, .Y = 0});
+  cursor_set((COORD){.X = 0, .Y = 0});
   repl.home.Y = 0;
   preview.pos.Y = 1;
   const SHORT msg_tail = index_y_repl(repl.msg->count) + 1;
@@ -1222,16 +1245,15 @@ static inline void cin_getnum(const char **p, int64_t *out) {
   }
 }
 
+#define PREVIEW_FSTR CSI "1m%.*s" CSI "0m"
+
 static void log_preview(void) {
   if (!preview.count) return;
   const uint32_t msg_len = preview.count;
   preview.len = min(preview.count, repl.dwSize_X);
   // TODO: assert(memchr(preview.items, PREFIX_TOKEN, preview.len) == NULL);
-  // set cursor to scroll down (and prep next write if < repl.dwSize_X)
-  SetConsoleCursorPosition(repl.out, preview.pos);
-  if (msg_len < repl.dwSize_X) {
-    cin_write(preview.items, msg_len);
-  } else if (msg_len > repl.dwSize_X) {
+  cursor_preview();
+  if (msg_len > repl.dwSize_X) {
     assert(msg_len > 3);
     const uint32_t tmp1_pos = repl.dwSize_X - 1;
     const uint32_t tmp2_pos = repl.dwSize_X - 2;
@@ -1242,16 +1264,13 @@ static void log_preview(void) {
     preview.items[tmp1_pos] = '.';
     preview.items[tmp2_pos] = '.';
     preview.items[tmp3_pos] = '.';
-    utf8_to_utf16_nraw(preview.items, (int32_t)preview.len);
-    WriteConsoleOutputCharacterW(repl.out, utf16_buf_raw.items, preview.len, preview.pos, &repl._filled);
+    cin_writef(PREVIEW_FSTR, preview.len, preview.items);
     preview.items[tmp1_pos] = tmp1;
     preview.items[tmp2_pos] = tmp2;
     preview.items[tmp3_pos] = tmp3;
   } else {
-    utf8_to_utf16_nraw(preview.items, (int32_t)preview.len);
-    WriteConsoleOutputCharacterW(repl.out, utf16_buf_raw.items, preview.len, preview.pos, &repl._filled);
+    cin_writef(PREVIEW_FSTR, msg_len, preview.items);
   }
-  FillConsoleOutputAttribute(repl.out, FOREGROUND_INTENSITY, preview.len, preview.pos, &repl._filled);
   cursor_curr();
   preview.prev_len = preview.len;
 }
@@ -1265,7 +1284,7 @@ static inline void rewrite_post_log(void) {
   const SHORT tail_x = buffer_info.dwCursorPosition.X;
   if (repl.msg->count + PREFIX > (uint32_t)tail_x) {
     const uint32_t leftover = repl.msg->count + PREFIX - (uint32_t)tail_x;
-    FillConsoleOutputCharacterW(repl.out, TERM_SPACE, leftover, buffer_info.dwCursorPosition, &repl._filled);
+    term_clear(buffer_info.dwCursorPosition, leftover);
   }
   repl.home.Y += buffer_info.dwCursorPosition.Y - repl.home.Y + 1;
   const SHORT y_diff = preview.pos.Y - repl.home.Y;
@@ -1284,7 +1303,7 @@ static inline void rewrite_post_log(void) {
     CONSOLE_SCREEN_BUFFER_INFO post_scroll_info;
     GetConsoleScreenBufferInfo(repl.out, &post_scroll_info);
     repl.home.Y = post_scroll_info.dwCursorPosition.Y - 1;
-    SetConsoleCursorPosition(repl.out, (COORD){.X = 0, .Y = repl.home.Y});
+    cursor_set((COORD){.X = 0, .Y = repl.home.Y});
   }
   cin_wwrite(PREFIX_STR, PREFIX_STRLEN);
   if (repl.msg->count) {
@@ -4006,7 +4025,7 @@ static inline bool resize_console(Console_Timer_Ctx *ctx) {
     preview.pos.X = 0;
     ++preview.pos.Y;
     const uint32_t leftover = preview.len - buf_dwSize_X;
-    FillConsoleOutputCharacterW(repl.out, TERM_SPACE, leftover, preview.pos, &repl._filled);
+    term_clear(preview_cursor(), leftover);
     --preview.pos.Y;
   }
   repl.dwSize_X = buf_dwSize_X;
