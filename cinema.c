@@ -859,6 +859,8 @@ static struct REPL {
   DWORD out_mode;
   int32_t viewport_bound;
   Console_Message *msg_tail;
+  COORD cursor;
+  COORD size;
 } repl = {0};
 
 static struct Console_Preview {
@@ -975,6 +977,7 @@ static void cin_wvwritef(const wchar_t *format, va_list args) {
 #endif
 
 #define cin_strlen(str) (sizeof((str)) / sizeof(*(str)) - 1)
+// TODO: probably remove disallowing '>'
 #define PREFIX_TOKEN L'>'
 #define PREFIX 2
 #define PREFIX_STR L"\r> "
@@ -1011,6 +1014,7 @@ static void cin_wvwritef(const wchar_t *format, va_list args) {
 #define TERM_BACK 0x7f
 #define TERM_BACK_CTRL 0x08
 #define TERM_SPACE 0x20
+#define TERM_CURSOR_POS 0x52
 #define TERM_SEQUENCE_MAX 8
 #define TERM_READ_WAIT_MS 5
 
@@ -1072,8 +1076,23 @@ static inline COORD preview_cursor(void) {
   return preview.pos;
 }
 
+static inline int32_t term_get_info(COORD *cursor, COORD *dimensions) {
+  int32_t growth = 0;
+#ifdef _WIN32
+  CONSOLE_SCREEN_BUFFER_INFO info;
+  GetConsoleScreenBufferInfo(repl.out, &info);
+  cursor->X = info.dwCursorPosition.X - info.srWindow.Left;
+  cursor->Y = info.dwCursorPosition.Y - info.srWindow.Top + 1;
+  growth = (int32_t)(info.dwSize.X - dimensions->X);
+  dimensions->X = info.srWindow.Right - info.srWindow.Left + 1;
+  dimensions->Y = info.srWindow.Bottom - info.srWindow.Top + 1;
+#else
+#endif
+  return growth;
+}
+
 static inline void term_set_cursor(COORD coord) {
-  cin_writef(CSI "%hd;%hdf", coord.Y + 1, coord.X + 1);
+  cin_writef(CSI "%hd;%hdf", coord.Y, coord.X + 1);
 }
 
 static inline void cursor_home(void) {
@@ -1088,10 +1107,6 @@ static inline void cursor_tail(void) {
   term_set_cursor(tail_cursor());
 }
 
-static inline void cursor_preview(void) {
-  term_set_cursor(preview.pos);
-}
-
 static inline void cursor_set(COORD cursor) {
   term_set_cursor(cursor);
 }
@@ -1099,7 +1114,6 @@ static inline void cursor_set(COORD cursor) {
 static inline void term_clear(COORD pos, uint32_t count) {
   cursor_set(pos);
   cin_writef(CSI "%uX", count);
-  // TODO: GetConsoleCursorInfo instead? for safer future use
   cursor_curr();
 }
 
@@ -1119,7 +1133,7 @@ static inline void clear_preview(SHORT pos) {
   term_clear(preview_cursor(), leftover);
 }
 
-static inline void set_preview_pos(SHORT y) {
+static inline void set_preview_row(SHORT y) {
   assert(y > 0);
   preview.pos.X = 0;
   preview.pos.Y = y;
@@ -1178,7 +1192,7 @@ static inline int32_t GetConsoleScreenBufferInfo_safe(HANDLE hConsoleOutput, PCO
   if (!GetConsoleScreenBufferInfo(repl.out, lpConsoleScreenBufferInfo)) return FALSE;
   repl.home.Y = lpConsoleScreenBufferInfo->dwCursorPosition.Y;
   const SHORT preview_shift = (SHORT)((repl.msg->count + PREFIX) / max_x) + 1;
-  set_preview_pos(repl.home.Y + preview_shift);
+  set_preview_row(repl.home.Y + preview_shift);
   if (!FlushConsoleInputBuffer(repl.in)) return FALSE;
   return TRUE;
 }
@@ -1218,7 +1232,7 @@ static inline bool cin_isnum_1based(char c) {
 
 static inline wchar_t cin_wlower(wchar_t c) {
   if (c <= L'Z' && c >= 'A') return c + (L'a' - L'A');
-  if (c < 128) return c;
+  if (c < 0x80) return c;
   wchar_t unicode = c;
   LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE, &c, 1, &unicode, 1, NULL, NULL, 0);
   return unicode;
@@ -1245,14 +1259,25 @@ static inline void cin_getnum(const char **p, int64_t *out) {
   }
 }
 
-#define PREVIEW_FSTR CSI "1m%.*s" CSI "0m"
+static inline bool cin_is_continuation(char c) {
+  return ((uint8_t)c & 0xC0) == 0x80;
+}
+
+#define PREVIEW_SAVE_CURSOR ESC "7"
+#define PREVIEW_SET_LINE CSI "%hdd\r"
+#define PREVIEW_SET_BOLD CSI "1m%.*s"
+#define PREVIEW_UNSET_BOLD CSI "0m"
+#define PREVIEW_CLEAR_REST CSI "0K"
+#define PREVIEW_RESTORE_CURSOR ESC "8"
+#define PREVIEW_FSTR                                    \
+  PREVIEW_SAVE_CURSOR PREVIEW_SET_LINE PREVIEW_SET_BOLD \
+      PREVIEW_UNSET_BOLD PREVIEW_CLEAR_REST PREVIEW_RESTORE_CURSOR
 
 static void log_preview(void) {
   if (!preview.count) return;
   const uint32_t msg_len = preview.count;
   preview.len = min(preview.count, repl.dwSize_X);
   // TODO: assert(memchr(preview.items, PREFIX_TOKEN, preview.len) == NULL);
-  cursor_preview();
   if (msg_len > repl.dwSize_X) {
     assert(msg_len > 3);
     const uint32_t tmp1_pos = repl.dwSize_X - 1;
@@ -1264,14 +1289,13 @@ static void log_preview(void) {
     preview.items[tmp1_pos] = '.';
     preview.items[tmp2_pos] = '.';
     preview.items[tmp3_pos] = '.';
-    cin_writef(PREVIEW_FSTR, preview.len, preview.items);
+    cin_writef(PREVIEW_FSTR, preview.pos.Y, preview.len, preview.items);
     preview.items[tmp1_pos] = tmp1;
     preview.items[tmp2_pos] = tmp2;
     preview.items[tmp3_pos] = tmp3;
   } else {
-    cin_writef(PREVIEW_FSTR, msg_len, preview.items);
+    cin_writef(PREVIEW_FSTR, preview.pos.Y, msg_len, preview.items);
   }
-  cursor_curr();
   preview.prev_len = preview.len;
 }
 
@@ -1311,7 +1335,7 @@ static inline void rewrite_post_log(void) {
   }
   const SHORT preview_offset = (SHORT)((repl.msg->count + PREFIX) / repl.dwSize_X) + 1;
   const SHORT preview_line = repl.home.Y + preview_offset;
-  set_preview_pos(preview_line);
+  set_preview_row(preview_line);
   log_preview();
   show_cursor();
 }
@@ -3906,8 +3930,10 @@ static inline bool init_repl(void) {
   repl.msg_index = 0;
   CONSOLE_SCREEN_BUFFER_INFO buffer_info;
   if (!GetConsoleScreenBufferInfo_safe(repl.out, &buffer_info)) goto handle_out;
+  term_get_info(&repl.cursor, &repl.size);
+  repl.cursor.X = PREFIX;
+  repl.home = repl.cursor;
   repl.dwSize_X = (uint32_t)buffer_info.dwSize.X;
-  repl.home = (COORD){.X = PREFIX, .Y = buffer_info.dwCursorPosition.Y};
   repl._filled = 0;
   if (!GetConsoleCursorInfo(repl.out, &repl.cursor_info)) goto handle_out;
   if (!WriteConsoleW(repl.out, PREFIX_STR, PREFIX_STRLEN, NULL, NULL)) goto handle_out;
@@ -5637,7 +5663,7 @@ static void execute_startup_macros(void) {
   array_clear(&cmd_ctx.numbers);
   cmd_reroll_validator();
   set_preview(true, "press enter to shuffle (h for help)");
-  set_preview_pos(repl.home.Y + 1);
+  set_preview_row(repl.home.Y + 1);
   log_preview();
 }
 
@@ -5710,7 +5736,7 @@ static bool term_proc_sequence(const uint8_t *sequence, int32_t len) {
         if (control) {
           while (right < repl.msg->count && repl.msg->items[right] != TERM_SPACE) ++right;
           while (right < repl.msg->count && repl.msg->items[++right] == TERM_SPACE) {
-          };
+          }
         } else {
           ++right;
         }
@@ -5831,7 +5857,7 @@ static bool term_proc_sequence(const uint8_t *sequence, int32_t len) {
           if (repl.msg_index < repl.msg->count) {
             while (repl.msg_index < repl.msg->count && repl.msg->items[repl.msg_index] != TERM_SPACE) ++repl.msg_index;
             while (repl.msg_index < repl.msg->count && repl.msg->items[++repl.msg_index] == TERM_SPACE) {
-            };
+            }
             cursor_curr();
           }
           redraw = false;
@@ -5848,7 +5874,8 @@ static bool term_proc_sequence(const uint8_t *sequence, int32_t len) {
   return redraw;
 fail:
   redraw = false;
-  log_message(LOG_DEBUG, "Terminal sequence incomplete or not supported");
+  log_message(LOG_DEBUG, "Terminal sequence incomplete or not supported: %.*s",
+              len, (char *)sequence);
   return redraw;
 }
 
@@ -5867,7 +5894,6 @@ static bool term_proc_unicode(const uint8_t *unicode, int32_t len) {
   array_splice(&arena_console, repl.msg, repl.msg_index, unicode, len_u32);
   cin_write(repl.msg->items + repl.msg_index, repl.msg->count - repl.msg_index);
   repl.msg_index += len_u32;
-  cursor_curr();
   return true;
 }
 
@@ -5882,7 +5908,7 @@ static bool term_proc_char(char byte) {
     cursor_home();
     assert(repl.msg->items);
     uint32_t i = repl.msg->count;
-    while (i && iswspace(repl.msg->items[i - 1])) --i;
+    while (i && isspace(repl.msg->items[i - 1])) --i;
     const bool empty = !i;
     const bool dup = !empty && repl.msg_tail && repl.msg->count == repl.msg_tail->count &&
                      !strncmp(repl.msg->items, repl.msg_tail->items, repl.msg->count);
@@ -5925,7 +5951,6 @@ static bool term_proc_char(char byte) {
     const uint32_t deleted = repl.msg_index - left;
     repl.msg->count -= deleted;
     repl.msg_index = left;
-    cursor_curr();
     const uint32_t leftover = repl.msg->count - repl.msg_index;
     clear_tail(deleted);
     if (leftover) {
@@ -5942,7 +5967,6 @@ static bool term_proc_char(char byte) {
     array_insert(&arena_console, repl.msg, repl.msg_index, byte);
     cin_write(repl.msg->items + repl.msg_index, repl.msg->count - repl.msg_index);
     ++repl.msg_index;
-    cursor_curr();
     break;
   }
   return redraw;
@@ -5989,21 +6013,30 @@ int main(int argc, char **argv) {
       redraw = term_proc_char((char)byte);
     }
     hide_cursor();
+    const int32_t term_growth = term_get_info(&repl.cursor, &repl.size);
+    log_message(LOG_DEBUG, "Cursor (X=%hd Y=%hd) | Size (W=%hd H=%hd)",
+                repl.cursor.X, repl.cursor.Y, repl.size.X, repl.size.Y);
     // TODO: reset_console_timer(console_timers[CIN_TIMER_RESIZE]);
     if (!redraw) continue;
-    const SHORT preview_offset = (SHORT)((repl.msg->count + PREFIX) / repl.dwSize_X) + 1;
-    const SHORT preview_line = repl.home.Y + preview_offset;
-    const SHORT y_diff = preview_line - preview.pos.Y;
+    const SHORT tail_row = index_y_repl(repl.msg->count);
+    const SHORT preview_row = tail_row + 1;
+    const SHORT y_diff = preview_row - preview.pos.Y;
+    if (tail_row == repl.size.Y) {
+      cin_swrite(CSI "1S" CSI "1A");
+      --repl.home.Y;
+      --preview.pos.Y;
+    }
     if (y_diff < 0) {
-      clear_preview((SHORT)(repl.dwSize_X - preview.len));
+      // went up y_diff rows
+      clear_preview(repl.size.X - (SHORT)preview.len);
     } else if (y_diff == 1) {
-      const uint32_t tail_x = (repl.msg->count + PREFIX) % repl.dwSize_X;
-      if (preview.len > tail_x) {
-        clear_preview((SHORT)tail_x);
+      // went down 1 row
+      const SHORT preview_col = index_x_repl(repl.msg->count);
+      if ((SHORT)preview.len > preview_col) {
+        clear_preview(preview_col);
       }
     }
-    set_preview_pos(preview_line);
-    clear_preview(0);
+    set_preview_row(preview_row);
     update_preview();
     log_preview();
   }
