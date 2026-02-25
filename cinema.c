@@ -1076,6 +1076,13 @@ static inline COORD preview_cursor(void) {
   return preview.pos;
 }
 
+static inline void term_get_cursor(COORD *cursor) {
+  CONSOLE_SCREEN_BUFFER_INFO info;
+  GetConsoleScreenBufferInfo(repl.out, &info);
+  cursor->X = info.dwCursorPosition.X - info.srWindow.Left;
+  cursor->Y = info.dwCursorPosition.Y - info.srWindow.Top + 1;
+}
+
 static inline int32_t term_get_info(COORD *cursor, COORD *dimensions) {
   int32_t growth = 0;
 #ifdef _WIN32
@@ -1092,7 +1099,7 @@ static inline int32_t term_get_info(COORD *cursor, COORD *dimensions) {
 }
 
 static inline void term_set_cursor(COORD coord) {
-  cin_writef(CSI "%hd;%hdf", coord.Y, coord.X + 1);
+  cin_writef(CSI "%hd;%hdH", coord.Y, coord.X + 1);
 }
 
 static inline void cursor_home(void) {
@@ -1111,6 +1118,7 @@ static inline void cursor_set(COORD cursor) {
   term_set_cursor(cursor);
 }
 
+// TODO: check if things like CTRL+BACK always fully clear
 static inline void term_clear(COORD pos, uint32_t count) {
   cursor_set(pos);
   cin_writef(CSI "%uX", count);
@@ -1267,6 +1275,7 @@ static inline bool cin_is_continuation(char c) {
 #define PREVIEW_SET_LINE CSI "%hdd\r"
 #define PREVIEW_SET_BOLD CSI "1m%.*s"
 #define PREVIEW_UNSET_BOLD CSI "0m"
+// TODO: maybe compute <n> K instead of clearing line
 #define PREVIEW_CLEAR_REST CSI "0K"
 #define PREVIEW_RESTORE_CURSOR ESC "8"
 #define PREVIEW_FSTR                                    \
@@ -1280,6 +1289,7 @@ static void log_preview(void) {
   // TODO: assert(memchr(preview.items, PREFIX_TOKEN, preview.len) == NULL);
   if (msg_len > repl.dwSize_X) {
     assert(msg_len > 3);
+    // TODO: only 2 dots visible in windows terminal instead of 3
     const uint32_t tmp1_pos = repl.dwSize_X - 1;
     const uint32_t tmp2_pos = repl.dwSize_X - 2;
     const uint32_t tmp3_pos = repl.dwSize_X - 3;
@@ -1300,42 +1310,29 @@ static void log_preview(void) {
 }
 
 static inline void rewrite_post_log(void) {
-  CONSOLE_SCREEN_BUFFER_INFO buffer_info;
-  GetConsoleScreenBufferInfo_safe(repl.out, &buffer_info);
-  repl.dwSize_X = (uint32_t)buffer_info.dwSize.X;
-  assert(repl.msg->count + PREFIX <= SHRT_MAX && "SHORT overflow");
-  assert(buffer_info.dwCursorPosition.Y < SHRT_MAX && "SHORT overflow");
-  const SHORT tail_x = buffer_info.dwCursorPosition.X;
-  if (repl.msg->count + PREFIX > (uint32_t)tail_x) {
-    const uint32_t leftover = repl.msg->count + PREFIX - (uint32_t)tail_x;
-    term_clear(buffer_info.dwCursorPosition, leftover);
+  const COORD prev = repl.home;
+  term_get_cursor(&repl.cursor);
+  const COORD next = repl.cursor;
+  const SHORT line_shift = next.Y - prev.Y;
+  assert(line_shift >= 0);
+  short leftover = 0;
+  if (line_shift == 0) {
+    const SHORT tail_x = index_x_repl((uint32_t)repl.msg->count);
+    leftover = (SHORT)preview.len - tail_x;
   }
-  repl.home.Y += buffer_info.dwCursorPosition.Y - repl.home.Y + 1;
-  const SHORT y_diff = preview.pos.Y - repl.home.Y;
-  if (y_diff == -1) {
-    if (preview.len > (uint32_t)tail_x) clear_preview(tail_x);
-  } else if (y_diff == 0) {
-    const uint32_t x = min(repl.msg->count + PREFIX, repl.dwSize_X);
-    if (preview.len > x && x < repl.dwSize_X) clear_preview((SHORT)x);
-  } else if (y_diff > 0) {
-    const SHORT x = index_x_repl(repl.msg->count);
-    if (preview.len > (uint32_t)x) clear_preview(x);
+  cin_writef(CSI "0K\n> %.*s" CSI "%hdX", repl.msg->count, repl.msg->items, leftover);
+  repl.home.Y = next.Y + 1;
+  const SHORT msg_lines = index_y(PREFIX + repl.msg->count, (uint32_t)repl.size.X) + 1;
+  if (repl.home.Y + msg_lines >= repl.size.Y) {
+    const SHORT excess_lines = (repl.home.Y + msg_lines) - repl.size.Y;
+    repl.home.Y -= excess_lines;
+    cin_swrite("\n" CSI "1A");
   }
-  cin_wwrite(WCRLF, WCRLF_LEN);
-  if (repl.viewport_bound) {
-    cin_wwrite(WCRLF, WCRLF_LEN);
-    CONSOLE_SCREEN_BUFFER_INFO post_scroll_info;
-    GetConsoleScreenBufferInfo(repl.out, &post_scroll_info);
-    repl.home.Y = post_scroll_info.dwCursorPosition.Y - 1;
-    cursor_set((COORD){.X = 0, .Y = repl.home.Y});
-  }
-  cin_wwrite(PREFIX_STR, PREFIX_STRLEN);
-  if (repl.msg->count) {
-    cin_write(repl.msg->items, repl.msg->count);
-  }
-  const SHORT preview_offset = (SHORT)((repl.msg->count + PREFIX) / repl.dwSize_X) + 1;
-  const SHORT preview_line = repl.home.Y + preview_offset;
-  set_preview_row(preview_line);
+  preview.pos.Y = repl.home.Y + msg_lines;
+  assert(repl.home.Y < repl.size.Y);
+  assert(preview.pos.Y <= repl.size.Y);
+  assert(preview.pos.Y > repl.home.Y);
+  cursor_curr();
   log_preview();
   show_cursor();
 }
@@ -5967,6 +5964,7 @@ static bool term_proc_char(char byte) {
     array_insert(&arena_console, repl.msg, repl.msg_index, byte);
     cin_write(repl.msg->items + repl.msg_index, repl.msg->count - repl.msg_index);
     ++repl.msg_index;
+    if (repl.msg_index != repl.msg->count) cursor_curr();
     break;
   }
   return redraw;
@@ -6014,17 +6012,24 @@ int main(int argc, char **argv) {
     }
     hide_cursor();
     const int32_t term_growth = term_get_info(&repl.cursor, &repl.size);
-    log_message(LOG_DEBUG, "Cursor (X=%hd Y=%hd) | Size (W=%hd H=%hd)",
+    log_message(LOG_TRACE, "Cursor (X=%hd Y=%hd) | Size (W=%hd H=%hd)",
                 repl.cursor.X, repl.cursor.Y, repl.size.X, repl.size.Y);
     // TODO: reset_console_timer(console_timers[CIN_TIMER_RESIZE]);
     if (!redraw) continue;
-    const SHORT tail_row = index_y_repl(repl.msg->count);
-    const SHORT preview_row = tail_row + 1;
+    SHORT tail_row = index_y_repl(repl.msg->count);
+    tail_row = min(tail_row, repl.size.Y);
+    const SHORT preview_row = min(tail_row + 1, repl.size.Y);
     const SHORT y_diff = preview_row - preview.pos.Y;
     if (tail_row == repl.size.Y) {
-      cin_swrite(CSI "1S" CSI "1A");
-      --repl.home.Y;
-      --preview.pos.Y;
+      const SHORT tail_col = index_x_repl(repl.msg->count);
+      if (tail_col != 0) {
+        // clear preview and make space for new line
+        --repl.home.Y;
+        const SHORT leftover = (SHORT)preview.len - tail_col;
+        cursor_set((COORD){.X = tail_col, .Y = tail_row});
+        cin_writef(CSI "%hdX\n", leftover);
+        cursor_curr();
+      }
     }
     if (y_diff < 0) {
       // went up y_diff rows
