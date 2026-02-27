@@ -1114,23 +1114,30 @@ static inline void cursor_tail(void) {
   term_set_cursor(tail_cursor());
 }
 
-static inline void cursor_set(COORD cursor) {
-  term_set_cursor(cursor);
+static inline void term_clear(COORD pos, uint32_t cells, bool set_before, bool set_after) {
+  assert(cells < SHRT_MAX);
+  if (set_before) term_set_cursor(pos);
+  SHORT n = (SHORT)cells;
+  const SHORT max_removed = repl.size.X - pos.X;
+  SHORT removed = min(n, max_removed);
+  cin_writef(CSI "%hdX", removed);
+  if (n > removed) {
+    for (n -= removed; n > 0; n -= removed) {
+      cin_writef(CSI "1E" CSI "%hdX", n);
+      removed = min(n, repl.size.X);
+    }
+    term_set_cursor(pos);
+  } else if (set_after) {
+    term_set_cursor(pos);
+  }
 }
 
-// TODO: check if things like CTRL+BACK always fully clear
-static inline void term_clear(COORD pos, uint32_t count) {
-  cursor_set(pos);
-  cin_writef(CSI "%uX", count);
-  cursor_curr();
-}
-
-static inline void clear_tail(uint32_t count) {
-  term_clear(tail_cursor(), count);
+static inline void clear_tail(uint32_t count, bool set_before) {
+  term_clear(tail_cursor(), count, set_before, false);
 }
 
 static inline void clear_full(void) {
-  term_clear(home_cursor(), repl.msg->count);
+  term_clear(home_cursor(), repl.msg->count, true, false);
 }
 
 static inline void clear_preview(SHORT pos) {
@@ -1138,7 +1145,8 @@ static inline void clear_preview(SHORT pos) {
   assert((uint32_t)pos < repl.dwSize_X);
   preview.pos.X = pos;
   const uint32_t leftover = preview.len - (uint32_t)pos;
-  term_clear(preview_cursor(), leftover);
+  term_clear(preview_cursor(), leftover, true, false);
+  cursor_curr();
 }
 
 static inline void set_preview_row(SHORT y) {
@@ -1172,7 +1180,7 @@ static inline int32_t GetConsoleScreenBufferInfo_safe(HANDLE hConsoleOutput, PCO
   SetConsoleMode(fresh_buffer, mode);
   repl.out = fresh_buffer;
   repl.dwSize_X = max_x;
-  cursor_set((COORD){.X = 0, .Y = 0});
+  term_set_cursor((COORD){.X = 0, .Y = 0});
   repl.home.Y = 0;
   preview.pos.Y = 1;
   const SHORT msg_tail = index_y_repl(repl.msg->count) + 1;
@@ -4048,7 +4056,7 @@ static inline bool resize_console(Console_Timer_Ctx *ctx) {
     preview.pos.X = 0;
     ++preview.pos.Y;
     const uint32_t leftover = preview.len - buf_dwSize_X;
-    term_clear(preview_cursor(), leftover);
+    // term_clear(preview_cursor(), leftover);
     --preview.pos.Y;
   }
   repl.dwSize_X = buf_dwSize_X;
@@ -5699,7 +5707,6 @@ static bool term_proc_sequence(const uint8_t *sequence, int32_t len) {
   if (len == 0) {
     // ESC
     clear_full();
-    cursor_home();
     repl.msg_index = 0;
     array_clear(repl.msg);
   } else {
@@ -5740,12 +5747,14 @@ static bool term_proc_sequence(const uint8_t *sequence, int32_t len) {
         const uint32_t leftover = repl.msg->count - right;
         const uint32_t deleted = right - repl.msg_index;
         repl.msg->count -= deleted;
-        clear_tail(deleted);
         if (leftover) {
           memmove(&repl.msg->items[repl.msg_index], &repl.msg->items[right], leftover);
           cin_write(repl.msg->items + repl.msg_index, leftover);
-          cursor_curr();
+          clear_tail(deleted, false);
+        } else {
+          clear_tail(deleted, true);
         }
+        cursor_curr();
       } break;
       case TERM_UP: {
         if (++i != len) goto fail;
@@ -5759,26 +5768,31 @@ static bool term_proc_sequence(const uint8_t *sequence, int32_t len) {
         repl.msg_index = repl.msg->count;
         repl.msg->next = repl.msg->prev->next;
         repl.msg->prev = repl.msg->prev->prev;
-        if (repl.msg->count < prev_count) clear_tail(prev_count - repl.msg->count);
         cursor_home();
         cin_write(repl.msg->items, repl.msg->count);
+        if (repl.msg->count < prev_count) {
+          const uint32_t to_clear = prev_count - repl.msg->count;
+          clear_tail(to_clear, false);
+        }
       } break;
       case TERM_DOWN: {
         if (++i != len) goto fail;
         if (repl.msg->next) {
           const uint32_t prev_count = repl.msg->count;
-          repl.msg->capacity = repl.msg->next->capacity;
-          repl.msg->count = repl.msg->next->count;
-          memcpy(repl.msg->items, repl.msg->next->items, repl.msg->next->count);
-          if (repl.msg->count < prev_count) clear_tail(prev_count - repl.msg->count);
+          Console_Message *next = repl.msg->next;
+          array_resize(&arena_console, repl.msg, next->count);
+          memcpy(repl.msg->items, next->items, next->count);
+          repl.msg->prev = next->prev;
+          repl.msg->next = next->next;
+          repl.msg_index = repl.msg->count;
           cursor_home();
           cin_write(repl.msg->items, repl.msg->count);
-          repl.msg->prev = repl.msg->next->prev;
-          repl.msg->next = repl.msg->next->next;
-          repl.msg_index = repl.msg->count;
+          if (repl.msg->count < prev_count) {
+            const uint32_t to_clear = prev_count - repl.msg->count;
+            clear_tail(to_clear, false);
+          }
         } else {
           clear_full();
-          cursor_home();
           repl.msg->prev = repl.msg_tail;
           array_clear(repl.msg);
           repl.msg_index = 0;
@@ -5797,26 +5811,31 @@ static bool term_proc_sequence(const uint8_t *sequence, int32_t len) {
         memcpy(repl.msg->items, head->items, head->count);
         repl.msg_index = repl.msg->count;
         repl.msg->next = head->next;
-        if (repl.msg->count < prev_count) clear_tail(prev_count - repl.msg->count);
         cursor_home();
         cin_write(repl.msg->items, repl.msg->count);
+        if (repl.msg->count < prev_count) {
+          const uint32_t to_clear = prev_count - repl.msg->count;
+          clear_tail(to_clear, false);
+        }
       } break;
       case TERM_PAGEDOWN: {
         if (++i == len || sequence[i] != TERM_TILDE || ++i != len) goto fail;
         if (repl.msg_tail) {
           const uint32_t prev_count = repl.msg->count;
-          repl.msg->capacity = repl.msg_tail->capacity;
-          repl.msg->count = repl.msg_tail->count;
-          memcpy(repl.msg->items, repl.msg_tail->items, repl.msg_tail->count);
-          if (repl.msg->count < prev_count) clear_tail(prev_count - repl.msg->count);
+          Console_Message *next = repl.msg_tail;
+          array_resize(&arena_console, repl.msg, next->count);
+          memcpy(repl.msg->items, next->items, next->count);
+          repl.msg->prev = next->prev;
+          repl.msg->next = next->next;
+          repl.msg_index = repl.msg->count;
           cursor_home();
           cin_write(repl.msg->items, repl.msg->count);
-          repl.msg->prev = repl.msg_tail->prev;
-          repl.msg->next = repl.msg_tail->next;
-          repl.msg_index = repl.msg->count;
+          if (repl.msg->count < prev_count) {
+            const uint32_t to_clear = prev_count - repl.msg->count;
+            clear_tail(to_clear, false);
+          }
         } else {
           clear_full();
-          cursor_home();
           array_clear(repl.msg);
           repl.msg_index = 0;
         }
@@ -5902,7 +5921,6 @@ static bool term_proc_char(char byte) {
   case TERM_TAB:
   case TERM_RETURN: {
     clear_full();
-    cursor_home();
     assert(repl.msg->items);
     uint32_t i = repl.msg->count;
     while (i && isspace(repl.msg->items[i - 1])) --i;
@@ -5949,10 +5967,15 @@ static bool term_proc_char(char byte) {
     repl.msg->count -= deleted;
     repl.msg_index = left;
     const uint32_t leftover = repl.msg->count - repl.msg_index;
-    clear_tail(deleted);
+    const COORD curr = curr_cursor();
+    term_set_cursor(curr);
     if (leftover) {
       cin_write(repl.msg->items + repl.msg_index, leftover);
-      cursor_curr();
+      const COORD new_curr = index_to_cursor_repl(repl.msg_index + leftover);
+      term_clear(new_curr, deleted, false, false);
+      term_set_cursor(curr);
+    } else {
+      term_clear(curr, deleted, false, false);
     }
   } break;
   default:
@@ -6026,7 +6049,7 @@ int main(int argc, char **argv) {
         // clear preview and make space for new line
         --repl.home.Y;
         const SHORT leftover = (SHORT)preview.len - tail_col;
-        cursor_set((COORD){.X = tail_col, .Y = tail_row});
+        term_set_cursor((COORD){.X = tail_col, .Y = tail_row});
         cin_writef(CSI "%hdX\n", leftover);
         cursor_curr();
       }
