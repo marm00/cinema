@@ -5702,7 +5702,7 @@ static inline int32_t term_read(uint8_t *buf, const int32_t n, bool peek) {
 
 static bool term_proc_sequence(const uint8_t *sequence, int32_t len) {
   assert(len >= 0);
-  bool redraw = true;
+  bool new_preview = true;
   log_message(LOG_TRACE, "Terminal sequence (len %d): %.*s", len, len, sequence);
   if (len == 0) {
     // ESC
@@ -5718,18 +5718,18 @@ static bool term_proc_sequence(const uint8_t *sequence, int32_t len) {
         if (++i != len) goto fail;
         cursor_home();
         repl.msg_index = 0;
-        redraw = false;
+        new_preview = false;
         break;
       case TERM_END:
         if (++i != len) goto fail;
         repl.msg_index = repl.msg->count;
         cursor_curr();
-        redraw = false;
+        new_preview = false;
         break;
       case TERM_DELETE: {
         if (++i == len) goto fail;
         if (repl.msg_index == repl.msg->count) {
-          redraw = false;
+          new_preview = false;
           break;
         }
         bool control = sequence[i] == TERM_SEMICOLON;
@@ -5759,7 +5759,7 @@ static bool term_proc_sequence(const uint8_t *sequence, int32_t len) {
       case TERM_UP: {
         if (++i != len) goto fail;
         if (!repl.msg->prev) {
-          redraw = false;
+          new_preview = false;
           break;
         }
         const uint32_t prev_count = repl.msg->count;
@@ -5801,7 +5801,7 @@ static bool term_proc_sequence(const uint8_t *sequence, int32_t len) {
       case TERM_PAGEUP: {
         if (++i == len || sequence[i] != TERM_TILDE || ++i != len) goto fail;
         if (!repl.msg->prev) {
-          redraw = false;
+          new_preview = false;
           break;
         }
         Console_Message *head = repl.msg->prev;
@@ -5846,7 +5846,7 @@ static bool term_proc_sequence(const uint8_t *sequence, int32_t len) {
           --repl.msg_index;
           cursor_curr();
         }
-        redraw = false;
+        new_preview = false;
         break;
       case TERM_RIGHT:
         if (++i != len) goto fail;
@@ -5854,7 +5854,7 @@ static bool term_proc_sequence(const uint8_t *sequence, int32_t len) {
           ++repl.msg_index;
           cursor_curr();
         }
-        redraw = false;
+        new_preview = false;
         break;
       case TERM_DEFAULT:
         // handle possible control arrow keys
@@ -5868,7 +5868,7 @@ static bool term_proc_sequence(const uint8_t *sequence, int32_t len) {
             while (repl.msg_index && repl.msg->items[repl.msg_index - 1] != TERM_SPACE) --repl.msg_index;
             cursor_curr();
           }
-          redraw = false;
+          new_preview = false;
         } else if (sequence[i] == TERM_RIGHT) {
           if (repl.msg_index < repl.msg->count) {
             while (repl.msg_index < repl.msg->count && repl.msg->items[repl.msg_index] != TERM_SPACE) ++repl.msg_index;
@@ -5876,7 +5876,7 @@ static bool term_proc_sequence(const uint8_t *sequence, int32_t len) {
             }
             cursor_curr();
           }
-          redraw = false;
+          new_preview = false;
         } else {
           goto fail;
         }
@@ -5887,12 +5887,12 @@ static bool term_proc_sequence(const uint8_t *sequence, int32_t len) {
       }
     }
   }
-  return redraw;
+  return new_preview;
 fail:
-  redraw = false;
+  new_preview = false;
   log_message(LOG_DEBUG, "Terminal sequence incomplete or not supported: %.*s",
               len, (char *)sequence);
-  return redraw;
+  return new_preview;
 }
 
 static bool term_proc_unicode(const uint8_t *unicode, int32_t len) {
@@ -5916,7 +5916,7 @@ static bool term_proc_unicode(const uint8_t *unicode, int32_t len) {
 static bool term_proc_char(char byte) {
   assert(byte);
   log_message(LOG_TRACE, "Char input: %02hhx", byte);
-  bool redraw = true;
+  bool new_preview = true;
   switch (byte) {
   case TERM_TAB:
   case TERM_RETURN: {
@@ -5952,7 +5952,7 @@ static bool term_proc_char(char byte) {
   case TERM_BACK_CTRL:
   case TERM_BACK: {
     if (!repl.msg_index) {
-      redraw = false;
+      new_preview = false;
       break;
     }
     uint32_t left = repl.msg_index - 1;
@@ -5980,7 +5980,7 @@ static bool term_proc_char(char byte) {
   } break;
   default:
     if (!byte || byte == PREFIX_TOKEN) {
-      redraw = false;
+      new_preview = false;
       break;
     }
     byte = cin_lower(byte);
@@ -5990,7 +5990,7 @@ static bool term_proc_char(char byte) {
     if (repl.msg_index != repl.msg->count) cursor_curr();
     break;
   }
-  return redraw;
+  return new_preview;
 }
 
 int main(int argc, char **argv) {
@@ -6017,11 +6017,11 @@ int main(int argc, char **argv) {
     if (!term_read(&byte, 1, false)) {
       break;
     }
-    bool redraw = true;
+    bool new_preview = true;
     if (byte == TERM_ESC) {
       uint8_t term_sequence[TERM_SEQUENCE_MAX];
       const int32_t len = term_read(term_sequence, sizeof(term_sequence), true);
-      redraw = term_proc_sequence(term_sequence, len);
+      new_preview = term_proc_sequence(term_sequence, len);
     } else if ((byte & 0x80) != 0) {
       int32_t bytes = 1;
       if ((byte & 0xE0) == 0xC0) bytes = 2;
@@ -6029,32 +6029,32 @@ int main(int argc, char **argv) {
       else if ((byte & 0xF8) == 0xF0) bytes = 4;
       uint8_t unicode[4] = {byte};
       const int32_t len = term_read(unicode + 1, bytes - 1, false);
-      redraw = term_proc_unicode(unicode, len + 1);
+      new_preview = term_proc_unicode(unicode, len + 1);
     } else {
-      redraw = term_proc_char((char)byte);
+      new_preview = term_proc_char((char)byte);
     }
     hide_cursor();
     const int32_t term_growth = term_get_info(&repl.cursor, &repl.size);
     log_message(LOG_TRACE, "Cursor (X=%hd Y=%hd) | Size (W=%hd H=%hd)",
                 repl.cursor.X, repl.cursor.Y, repl.size.X, repl.size.Y);
     // TODO: reset_console_timer(console_timers[CIN_TIMER_RESIZE]);
-    if (!redraw) continue;
+    if (!new_preview) continue;
     SHORT tail_row = index_y_repl(repl.msg->count);
     tail_row = min(tail_row, repl.size.Y);
     const SHORT preview_row = min(tail_row + 1, repl.size.Y);
     const SHORT y_diff = preview_row - preview.pos.Y;
     if (tail_row == repl.size.Y) {
+      // on the last row
       const SHORT tail_col = index_x_repl(repl.msg->count);
       if (tail_col != 0) {
         // clear preview and make space for new line
-        --repl.home.Y;
         const SHORT leftover = (SHORT)preview.len - tail_col;
         term_set_cursor((COORD){.X = tail_col, .Y = tail_row});
         cin_writef(CSI "%hdX\n", leftover);
-        cursor_curr();
+        --repl.home.Y;
       }
-    }
-    if (y_diff < 0) {
+      cursor_curr();
+    } else if (y_diff < 0) {
       // went up y_diff rows
       clear_preview(0);
       cursor_curr();
