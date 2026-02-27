@@ -1146,7 +1146,6 @@ static inline void clear_preview(SHORT pos) {
   preview.pos.X = pos;
   const uint32_t leftover = preview.len - (uint32_t)pos;
   term_clear(preview_cursor(), leftover, true, false);
-  cursor_curr();
 }
 
 static inline void set_preview_row(SHORT y) {
@@ -1336,7 +1335,7 @@ static inline void rewrite_post_log(void) {
     repl.home.Y -= excess_lines;
     cin_swrite("\n" CSI "1A");
   }
-  preview.pos.Y = repl.home.Y + msg_lines;
+  set_preview_row(repl.home.Y + msg_lines);
   assert(repl.home.Y < repl.size.Y);
   assert(preview.pos.Y <= repl.size.Y);
   assert(preview.pos.Y > repl.home.Y);
@@ -5597,6 +5596,7 @@ static void cmd_quit_executor(void) {
     overlap_write(instance, MPV_QUIT, "quit", NULL, NULL);
   }
   clear_preview(0);
+  cursor_curr();
   show_cursor();
   SetConsoleMode(repl.in, repl.in_mode);
   SetConsoleMode(repl.out, repl.out_mode);
@@ -6056,7 +6056,8 @@ int main(int argc, char **argv) {
     }
     if (y_diff < 0) {
       // went up y_diff rows
-      clear_preview(repl.size.X - (SHORT)preview.len);
+      clear_preview(0);
+      cursor_curr();
     } else if (y_diff == 1) {
       // went down 1 row
       const SHORT preview_col = index_x_repl(repl.msg->count);
