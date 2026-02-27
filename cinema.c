@@ -853,7 +853,6 @@ static struct REPL {
   DWORD msg_index;
   COORD home;
   CONSOLE_CURSOR_INFO cursor_info;
-  DWORD dwSize_X;
   DWORD _filled;
   DWORD in_mode;
   DWORD out_mode;
@@ -865,7 +864,6 @@ static struct REPL {
 
 static struct Console_Preview {
   array_struct_members(char);
-  DWORD prev_len;
   DWORD len;
   COORD pos;
 } preview = {0};
@@ -1034,7 +1032,8 @@ static inline SHORT index_x(uint32_t index, uint32_t dwSize_X) {
 }
 
 static inline SHORT index_x_repl(uint32_t index) {
-  return index_x(PREFIX + index, repl.dwSize_X);
+  assert(repl.size.X >= 0);
+  return index_x(PREFIX + index, (uint32_t)repl.size.X);
 }
 
 static inline SHORT index_y(uint32_t index, uint32_t dwSize_X) {
@@ -1043,7 +1042,8 @@ static inline SHORT index_y(uint32_t index, uint32_t dwSize_X) {
 }
 
 static inline SHORT index_y_repl(uint32_t index) {
-  return repl.home.Y + index_y(PREFIX + index, repl.dwSize_X);
+  assert(repl.size.X >= 0);
+  return repl.home.Y + index_y(PREFIX + index, (uint32_t)repl.size.X);
 }
 
 static inline COORD index_to_cursor(uint32_t index, uint32_t dwSize_X) {
@@ -1142,7 +1142,7 @@ static inline void clear_full(void) {
 
 static inline void clear_preview(SHORT pos) {
   assert(pos >= 0);
-  assert((uint32_t)pos < repl.dwSize_X);
+  assert(pos < repl.size.X);
   preview.pos.X = pos;
   const uint32_t leftover = preview.len - (uint32_t)pos;
   term_clear(preview_cursor(), leftover, true, false);
@@ -1178,7 +1178,7 @@ static inline int32_t GetConsoleScreenBufferInfo_safe(HANDLE hConsoleOutput, PCO
   WriteConsoleW(fresh_buffer, L"\x1b[2J\x1b[3J\x1b[H", 12, &written, NULL);
   SetConsoleMode(fresh_buffer, mode);
   repl.out = fresh_buffer;
-  repl.dwSize_X = max_x;
+  repl.size.X = (SHORT)max_x;
   term_set_cursor((COORD){.X = 0, .Y = 0});
   repl.home.Y = 0;
   preview.pos.Y = 1;
@@ -1278,42 +1278,37 @@ static inline bool cin_is_continuation(char c) {
   return ((uint8_t)c & 0xC0) == 0x80;
 }
 
-#define PREVIEW_SAVE_CURSOR ESC "7"
-#define PREVIEW_SET_LINE CSI "%hdd\r"
-#define PREVIEW_SET_BOLD CSI "1m%.*s"
-#define PREVIEW_UNSET_BOLD CSI "0m"
-// TODO: maybe compute <n> K instead of clearing line
-#define PREVIEW_CLEAR_REST CSI "0K"
-#define PREVIEW_RESTORE_CURSOR ESC "8"
-#define PREVIEW_FSTR                                    \
-  PREVIEW_SAVE_CURSOR PREVIEW_SET_LINE PREVIEW_SET_BOLD \
-      PREVIEW_UNSET_BOLD PREVIEW_CLEAR_REST PREVIEW_RESTORE_CURSOR
+static inline void write_preview(void) {
+  cin_writef(ESC "7" CSI "%hd;1H" CSI "1m%.*s" CSI "0m" ESC "8",
+             preview.pos.Y, preview.len, preview.items);
+}
 
 static void log_preview(void) {
   if (!preview.count) return;
-  const uint32_t msg_len = preview.count;
-  preview.len = min(preview.count, repl.dwSize_X);
+  assert(repl.size.X >= 0);
   // TODO: assert(memchr(preview.items, PREFIX_TOKEN, preview.len) == NULL);
-  if (msg_len > repl.dwSize_X) {
-    assert(msg_len > 3);
-    // TODO: only 2 dots visible in windows terminal instead of 3
-    const uint32_t tmp1_pos = repl.dwSize_X - 1;
-    const uint32_t tmp2_pos = repl.dwSize_X - 2;
-    const uint32_t tmp3_pos = repl.dwSize_X - 3;
+  // preview.count includes the null terminator
+  const bool use_ellipses = preview.count - 1 > (uint32_t)repl.size.X;
+  if (use_ellipses) {
+    preview.len = (uint32_t)repl.size.X;
+    assert(preview.len > 3);
+    const SHORT tmp1_pos = repl.size.X - 1;
+    const SHORT tmp2_pos = repl.size.X - 2;
+    const SHORT tmp3_pos = repl.size.X - 3;
     const char tmp1 = preview.items[tmp1_pos];
     const char tmp2 = preview.items[tmp2_pos];
     const char tmp3 = preview.items[tmp3_pos];
     preview.items[tmp1_pos] = '.';
     preview.items[tmp2_pos] = '.';
     preview.items[tmp3_pos] = '.';
-    cin_writef(PREVIEW_FSTR, preview.pos.Y, preview.len, preview.items);
+    write_preview();
     preview.items[tmp1_pos] = tmp1;
     preview.items[tmp2_pos] = tmp2;
     preview.items[tmp3_pos] = tmp3;
   } else {
-    cin_writef(PREVIEW_FSTR, preview.pos.Y, msg_len, preview.items);
+    preview.len = preview.count - 1;
+    write_preview();
   }
-  preview.prev_len = preview.len;
 }
 
 static inline void rewrite_post_log(void) {
@@ -3937,7 +3932,7 @@ static inline bool init_repl(void) {
   term_get_info(&repl.cursor, &repl.size);
   repl.cursor.X = PREFIX;
   repl.home = repl.cursor;
-  repl.dwSize_X = (uint32_t)buffer_info.dwSize.X;
+  repl.size.X = buffer_info.dwSize.X;
   repl._filled = 0;
   if (!GetConsoleCursorInfo(repl.out, &repl.cursor_info)) goto handle_out;
   if (!WriteConsoleW(repl.out, PREFIX_STR, PREFIX_STRLEN, NULL, NULL)) goto handle_out;
@@ -3978,8 +3973,9 @@ static inline bool resize_console(Console_Timer_Ctx *ctx) {
   }
   assert(buffer_info.dwCursorPosition.Y < buffer_info.dwSize.Y - 1);
   const uint32_t buf_dwSize_X = (uint32_t)buffer_info.dwSize.X;
-  if (buf_dwSize_X == repl.dwSize_X) goto cleanup;
-  const bool bottom_up = buf_dwSize_X > repl.dwSize_X;
+  assert(repl.size.X >= 0);
+  if (buf_dwSize_X == (uint32_t)repl.size.X) goto cleanup;
+  const bool bottom_up = buf_dwSize_X > (uint32_t)repl.size.X;
   COORD upper_cursor = buffer_info.dwCursorPosition;
   uint32_t upper_bound = cursor_to_index(buffer_info.dwCursorPosition, buf_dwSize_X);
   COORD lower_cursor = {.X = 0, .Y = repl.home.Y};
@@ -4058,7 +4054,7 @@ static inline bool resize_console(Console_Timer_Ctx *ctx) {
     // term_clear(preview_cursor(), leftover);
     --preview.pos.Y;
   }
-  repl.dwSize_X = buf_dwSize_X;
+  repl.size.X = (SHORT)buf_dwSize_X;
   log_preview();
 cleanup:
   show_cursor();
@@ -6065,9 +6061,16 @@ int main(int argc, char **argv) {
         clear_preview(preview_col);
       }
     }
+    const uint32_t prev_len = preview.len;
     set_preview_row(preview_row);
     update_preview();
     log_preview();
+    if (y_diff == 0 && prev_len > preview.len) {
+      const uint32_t leftover = prev_len - preview.len;
+      const COORD clear_pos = {.X = (SHORT)preview.len, .Y = preview_row};
+      term_clear(clear_pos, leftover, true, false);
+      cursor_curr();
+    }
   }
   return 0;
 }
