@@ -848,24 +848,21 @@ static Console_Message *create_console_message(void) {
 
 static struct REPL {
   Console_Message *msg;
+  Console_Message *msg_tail;
   HANDLE out;
   HANDLE in;
   HANDLE window;
-  DWORD msg_index;
-  COORD home;
-  CONSOLE_CURSOR_INFO cursor_info;
-  DWORD _filled;
+  uint32_t msg_index;
   DWORD in_mode;
   DWORD out_mode;
-  int32_t viewport_bound;
-  Console_Message *msg_tail;
+  COORD home;
   COORD cursor;
   COORD size;
 } repl = {0};
 
 static struct Console_Preview {
   array_struct_members(char);
-  DWORD len;
+  uint32_t len;
   COORD pos;
 } preview = {0};
 
@@ -1007,31 +1004,29 @@ static void cin_wvwritef(const wchar_t *format, va_list args) {
 #define TERM_READ_WAIT_MS 5
 
 static inline void hide_cursor(void) {
-  repl.cursor_info.bVisible = false;
   cin_swrite(CSI "?25l");
 }
 
 static inline void show_cursor(void) {
-  repl.cursor_info.bVisible = true;
   cin_swrite(CSI "?25h");
 }
 
-static inline SHORT index_x(uint32_t index, uint32_t dwSize_X) {
+static inline short index_x(uint32_t index, uint32_t dwSize_X) {
   assert(index % dwSize_X <= SHRT_MAX);
-  return (SHORT)(index % dwSize_X);
+  return (short)(index % dwSize_X);
 }
 
-static inline SHORT index_x_repl(uint32_t index) {
+static inline short index_x_repl(uint32_t index) {
   assert(repl.size.X >= 0);
   return index_x(HOME_X + index, (uint32_t)repl.size.X);
 }
 
-static inline SHORT index_y(uint32_t index, uint32_t dwSize_X) {
+static inline short index_y(uint32_t index, uint32_t dwSize_X) {
   assert(index / dwSize_X <= SHRT_MAX);
-  return (SHORT)(index / dwSize_X);
+  return (short)(index / dwSize_X);
 }
 
-static inline SHORT index_y_repl(uint32_t index) {
+static inline short index_y_repl(uint32_t index) {
   assert(repl.size.X >= 0);
   return repl.home.Y + index_y(HOME_X + index, (uint32_t)repl.size.X);
 }
@@ -1067,10 +1062,13 @@ static inline COORD preview_cursor(void) {
 }
 
 static inline void term_get_cursor(COORD *cursor) {
+#ifdef _WIN32
   CONSOLE_SCREEN_BUFFER_INFO info;
   GetConsoleScreenBufferInfo(repl.out, &info);
   cursor->X = info.dwCursorPosition.X - info.srWindow.Left;
   cursor->Y = info.dwCursorPosition.Y - info.srWindow.Top + 1;
+#else
+#endif
 }
 
 static inline COORD term_get_info(COORD *cursor, COORD *size) {
@@ -1080,8 +1078,8 @@ static inline COORD term_get_info(COORD *cursor, COORD *size) {
   GetConsoleScreenBufferInfo(repl.out, &info);
   cursor->X = info.dwCursorPosition.X - info.srWindow.Left;
   cursor->Y = info.dwCursorPosition.Y - info.srWindow.Top + 1;
-  const SHORT prev_x = size->X;
-  const SHORT prev_y = size->Y;
+  const short prev_x = size->X;
+  const short prev_y = size->Y;
   size->X = info.srWindow.Right - info.srWindow.Left + 1;
   size->Y = info.srWindow.Bottom - info.srWindow.Top + 1;
   size_change.X = size->X - prev_x;
@@ -1110,9 +1108,9 @@ static inline void cursor_tail(void) {
 static inline void term_clear(COORD pos, uint32_t cells, bool set_before, bool set_after) {
   assert(cells < SHRT_MAX);
   if (set_before) term_set_cursor(pos);
-  SHORT n = (SHORT)cells;
-  const SHORT max_removed = repl.size.X - pos.X;
-  SHORT removed = min(n, max_removed);
+  short n = (short)cells;
+  const short max_removed = repl.size.X - pos.X;
+  short removed = min(n, max_removed);
   cin_writef(CSI "%hdX", removed);
   if (n > removed) {
     for (n -= removed; n > 0; n -= removed) {
@@ -1133,7 +1131,7 @@ static inline void clear_full(void) {
   term_clear(home_cursor(), repl.msg->count, true, false);
 }
 
-static inline void clear_preview(SHORT pos) {
+static inline void clear_preview(short pos) {
   assert(pos >= 0);
   assert(pos < repl.size.X);
   preview.pos.X = pos;
@@ -1141,68 +1139,10 @@ static inline void clear_preview(SHORT pos) {
   term_clear(preview_cursor(), leftover, true, false);
 }
 
-static inline void set_preview_row(SHORT y) {
+static inline void set_preview_row(short y) {
   assert(y > 0);
   preview.pos.X = 0;
   preview.pos.Y = y;
-}
-
-static inline bool ctrl_on(const PINPUT_RECORD input) {
-  return input->Event.KeyEvent.dwControlKeyState & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED);
-}
-
-static inline int32_t GetConsoleScreenBufferInfo_safe(HANDLE hConsoleOutput, PCONSOLE_SCREEN_BUFFER_INFO lpConsoleScreenBufferInfo) {
-  if (!GetConsoleScreenBufferInfo(hConsoleOutput, lpConsoleScreenBufferInfo)) return FALSE;
-  if (repl.viewport_bound) return TRUE;
-  const SHORT cur_y = lpConsoleScreenBufferInfo->dwCursorPosition.Y;
-  const SHORT max_y = lpConsoleScreenBufferInfo->dwSize.Y - 1;
-  const uint32_t max_x = (uint32_t)lpConsoleScreenBufferInfo->dwSize.X;
-  if (cur_y < max_y) return TRUE;
-  HANDLE fresh_buffer = CreateConsoleScreenBuffer(GENERIC_READ | GENERIC_WRITE,
-                                                  FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                                  NULL, CONSOLE_TEXTMODE_BUFFER, NULL);
-  if (fresh_buffer == INVALID_HANDLE_VALUE) return FALSE;
-  if (!SetConsoleScreenBufferSize(fresh_buffer, lpConsoleScreenBufferInfo->dwSize)) return FALSE;
-  if (!SetConsoleActiveScreenBuffer(fresh_buffer)) return FALSE;
-  DWORD mode;
-  GetConsoleMode(fresh_buffer, &mode);
-  SetConsoleMode(fresh_buffer, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
-  DWORD written;
-  WriteConsoleW(fresh_buffer, L"\x1b[2J\x1b[3J\x1b[H", 12, &written, NULL);
-  SetConsoleMode(fresh_buffer, mode);
-  repl.out = fresh_buffer;
-  repl.size.X = (SHORT)max_x;
-  term_set_cursor((COORD){.X = 0, .Y = 0});
-  repl.home.Y = 0;
-  preview.pos.Y = 1;
-  const SHORT msg_tail = index_y_repl(repl.msg->count) + 1;
-  if (msg_tail >= max_y) {
-    repl.msg_index = 0;
-    array_clear(repl.msg);
-    cin_wwritef(L"NOTE: Input message too large (tail at line %hd >= console"
-                " screen buffer height limit %hd). Cinema resolved this by fully"
-                " clearing your input. Your console terminal supports roughly"
-                " %lu characters (cells)." WCRLF,
-                msg_tail, max_y, max_x * (uint32_t)max_y);
-  }
-  static bool notify_buffer_refresh = true;
-  if (notify_buffer_refresh) {
-    cin_wwritef(L"NOTE: Console screen buffer height limit reached (%hd>=%hd)."
-                " Cinema resolved this by activating a fresh buffer. The content of"
-                " the previous buffer will be available once Cinema is closed."
-                " If you want to prevent this situation in the future, increase"
-                " the screen buffer size (height) of your console." WCRLF,
-                cur_y, max_y);
-  } else {
-    cin_wwritef(L"Cut off? Increase console size and retry");
-  }
-  notify_buffer_refresh = false;
-  if (!GetConsoleScreenBufferInfo(repl.out, lpConsoleScreenBufferInfo)) return FALSE;
-  repl.home.Y = lpConsoleScreenBufferInfo->dwCursorPosition.Y;
-  const SHORT preview_shift = (SHORT)((repl.msg->count + HOME_X) / max_x) + 1;
-  set_preview_row(repl.home.Y + preview_shift);
-  if (!FlushConsoleInputBuffer(repl.in)) return FALSE;
-  return TRUE;
 }
 
 static inline int32_t lcps_from(const uint8_t *a, const uint8_t *b, int32_t start) {
@@ -1222,6 +1162,7 @@ static inline bool cin_isloweralpha(char c) {
 }
 
 static inline char cin_lower(char c) {
+  // NOTE: Might want to use LCMapString on Windows
   return (char)tolower(c);
 }
 
@@ -1236,14 +1177,6 @@ static inline bool cin_isnum(char c) {
 
 static inline bool cin_isnum_1based(char c) {
   return c <= '9' && c >= '1';
-}
-
-static inline wchar_t cin_wlower(wchar_t c) {
-  if (c <= L'Z' && c >= 'A') return c + (L'a' - L'A');
-  if (c < 0x80) return c;
-  wchar_t unicode = c;
-  LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE, &c, 1, &unicode, 1, NULL, NULL, 0);
-  return unicode;
 }
 
 static inline bool cin_wisloweralpha(wchar_t c) {
@@ -1284,9 +1217,9 @@ static void log_preview(void) {
   if (use_ellipses) {
     preview.len = (uint32_t)repl.size.X;
     assert(preview.len > 3);
-    const SHORT tmp1_pos = repl.size.X - 1;
-    const SHORT tmp2_pos = repl.size.X - 2;
-    const SHORT tmp3_pos = repl.size.X - 3;
+    const short tmp1_pos = repl.size.X - 1;
+    const short tmp2_pos = repl.size.X - 2;
+    const short tmp3_pos = repl.size.X - 3;
     const char tmp1 = preview.items[tmp1_pos];
     const char tmp2 = preview.items[tmp2_pos];
     const char tmp3 = preview.items[tmp3_pos];
@@ -1307,18 +1240,18 @@ static inline void rewrite_post_log(void) {
   const COORD prev = repl.home;
   term_get_cursor(&repl.cursor);
   const COORD next = repl.cursor;
-  const SHORT line_shift = next.Y - prev.Y;
+  const short line_shift = next.Y - prev.Y;
   assert(line_shift >= 0);
   short leftover = 0;
   if (line_shift == 0) {
-    const SHORT tail_x = index_x_repl((uint32_t)repl.msg->count);
-    leftover = (SHORT)preview.len - tail_x;
+    const short tail_x = index_x_repl((uint32_t)repl.msg->count);
+    leftover = (short)preview.len - tail_x;
   }
   cin_writef(CSI "0K\n> %.*s" CSI "%hdX", repl.msg->count, repl.msg->items, leftover);
   repl.home.Y = next.Y + 1;
-  const SHORT msg_lines = index_y(HOME_X + repl.msg->count, (uint32_t)repl.size.X) + 1;
+  const short msg_lines = index_y(HOME_X + repl.msg->count, (uint32_t)repl.size.X) + 1;
   if (repl.home.Y + msg_lines >= repl.size.Y) {
-    const SHORT excess_lines = (repl.home.Y + msg_lines) - repl.size.Y;
+    const short excess_lines = (repl.home.Y + msg_lines) - repl.size.Y;
     repl.home.Y -= excess_lines;
     cin_swrite("\n" CSI "1A");
   }
@@ -3409,9 +3342,9 @@ static bool overlap_write(Instance *instance, MPV_Packet type, const char *cmd, 
     return false;
   }
 #else
-  const ssize_t write_result = write(instance->fd, msg->buf, msg->bytes);
+  const ssize_t write_result = write(instance->socket, msg->buf, msg->bytes);
   if (write_result < 0) {
-    log_message(LOG_ERROR, "Failed to write to file descriptor %d: %s", instance->fd, strerror(errno));
+    log_message(LOG_ERROR, "Failed to write to file descriptor %d: %s", instance->socket, strerror(errno));
   } else if (write_result < (ssize_t)msg->bytes) {
     log_message(LOG_ERROR, "Expected '%zu' bytes but received '%ld': %s", msg->bytes, bytes, msg->buf);
   }
@@ -3599,7 +3532,7 @@ static inline void mpv_kill(Instance *instance) {
   assert(instance->playlist);
   --instance->playlist->targets;
 #ifndef _WIN32
-  close(instance->fd);
+  close(instance->socket);
   pthread_mutex_lock(&listener_lock);
   const int32_t fd_index = instance->listener_index;
   array_remove(&listener_pfds_to_instances, fd_index);
@@ -3626,7 +3559,7 @@ static inline void mpv_lock(void) {
 }
 
 static inline void mpv_restore_focus(void) {
-  if (!repl.window && (repl.viewport_bound || !(repl.window = GetConsoleWindow()))) {
+  if (!repl.window && !(repl.window = GetConsoleWindow())) {
     // Since repl.window is set by calling GetForegroundWindow on launch,
     // this branch is unlikely to be triggered.
     static const size_t MPV_RESTORE_TRIES = 20;
@@ -3875,7 +3808,7 @@ static void *mpv_listener(void *arg) {
       assert(listener_pfds_to_instances.count >= next_index);
       Instance *instance = listener_pfds_to_instances.items[next_index];
       instance->listener_index = next_index;
-      struct pollfd new_pfd = {.fd = instance->fd, .events = POLLIN};
+      struct pollfd new_pfd = {.fd = instance->socket, .events = POLLIN};
       array_push(&arena_iocp_thread, &listener_pfds, new_pfd);
       pthread_mutex_unlock(&listener_lock);
     }
@@ -3915,18 +3848,12 @@ static inline bool init_repl(void) {
   new_out_mode |= ENABLE_PROCESSED_OUTPUT;
   new_out_mode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
   if (!SetConsoleMode(repl.out, new_out_mode)) goto handle_out;
-  repl.viewport_bound = TRUE;
   if (!arena_chunk_init(&arena_console, CIN_ARENA_CAP)) goto memory;
   repl.msg = create_console_message();
   repl.msg_index = 0;
-  CONSOLE_SCREEN_BUFFER_INFO buffer_info;
-  if (!GetConsoleScreenBufferInfo_safe(repl.out, &buffer_info)) goto handle_out;
   term_get_info(&repl.cursor, &repl.size);
   repl.cursor.X = HOME_X;
   repl.home = repl.cursor;
-  repl.size.X = buffer_info.dwSize.X;
-  repl._filled = 0;
-  if (!GetConsoleCursorInfo(repl.out, &repl.cursor_info)) goto handle_out;
   array_init(&arena_console, &wwrite_buf, CIN_MAX_PATH);
   array_init(&arena_console, &write_buf, CIN_MAX_PATH);
   array_init(&arena_console, &preview, CIN_MAX_PATH);
@@ -4312,7 +4239,7 @@ static void mpv_spawn(Instance *instance, size_t index) {
       log_message(LOG_ERROR, "Socket connection failed: %s", strerror(errno));
       close(fd);
     } else {
-      instance->fd = fd;
+      instance->socket = fd;
       instance->buf_head = arena_bump_T1(&arena_io, Read_Buffer);
       instance->buf_tail = instance->buf_head;
       pthread_mutex_lock(&listener_lock);
@@ -5612,7 +5539,7 @@ static bool term_proc_sequence(const uint8_t *sequence, int32_t len) {
         if (control) i += 2;
         if (sequence[i] != TERM_TILDE) goto fail;
         if (++i != len) goto fail;
-        DWORD right = repl.msg_index;
+        uint32_t right = repl.msg_index;
         if (control) {
           while (right < repl.msg->count && repl.msg->items[right] != TERM_SPACE) ++right;
           while (right < repl.msg->count && repl.msg->items[++right] == TERM_SPACE) {
@@ -5900,7 +5827,7 @@ int main(int argc, char **argv) {
     if (size_change.X) {
       const uint32_t curr_index = cursor_to_index(repl.cursor, (uint32_t)repl.size.X);
       const uint32_t i = curr_index > repl.msg_index ? curr_index - repl.msg_index : curr_index;
-      const SHORT new_home_y = index_y(i, (uint32_t)repl.size.X);
+      const short new_home_y = index_y(i, (uint32_t)repl.size.X);
       repl.home.Y = new_home_y;
     } else if (size_change.Y < 0) {
       repl.home.Y = min(repl.home.Y, repl.size.Y - 1);
@@ -5922,16 +5849,16 @@ int main(int argc, char **argv) {
       new_preview = term_proc_char((char)byte);
     }
     if (!new_preview) continue;
-    SHORT tail_row = index_y_repl(repl.msg->count);
+    short tail_row = index_y_repl(repl.msg->count);
     tail_row = min(tail_row, repl.size.Y);
-    const SHORT preview_row = min(tail_row + 1, repl.size.Y);
-    const SHORT preview_shift = preview_row - preview.pos.Y;
+    const short preview_row = min(tail_row + 1, repl.size.Y);
+    const short preview_shift = preview_row - preview.pos.Y;
     if (tail_row == repl.size.Y) {
       // on the last row
-      const SHORT tail_col = index_x_repl(repl.msg->count);
+      const short tail_col = index_x_repl(repl.msg->count);
       if (tail_col != 0) {
         // clear preview and make space for new line
-        const SHORT leftover = (SHORT)preview.len - tail_col;
+        const short leftover = (short)preview.len - tail_col;
         term_set_cursor((COORD){.X = tail_col, .Y = tail_row});
         cin_writef(CSI "%hdX\n", leftover);
         --repl.home.Y;
@@ -5943,8 +5870,8 @@ int main(int argc, char **argv) {
       cursor_curr();
     } else if (preview_shift == 1) {
       // went down 1 row
-      const SHORT preview_col = index_x_repl(repl.msg->count);
-      if ((SHORT)preview.len > preview_col) {
+      const short preview_col = index_x_repl(repl.msg->count);
+      if ((short)preview.len > preview_col) {
         clear_preview(preview_col);
       }
     }
@@ -5954,7 +5881,7 @@ int main(int argc, char **argv) {
     log_preview();
     if (preview_shift == 0 && prev_len > preview.len) {
       const uint32_t leftover = prev_len - preview.len;
-      const COORD clear_pos = {.X = (SHORT)preview.len, .Y = preview_row};
+      const COORD clear_pos = {.X = (short)preview.len, .Y = preview_row};
       term_clear(clear_pos, leftover, true, false);
       cursor_curr();
     }
