@@ -48,6 +48,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <termios.h>
 #include <time.h>
 #include <unistd.h>
 #endif
@@ -849,12 +850,16 @@ static Console_Message *create_console_message(void) {
 static struct REPL {
   Console_Message *msg;
   Console_Message *msg_tail;
+  HANDLE window;
+#ifdef _WIN32
   HANDLE out;
   HANDLE in;
-  HANDLE window;
-  uint32_t msg_index;
   DWORD in_mode;
   DWORD out_mode;
+#else
+  struct termios modes;
+#endif
+  uint32_t msg_index;
   COORD home;
   COORD cursor;
   COORD size;
@@ -882,7 +887,7 @@ static inline void cin_write(const char *str, uint32_t len) {
 #ifdef _WIN32
   cin_wwrite_utf8(str, len);
 #else
-  write(repl.out, str, len);
+  write(STDOUT_FILENO, str, len);
 #endif
 }
 
@@ -1085,6 +1090,7 @@ static inline COORD term_get_info(COORD *cursor, COORD *size) {
   size_change.X = size->X - prev_x;
   size_change.Y = size->Y - prev_y;
 #else
+
 #endif
   return size_change;
 }
@@ -3833,6 +3839,7 @@ static void *mpv_listener(void *arg) {
 
 static inline bool init_repl(void) {
   repl.window = GetForegroundWindow();
+#ifdef _WIN32
   if (!SetConsoleCP(CP_UTF8)) goto code_page;
   if (!SetConsoleOutputCP(CP_UTF8)) goto code_page;
   if ((repl.in = GetStdHandle(STD_INPUT_HANDLE)) == INVALID_HANDLE_VALUE) goto handle_in;
@@ -3854,11 +3861,20 @@ static inline bool init_repl(void) {
   term_get_info(&repl.cursor, &repl.size);
   repl.cursor.X = HOME_X;
   repl.home = repl.cursor;
+#else
+  tcgetattr(STDIN_FILENO, &repl.modes);
+  struct termios tmp = repl.modes;
+  tmp.c_iflag &= ~ICANON;
+  tmp.c_iflag &= ~ECHO;
+  tcsetattr(STDIN_FILENO, TCSANOW, &tmp);
+#endif
+#ifdef _WIN32
   array_init(&arena_console, &wwrite_buf, CIN_MAX_PATH);
-  array_init(&arena_console, &write_buf, CIN_MAX_PATH);
-  array_init(&arena_console, &preview, CIN_MAX_PATH);
   array_init(&arena_console, &utf16_buf_raw, CIN_MAX_PATH);
   array_init(&arena_console, &utf16_buf_norm, CIN_MAX_PATH);
+#endif
+  array_init(&arena_console, &write_buf, CIN_MAX_PATH);
+  array_init(&arena_console, &preview, CIN_MAX_PATH);
   array_init(&arena_console, &utf8_buf, CIN_MAX_PATH_BYTES);
   cin_swrite(PREFIX_STR);
   return true;
@@ -5402,8 +5418,12 @@ static void cmd_quit_executor(void) {
   clear_preview(0);
   cursor_curr();
   show_cursor();
+#ifdef _WIN32
   SetConsoleMode(repl.in, repl.in_mode);
   SetConsoleMode(repl.out, repl.out_mode);
+#else
+  tcsetattr(STDIN_FILENO, TCSANOW, &repl.modes);
+#endif
   exit(1);
 }
 
@@ -5476,13 +5496,13 @@ static void execute_startup_macros(void) {
 }
 
 static inline int32_t term_read(uint8_t *buf, const int32_t n, bool peek) {
-  int32_t read = 0;
+  int32_t chars_read = 0;
   assert(n > 0);
 #ifdef _WIN32
   DWORD _read = 0;
   if (!peek) {
     if (ReadFile(repl.in, buf, (DWORD)n, &_read, NULL)) {
-      read = (int32_t)_read;
+      chars_read = (int32_t)_read;
     } else {
       log_last_error("Failed to read from terminal");
     }
@@ -5495,12 +5515,33 @@ static inline int32_t term_read(uint8_t *buf, const int32_t n, bool peek) {
         break;
       }
       if (!_read) break;
-      ++read;
+      ++chars_read;
     }
   }
 #else
+  if (!peek) {
+    if ((chars_read = read(STDIN_FILENO, buf, (size_t)n)) < 0) {
+      log_message(LOG_ERROR, "Failed to read %d from terminal: %s", n, strerror(errno));
+    }
+  } else {
+    struct pollfd pfd = {.fd = STDIN_FILENO, .events = POLLIN};
+    for (int32_t i = 0; i < n; ++i) {
+      const int32_t poll_result = poll(&pfd, 1, TERM_READ_WAIT_MS);
+      if (poll_result == 0) break;
+      if (poll_result < 0) {
+        log_message(LOG_ERROR, "Failed to peek: %s", strerror(errno));
+        break;
+      }
+      if (pfd.revents & POLLIN && read(pfd.fd, buf + i, 1) > 0) {
+        ++chars_read;
+      } else {
+        log_message(LOG_ERROR, "Failed to read peek: %s", strerror(errno));
+        break;
+      }
+    }
+  }
 #endif
-  return read;
+  return chars_read;
 }
 
 static bool term_proc_sequence(const uint8_t *sequence, int32_t len) {
