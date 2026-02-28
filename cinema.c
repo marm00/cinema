@@ -141,6 +141,7 @@ typedef struct COORD {
 #define CIN_ARENA_CAP megabytes(2)
 #define CIN_ARENA_BYTES align(sizeof(Arena), 64)
 #define cin_ispow2(n) ((n) && ((n) & ((n) - 1)) == 0)
+#define cin_strlen(str) (sizeof((str)) / sizeof(*(str)) - 1)
 
 static inline uint32_t log2_floor(uint32_t n) {
   assert(n > 0U && "0 is undefined behavior");
@@ -974,22 +975,11 @@ static void cin_wvwritef(const wchar_t *format, va_list args) {
 }
 #endif
 
-#define cin_strlen(str) (sizeof((str)) / sizeof(*(str)) - 1)
-// TODO: probably remove disallowing '>'
-#define PREFIX_TOKEN L'>'
-#define PREFIX 2
-#define PREFIX_STR L"\r> "
-#define PREFIX_ABS L">"
-#define PREFIX_STRLEN cin_strlen(PREFIX_STR)
-#define PREFIX_ABSLEN cin_strlen(PREFIX_ABS)
-#define WCRLF L"\r\n"
-#define WCRLF_LEN 2
-#define WCR L"\r"
-#define WCR_LEN 1
+#define HOME_X 2
 #define CR "\r"
-#define CR_LEN 1
 #define CRLF "\r\n"
-
+#define WCRLF L"\r\n"
+#define PREFIX_STR CR "> "
 #define ESC "\x1b"
 #define CSI "\x1b["
 #define TERM_REPLACEMENT "\xEF\xBF\xBD"
@@ -1033,7 +1023,7 @@ static inline SHORT index_x(uint32_t index, uint32_t dwSize_X) {
 
 static inline SHORT index_x_repl(uint32_t index) {
   assert(repl.size.X >= 0);
-  return index_x(PREFIX + index, (uint32_t)repl.size.X);
+  return index_x(HOME_X + index, (uint32_t)repl.size.X);
 }
 
 static inline SHORT index_y(uint32_t index, uint32_t dwSize_X) {
@@ -1043,7 +1033,7 @@ static inline SHORT index_y(uint32_t index, uint32_t dwSize_X) {
 
 static inline SHORT index_y_repl(uint32_t index) {
   assert(repl.size.X >= 0);
-  return repl.home.Y + index_y(PREFIX + index, (uint32_t)repl.size.X);
+  return repl.home.Y + index_y(HOME_X + index, (uint32_t)repl.size.X);
 }
 
 static inline COORD index_to_cursor(uint32_t index, uint32_t dwSize_X) {
@@ -1083,19 +1073,22 @@ static inline void term_get_cursor(COORD *cursor) {
   cursor->Y = info.dwCursorPosition.Y - info.srWindow.Top + 1;
 }
 
-static inline int32_t term_get_info(COORD *cursor, COORD *dimensions) {
-  int32_t growth = 0;
+static inline COORD term_get_info(COORD *cursor, COORD *size) {
+  COORD size_change = {0};
 #ifdef _WIN32
   CONSOLE_SCREEN_BUFFER_INFO info;
   GetConsoleScreenBufferInfo(repl.out, &info);
   cursor->X = info.dwCursorPosition.X - info.srWindow.Left;
   cursor->Y = info.dwCursorPosition.Y - info.srWindow.Top + 1;
-  growth = (int32_t)(info.dwSize.X - dimensions->X);
-  dimensions->X = info.srWindow.Right - info.srWindow.Left + 1;
-  dimensions->Y = info.srWindow.Bottom - info.srWindow.Top + 1;
+  const SHORT prev_x = size->X;
+  const SHORT prev_y = size->Y;
+  size->X = info.srWindow.Right - info.srWindow.Left + 1;
+  size->Y = info.srWindow.Bottom - info.srWindow.Top + 1;
+  size_change.X = size->X - prev_x;
+  size_change.Y = size->Y - prev_y;
 #else
 #endif
-  return growth;
+  return size_change;
 }
 
 static inline void term_set_cursor(COORD coord) {
@@ -1206,7 +1199,7 @@ static inline int32_t GetConsoleScreenBufferInfo_safe(HANDLE hConsoleOutput, PCO
   notify_buffer_refresh = false;
   if (!GetConsoleScreenBufferInfo(repl.out, lpConsoleScreenBufferInfo)) return FALSE;
   repl.home.Y = lpConsoleScreenBufferInfo->dwCursorPosition.Y;
-  const SHORT preview_shift = (SHORT)((repl.msg->count + PREFIX) / max_x) + 1;
+  const SHORT preview_shift = (SHORT)((repl.msg->count + HOME_X) / max_x) + 1;
   set_preview_row(repl.home.Y + preview_shift);
   if (!FlushConsoleInputBuffer(repl.in)) return FALSE;
   return TRUE;
@@ -1286,7 +1279,6 @@ static inline void write_preview(void) {
 static void log_preview(void) {
   if (!preview.count) return;
   assert(repl.size.X >= 0);
-  // TODO: assert(memchr(preview.items, PREFIX_TOKEN, preview.len) == NULL);
   // preview.count includes the null terminator
   const bool use_ellipses = preview.count - 1 > (uint32_t)repl.size.X;
   if (use_ellipses) {
@@ -1324,7 +1316,7 @@ static inline void rewrite_post_log(void) {
   }
   cin_writef(CSI "0K\n> %.*s" CSI "%hdX", repl.msg->count, repl.msg->items, leftover);
   repl.home.Y = next.Y + 1;
-  const SHORT msg_lines = index_y(PREFIX + repl.msg->count, (uint32_t)repl.size.X) + 1;
+  const SHORT msg_lines = index_y(HOME_X + repl.msg->count, (uint32_t)repl.size.X) + 1;
   if (repl.home.Y + msg_lines >= repl.size.Y) {
     const SHORT excess_lines = (repl.home.Y + msg_lines) - repl.size.Y;
     repl.home.Y -= excess_lines;
@@ -3930,18 +3922,18 @@ static inline bool init_repl(void) {
   CONSOLE_SCREEN_BUFFER_INFO buffer_info;
   if (!GetConsoleScreenBufferInfo_safe(repl.out, &buffer_info)) goto handle_out;
   term_get_info(&repl.cursor, &repl.size);
-  repl.cursor.X = PREFIX;
+  repl.cursor.X = HOME_X;
   repl.home = repl.cursor;
   repl.size.X = buffer_info.dwSize.X;
   repl._filled = 0;
   if (!GetConsoleCursorInfo(repl.out, &repl.cursor_info)) goto handle_out;
-  if (!WriteConsoleW(repl.out, PREFIX_STR, PREFIX_STRLEN, NULL, NULL)) goto handle_out;
   array_init(&arena_console, &wwrite_buf, CIN_MAX_PATH);
   array_init(&arena_console, &write_buf, CIN_MAX_PATH);
   array_init(&arena_console, &preview, CIN_MAX_PATH);
   array_init(&arena_console, &utf16_buf_raw, CIN_MAX_PATH);
   array_init(&arena_console, &utf16_buf_norm, CIN_MAX_PATH);
   array_init(&arena_console, &utf8_buf, CIN_MAX_PATH_BYTES);
+  cin_swrite(PREFIX_STR);
   return true;
 code_page:
   cin_swrite("Failed to modify console code page" CRLF);
@@ -3956,118 +3948,10 @@ memory:
   return false;
 }
 
-static inline bool resize_console(Console_Timer_Ctx *ctx) {
-  (void)ctx;
-  static array_struct(CHAR_INFO) console_buffer = {0};
-  // NOTE: Windows cursor / display is not fully predictable. As such,
-  // we search for a unique token that marks the start of the input.
-  // There are probably scenarios where the token (printed by us) is
-  // no longer visible; if this is encountered, probably just fully
-  // redraw the console.
-  EnterCriticalSection(&log_lock);
-  hide_cursor();
-  CONSOLE_SCREEN_BUFFER_INFO buffer_info;
-  if (!GetConsoleScreenBufferInfo_safe(repl.out, &buffer_info)) {
-    log_last_error("Failed to read console output region");
-    goto cleanup;
-  }
-  assert(buffer_info.dwCursorPosition.Y < buffer_info.dwSize.Y - 1);
-  const uint32_t buf_dwSize_X = (uint32_t)buffer_info.dwSize.X;
-  assert(repl.size.X >= 0);
-  if (buf_dwSize_X == (uint32_t)repl.size.X) goto cleanup;
-  const bool bottom_up = buf_dwSize_X > (uint32_t)repl.size.X;
-  COORD upper_cursor = buffer_info.dwCursorPosition;
-  uint32_t upper_bound = cursor_to_index(buffer_info.dwCursorPosition, buf_dwSize_X);
-  COORD lower_cursor = {.X = 0, .Y = repl.home.Y};
-  uint32_t lower_bound = cursor_to_index(lower_cursor, buf_dwSize_X);
-  assert(upper_bound > 0);
-  if (bottom_up && lower_bound >= upper_bound) {
-    lower_bound = upper_bound / 2;
-    lower_cursor = index_to_cursor(lower_bound, buf_dwSize_X);
-  }
-  SHORT rows = upper_cursor.Y - lower_cursor.Y + 1;
-  assert(rows > 0);
-  assert(rows <= SHRT_MAX);
-  const SHORT cols = (SHORT)buf_dwSize_X;
-  COORD buffer_size = {.X = cols, .Y = rows};
-  uint32_t buffer_count = (uint32_t)cols * (uint32_t)rows;
-  array_resize(&arena_console, &console_buffer, buffer_count);
-  COORD region_start = {.X = 0, .Y = 0};
-  SMALL_RECT region = {
-      .Left = 0,
-      .Top = lower_cursor.Y,
-      .Right = cols - 1,
-      .Bottom = upper_cursor.Y};
-  if (!ReadConsoleOutputW(repl.out, console_buffer.items, buffer_size, region_start, &region)) {
-    log_last_error("Failed to read console output region");
-    goto cleanup;
-  }
-  bool match = false;
-  if (bottom_up) {
-    for (;;) {
-      for (SHORT i = 0; i < rows; ++i) {
-        const SHORT row = rows - 1 - i;
-        assert(row >= 0);
-        const uint32_t head = (uint32_t)row * buf_dwSize_X;
-        if (console_buffer.items[head].Char.UnicodeChar == PREFIX_TOKEN) {
-          repl.home.Y = lower_cursor.Y + row;
-          match = true;
-          goto outer;
-        }
-      }
-      if (lower_bound == 0) goto outer;
-      upper_bound = lower_bound;
-      upper_cursor = lower_cursor;
-      lower_bound /= 2;
-      lower_cursor = index_to_cursor(lower_bound, buf_dwSize_X);
-      rows = upper_cursor.Y - lower_cursor.Y + 1;
-      buffer_size.Y = rows;
-      buffer_count = (uint32_t)cols * (uint32_t)rows;
-      array_resize(&arena_console, &console_buffer, buffer_count);
-      region.Left = 0;
-      region.Top = lower_cursor.Y;
-      region.Right = cols - 1;
-      region.Bottom = upper_cursor.Y;
-      if (!ReadConsoleOutputW(repl.out, console_buffer.items, buffer_size, region_start, &region)) {
-        log_last_error("Failed to read console output region");
-        goto cleanup;
-      }
-    }
-  outer:;
-  } else {
-    for (uint32_t i = 0; i < (uint32_t)rows; ++i) {
-      if (console_buffer.items[i * buf_dwSize_X].Char.UnicodeChar == PREFIX_TOKEN) {
-        repl.home.Y = lower_cursor.Y + (SHORT)i;
-        match = true;
-        break;
-      }
-    }
-  }
-  assert(match && "Failed to find prefix token in console output. viewport_bound?");
-  const SHORT msg_shift = (SHORT)((repl.msg->count + PREFIX) / buf_dwSize_X);
-  preview.pos.Y = repl.home.Y + msg_shift + 1;
-  assert(preview.pos.X == 0);
-  if (preview.len > buf_dwSize_X) {
-    preview.pos.X = 0;
-    ++preview.pos.Y;
-    const uint32_t leftover = preview.len - buf_dwSize_X;
-    // term_clear(preview_cursor(), leftover);
-    --preview.pos.Y;
-  }
-  repl.size.X = (SHORT)buf_dwSize_X;
-  log_preview();
-cleanup:
-  show_cursor();
-  LeaveCriticalSection(&log_lock);
-  return false;
-}
-
 typedef enum {
-  CIN_TIMER_RESIZE,
   _CIN_TIMER_END
 } Console_Timer_Type;
 
-static Console_Timer_Ctx *console_timers[_CIN_TIMER_END];
 static cache_struct(Console_Timer_Ctx) timer_cache = {0};
 
 static inline void reset_console_timer(Console_Timer_Ctx *ctx) {
@@ -4103,9 +3987,6 @@ static inline Console_Timer_Ctx *register_console_timer(bool (*f)(Console_Timer_
 }
 
 static inline bool init_timers(void) {
-  cache_init_core(&arena_console, &timer_cache, 1, true);
-  console_timers[CIN_TIMER_RESIZE] = register_console_timer(resize_console, 100LL);
-  if (!console_timers[CIN_TIMER_RESIZE]) return false;
   return true;
 }
 
@@ -5607,7 +5488,6 @@ static void cmd_quit_validator(void) {
 #define FSTR_CMD CRLF "  %-10s %s"
 
 static inline void register_cmd(const char *name, const char *help, cmd_validator validator) {
-  assert(memchr(help, PREFIX_TOKEN, strlen(help)) == NULL);
   patricia_insert(cmd_ctx.trie, name, validator);
   const int32_t len_i32 = snprintf(NULL, 0, FSTR_CMD, name, help);
   assert(len_i32);
@@ -5975,7 +5855,7 @@ static bool term_proc_char(char byte) {
     }
   } break;
   default:
-    if (!byte || byte == PREFIX_TOKEN) {
+    if (!byte) {
       new_preview = false;
       break;
     }
@@ -6013,6 +5893,18 @@ int main(int argc, char **argv) {
     if (!term_read(&byte, 1, false)) {
       break;
     }
+    hide_cursor();
+    const COORD size_change = term_get_info(&repl.cursor, &repl.size);
+    log_message(LOG_TRACE, "Cursor (X=%hd Y=%hd) | Size (W=%hd H=%hd)",
+                repl.cursor.X, repl.cursor.Y, repl.size.X, repl.size.Y);
+    if (size_change.X) {
+      const uint32_t curr_index = cursor_to_index(repl.cursor, (uint32_t)repl.size.X);
+      const uint32_t i = curr_index > repl.msg_index ? curr_index - repl.msg_index : curr_index;
+      const SHORT new_home_y = index_y(i, (uint32_t)repl.size.X);
+      repl.home.Y = new_home_y;
+    } else if (size_change.Y < 0) {
+      repl.home.Y = min(repl.home.Y, repl.size.Y - 1);
+    }
     bool new_preview = true;
     if (byte == TERM_ESC) {
       uint8_t term_sequence[TERM_SEQUENCE_MAX];
@@ -6029,16 +5921,11 @@ int main(int argc, char **argv) {
     } else {
       new_preview = term_proc_char((char)byte);
     }
-    hide_cursor();
-    const int32_t term_growth = term_get_info(&repl.cursor, &repl.size);
-    log_message(LOG_TRACE, "Cursor (X=%hd Y=%hd) | Size (W=%hd H=%hd)",
-                repl.cursor.X, repl.cursor.Y, repl.size.X, repl.size.Y);
-    // TODO: reset_console_timer(console_timers[CIN_TIMER_RESIZE]);
     if (!new_preview) continue;
     SHORT tail_row = index_y_repl(repl.msg->count);
     tail_row = min(tail_row, repl.size.Y);
     const SHORT preview_row = min(tail_row + 1, repl.size.Y);
-    const SHORT y_diff = preview_row - preview.pos.Y;
+    const SHORT preview_shift = preview_row - preview.pos.Y;
     if (tail_row == repl.size.Y) {
       // on the last row
       const SHORT tail_col = index_x_repl(repl.msg->count);
@@ -6050,11 +5937,11 @@ int main(int argc, char **argv) {
         --repl.home.Y;
       }
       cursor_curr();
-    } else if (y_diff < 0) {
-      // went up y_diff rows
+    } else if (preview_shift < 0) {
+      // went up preview_shift rows
       clear_preview(0);
       cursor_curr();
-    } else if (y_diff == 1) {
+    } else if (preview_shift == 1) {
       // went down 1 row
       const SHORT preview_col = index_x_repl(repl.msg->count);
       if ((SHORT)preview.len > preview_col) {
@@ -6065,7 +5952,7 @@ int main(int argc, char **argv) {
     set_preview_row(preview_row);
     update_preview();
     log_preview();
-    if (y_diff == 0 && prev_len > preview.len) {
+    if (preview_shift == 0 && prev_len > preview.len) {
       const uint32_t leftover = prev_len - preview.len;
       const COORD clear_pos = {.X = (SHORT)preview.len, .Y = preview_row};
       term_clear(clear_pos, leftover, true, false);
