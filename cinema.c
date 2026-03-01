@@ -851,7 +851,6 @@ static Console_Message *create_console_message(void) {
 static struct REPL {
   Console_Message *msg;
   Console_Message *msg_tail;
-  HANDLE window;
 #ifdef _WIN32
   HANDLE out;
   HANDLE in;
@@ -1227,7 +1226,7 @@ static inline bool cin_is_continuation(char c) {
 }
 
 static inline void write_preview(void) {
-  cin_writef(ESC "7" CSI "%hd;1H" CSI "1m%.*s" CSI "0m" ESC "8",
+  cin_writef(ESC "7" CSI "%hd;1H" CSI "1m%.*s" CSI "22m" ESC "8",
              preview.pos.Y, preview.len, preview.items);
 }
 
@@ -3577,27 +3576,15 @@ static size_t mpv_demand = 0;
 static inline void mpv_lock(void) {
   mpv_supply = 0;
   mpv_demand = 0;
+#ifdef _WIN32
   LockSetForegroundWindow(LSFW_LOCK);
-}
-
-static inline void mpv_restore_focus(void) {
-  if (!repl.window && !(repl.window = GetConsoleWindow())) {
-    // Since repl.window is set by calling GetForegroundWindow on launch,
-    // this branch is unlikely to be triggered.
-    static const size_t MPV_RESTORE_TRIES = 20;
-    static const uint32_t MPV_RESTORE_DELAY = 100;
-    for (size_t i = 0; i < MPV_RESTORE_TRIES; ++i) {
-      repl.window = find_window_of_console();
-      if (repl.window) break;
-      else Sleep(MPV_RESTORE_DELAY);
-    }
-    assert(repl.window && "terminal window not found");
-  }
-  SetWindowPos(repl.window, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+#endif
 }
 
 static inline void mpv_unlock(void) {
+#ifdef _WIN32
   LockSetForegroundWindow(LSFW_UNLOCK);
+#endif
 }
 
 // NOTE: voidtools Everything supports pipe '|' as search separator and '"' for spaces
@@ -3624,8 +3611,6 @@ static inline void iocp_parse(Instance *instance, const char *buf_start, size_t 
       }
     } else if (CIN_MPVVAL(p, "file-loaded")) {
       if (instance->autoplay_mpv) playlist_insert(instance);
-    } else if (CIN_MPVVAL(p, "video-reconfig")) {
-      mpv_restore_focus();
     }
   } else if ((p = strstr(buf, CIN_MPVKEY_REQUEST))) {
     p += cin_strlen(CIN_MPVKEY_REQUEST);
@@ -3664,9 +3649,6 @@ static inline void iocp_parse(Instance *instance, const char *buf_start, size_t 
     } break;
     case MPV_QUIT:
       mpv_kill(instance);
-      break;
-    case MPV_SET_GEOMETRY:
-      mpv_restore_focus();
       break;
     case MPV_GET_PATH: {
       char *data = strstr(buf, CIN_MPVKEY_DATA);
@@ -3852,9 +3834,7 @@ static void *mpv_listener(void *arg) {
   return 0;
 }
 #endif
-
 static inline bool init_repl(void) {
-  repl.window = GetForegroundWindow();
 #ifdef _WIN32
   if (!SetConsoleCP(CP_UTF8)) goto code_page;
   if (!SetConsoleOutputCP(CP_UTF8)) goto code_page;
@@ -4216,7 +4196,6 @@ static void mpv_spawn(Instance *instance, size_t index) {
   wchar_t mpv_command_utf16[mpv_buf_len];
   wmemcpy(mpv_command_utf16, utf16_buf_raw.items, (size_t)mpv_buf_len);
   STARTUPINFOW si = {0};
-  si.cb = sizeof(si);
   PROCESS_INFORMATION pi = {0};
   if (!CreateProcessW(exe_path_mpv, mpv_command_utf16, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
     if (GetLastError() == ERROR_FILE_NOT_FOUND) {
