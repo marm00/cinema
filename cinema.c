@@ -1078,8 +1078,12 @@ static inline bool term_get_cursor(COORD *cursor) {
   cin_swrite(CSI "6n");
   char pos[16];
   int32_t n = read(STDIN_FILENO, pos, sizeof(pos) - 1);
-  pos[n] = '\0';
-  if (sscanf(pos, CSI "%hd;%hdR", &cursor->Y, &cursor->X) != 2) ok = false;
+  if (n <= 0) {
+    ok = false;
+  } else {
+    pos[n] = '\0';
+    ok = sscanf(pos, CSI "%hd;%hdR", &cursor->Y, &cursor->X) == 2;
+  }
 #endif
   assert(ok && "Failed to get new cursor position");
   return ok;
