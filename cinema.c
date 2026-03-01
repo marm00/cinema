@@ -43,6 +43,7 @@
 #include <pwd.h>
 #include <stdarg.h>
 #include <stddef.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/param.h>
 #include <sys/socket.h>
@@ -1066,33 +1067,48 @@ static inline COORD preview_cursor(void) {
   return preview.pos;
 }
 
-static inline void term_get_cursor(COORD *cursor) {
+static inline bool term_get_cursor(COORD *cursor) {
+  bool ok = true;
 #ifdef _WIN32
   CONSOLE_SCREEN_BUFFER_INFO info;
   GetConsoleScreenBufferInfo(repl.out, &info);
   cursor->X = info.dwCursorPosition.X - info.srWindow.Left;
   cursor->Y = info.dwCursorPosition.Y - info.srWindow.Top + 1;
 #else
+  // TODO: log lock
+  cin_swrite(CSI "6n");
+  char pos[16];
+  int32_t n = read(STDIN_FILENO, pos, sizeof(pos) - 1);
+  pos[n] = '\0';
+  if (sscanf(pos, CSI "%hd;%hdR", &cursor->Y, &cursor->X) != 2) ok = false;
 #endif
+  assert(ok && "Failed to get new cursor position");
+  return ok;
 }
 
-static inline COORD term_get_info(COORD *cursor, COORD *size) {
+static inline COORD term_get_size(COORD *size) {
   COORD size_change = {0};
+  const short prev_x = size->X;
+  const short prev_y = size->Y;
 #ifdef _WIN32
   CONSOLE_SCREEN_BUFFER_INFO info;
   GetConsoleScreenBufferInfo(repl.out, &info);
-  cursor->X = info.dwCursorPosition.X - info.srWindow.Left;
-  cursor->Y = info.dwCursorPosition.Y - info.srWindow.Top + 1;
-  const short prev_x = size->X;
-  const short prev_y = size->Y;
   size->X = info.srWindow.Right - info.srWindow.Left + 1;
   size->Y = info.srWindow.Bottom - info.srWindow.Top + 1;
+#else
+  struct winsize ws;
+  ioctl(STDIN_FILENO, TIOCGWINSZ, &ws);
+  size->X = ws.ws_col;
+  size->Y = ws.ws_row;
+#endif
   size_change.X = size->X - prev_x;
   size_change.Y = size->Y - prev_y;
-#else
-
-#endif
   return size_change;
+}
+
+static inline void term_get_info(COORD *cursor, COORD *size) {
+  term_get_cursor(cursor);
+  term_get_size(size);
 }
 
 static inline void term_set_cursor(COORD coord) {
@@ -3855,12 +3871,6 @@ static inline bool init_repl(void) {
   new_out_mode |= ENABLE_PROCESSED_OUTPUT;
   new_out_mode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
   if (!SetConsoleMode(repl.out, new_out_mode)) goto handle_out;
-  if (!arena_chunk_init(&arena_console, CIN_ARENA_CAP)) goto memory;
-  repl.msg = create_console_message();
-  repl.msg_index = 0;
-  term_get_info(&repl.cursor, &repl.size);
-  repl.cursor.X = HOME_X;
-  repl.home = repl.cursor;
 #else
   tcgetattr(STDIN_FILENO, &repl.modes);
   struct termios tmp = repl.modes;
@@ -3868,6 +3878,12 @@ static inline bool init_repl(void) {
   tmp.c_iflag &= ~ECHO;
   tcsetattr(STDIN_FILENO, TCSANOW, &tmp);
 #endif
+  if (!arena_chunk_init(&arena_console, CIN_ARENA_CAP)) goto memory;
+  repl.msg = create_console_message();
+  repl.msg_index = 0;
+  term_get_info(&repl.cursor, &repl.size);
+  repl.cursor.X = HOME_X;
+  repl.home = repl.cursor;
 #ifdef _WIN32
   array_init(&arena_console, &wwrite_buf, CIN_MAX_PATH);
   array_init(&arena_console, &utf16_buf_raw, CIN_MAX_PATH);
@@ -5862,10 +5878,9 @@ int main(int argc, char **argv) {
       break;
     }
     hide_cursor();
-    const COORD size_change = term_get_info(&repl.cursor, &repl.size);
-    log_message(LOG_TRACE, "Cursor (X=%hd Y=%hd) | Size (W=%hd H=%hd)",
-                repl.cursor.X, repl.cursor.Y, repl.size.X, repl.size.Y);
+    const COORD size_change = term_get_size(&repl.size);
     if (size_change.X) {
+      term_get_cursor(&repl.cursor);
       const uint32_t curr_index = cursor_to_index(repl.cursor, (uint32_t)repl.size.X);
       const uint32_t i = curr_index > repl.msg_index ? curr_index - repl.msg_index : curr_index;
       const short new_home_y = index_y(i, (uint32_t)repl.size.X);
@@ -5895,7 +5910,6 @@ int main(int argc, char **argv) {
     const short preview_row = min(tail_row + 1, repl.size.Y);
     const short preview_shift = preview_row - preview.pos.Y;
     if (tail_row == repl.size.Y) {
-      // on the last row
       const short tail_col = index_x_repl(repl.msg->count);
       if (tail_col != 0) {
         // clear preview and make space for new line
