@@ -1309,7 +1309,10 @@ static void log_message(Cin_Log_Level level, const char *message, ...) {
   cin_writef(CR "[%s] ", LOG_LEVELS[level]);
   va_list args;
   va_start(args, message);
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wformat-nonliteral"
   cin_vwritef(message, args);
+#pragma clang diagnostic pop
   rewrite_post_log();
   va_end(args);
   unlock_logs();
@@ -1372,7 +1375,10 @@ static void log_last_error(const char *message, ...) {
   cin_writef(CR "[%s] ", LOG_LEVELS[LOG_ERROR]);
   va_list args;
   va_start(args, message);
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wformat-nonliteral"
   cin_vwritef(message, args);
+#pragma clang diagnostic pop
   va_end(args);
   cin_writef(" - Code %lu: %s", code, (char *)buffer);
   rewrite_post_log();
@@ -2485,10 +2491,10 @@ static void setup_directory(const char *path, Tag_Directories *tag_dirs) {
   const int32_t len_i32 = utf8_norm(new_path) + 1;
   path = new_path;
   assert(len_i32 > 0);
-  const size_t len = (size_t)len_i32;
+  const uint32_t len = (uint32_t)len_i32;
   Directory_Path root_dir = {.len = len};
   memcpy(root_dir.path, path, len);
-  const size_t bytes = len;
+  const uint32_t bytes = len;
 #endif
   array_push(&arena_console, &dir_stack, root_dir);
   while (dir_stack.count > 0) {
@@ -2637,7 +2643,7 @@ static void setup_directory(const char *path, Tag_Directories *tag_dirs) {
       } else {
         const table_key_pos tail_offset = array_bytes(&docs);
         int32_t tail_doc = (int32_t)tail_offset;
-        docs_push((uint8_t *)tmp_dir.path, path_len);
+        docs_push((uint8_t *)tmp_dir.path, (int32_t)path_len);
         if (conf_parser.has_patterns) {
           Table_Key pat_key = {.strings = docs.items, .pos = tail_offset, .len = (table_key_len)path_len};
           table_value dup_doc = table_insert(&arena_console, &pat_table, &pat_key, tail_doc);
@@ -2748,7 +2754,7 @@ static inline void setup_pattern(const char *pattern, Tag_Pattern_Items *tag_pat
     return;
   }
   struct stat statbuf;
-  const int32_t n = matches.gl_pathc;
+  const size_t n = matches.gl_pathc;
   char file_buf[CIN_MAX_PATH];
   for (size_t i = 0; i < n; ++i) {
     const char *file = matches.gl_pathv[i];
@@ -2758,11 +2764,11 @@ static inline void setup_pattern(const char *pattern, Tag_Pattern_Items *tag_pat
       utf8_norm(file_buf);
       const table_key_pos tail_offset = array_bytes(&docs);
       const int32_t tail_doc = (int32_t)tail_offset;
-      docs_push((uint8_t *)file_buf, len);
+      docs_push((uint8_t *)file_buf, (int32_t)len);
       Table_Key key = {.strings = docs.items, .pos = tail_offset, .len = (table_key_len)len};
       table_value dup_doc = table_insert(&arena_console, &pat_table, &key, tail_doc);
       if (dup_doc >= 0) {
-        docs_pop(len);
+        docs_pop((int32_t)len);
         if (tag_pattern_items) array_push(&arena_console, tag_pattern_items, (int32_t)dup_doc);
       } else {
         if (tag_pattern_items) array_push(&arena_console, tag_pattern_items, tail_doc);
@@ -2896,7 +2902,8 @@ static inline void setup_macro_command(char *command, Cin_Macro *macro) {
   array_extend(&arena_console, macro, utf8_buf.items, len_u32);
 #else
   const int32_t len = utf8_norm(command) + 1;
-  array_extend(&arena_console, macro, command, len);
+  assert(len > 1);
+  array_extend(&arena_console, macro, command, (uint32_t)len);
 #endif
 }
 
@@ -3580,7 +3587,7 @@ static inline void mpv_kill(Instance *instance) {
 #ifndef _WIN32
   close(instance->socket);
   pthread_mutex_lock(&listener_lock);
-  const int32_t fd_index = instance->listener_index;
+  const uint32_t fd_index = (uint32_t)instance->listener_index;
   array_remove(&listener_pfds_to_instances, fd_index);
   array_remove(&listener_pfds, fd_index);
   pthread_mutex_unlock(&listener_lock);
@@ -3836,7 +3843,7 @@ static void *mpv_listener(void *arg) {
       // map so next poll includes them
       assert(listener_pfds_to_instances.count >= next_index);
       Instance *instance = listener_pfds_to_instances.items[next_index];
-      instance->listener_index = next_index;
+      instance->listener_index = (int32_t)next_index;
       struct pollfd new_pfd = {.fd = instance->socket, .events = POLLIN};
       array_push(&arena_iocp_thread, &listener_pfds, new_pfd);
       pthread_mutex_unlock(&listener_lock);
@@ -3879,8 +3886,8 @@ static inline bool init_repl(void) {
 #else
   tcgetattr(STDIN_FILENO, &repl.modes);
   struct termios tmp = repl.modes;
-  tmp.c_iflag &= ~ICANON;
-  tmp.c_iflag &= ~ECHO;
+  tmp.c_iflag &= (tcflag_t)~ICANON;
+  tmp.c_iflag &= (tcflag_t)~ECHO;
   tcsetattr(STDIN_FILENO, TCSANOW, &tmp);
 #endif
   if (!arena_chunk_init(&arena_console, CIN_ARENA_CAP)) goto memory;
@@ -5540,7 +5547,7 @@ static inline int32_t term_read(uint8_t *buf, const int32_t n, bool peek) {
   }
 #else
   if (!peek) {
-    if ((chars_read = read(STDIN_FILENO, buf, (size_t)n)) < 0) {
+    if ((chars_read = (int32_t)read(STDIN_FILENO, buf, (size_t)n)) < 0) {
       log_last_error("Failed to read %d from terminal", n);
     }
   } else {
