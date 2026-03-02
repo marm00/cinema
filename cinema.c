@@ -1077,7 +1077,7 @@ static inline bool term_get_cursor(COORD *cursor) {
   // TODO: log lock
   cin_swrite(CSI "6n");
   char pos[16];
-  int32_t n = read(STDIN_FILENO, pos, sizeof(pos) - 1);
+  ssize_t n = read(STDIN_FILENO, pos, sizeof(pos) - 1);
   if (n <= 0) {
     ok = false;
   } else {
@@ -1101,8 +1101,8 @@ static inline COORD term_get_size(COORD *size) {
 #else
   struct winsize ws;
   ioctl(STDIN_FILENO, TIOCGWINSZ, &ws);
-  size->X = ws.ws_col;
-  size->Y = ws.ws_row;
+  size->X = (short)ws.ws_col;
+  size->Y = (short)ws.ws_row;
 #endif
   size_change.X = size->X - prev_x;
   size_change.Y = size->Y - prev_y;
@@ -1289,13 +1289,21 @@ static inline void rewrite_post_log(void) {
   show_cursor();
 }
 
+#ifdef _WIN32
 static CRITICAL_SECTION log_lock;
+#define lock_logs() EnterCriticalSection(&log_lock)
+#define unlock_logs() LeaveCriticalSection(&log_lock)
+#else
+static pthread_mutex_t log_lock;
+#define lock_logs() pthread_mutex_lock(&log_lock)
+#define unlock_logs() pthread_mutex_unlock(&log_lock)
+#endif
 
 static void log_message(Cin_Log_Level level, const char *message, ...) {
   if (level > GLOBAL_LOG_LEVEL) {
     return;
   }
-  EnterCriticalSection(&log_lock);
+  lock_logs();
   hide_cursor();
   cursor_home();
   cin_writef(CR "[%s] ", LOG_LEVELS[level]);
@@ -1304,14 +1312,15 @@ static void log_message(Cin_Log_Level level, const char *message, ...) {
   cin_vwritef(message, args);
   rewrite_post_log();
   va_end(args);
-  LeaveCriticalSection(&log_lock);
+  unlock_logs();
 }
 
+#ifdef _WIN32
 static void log_wmessage(Cin_Log_Level level, const wchar_t *wmessage, ...) {
   if (level > GLOBAL_LOG_LEVEL) {
     return;
   }
-  EnterCriticalSection(&log_lock);
+  lock_logs();
   hide_cursor();
   cursor_home();
   cin_writef(CR "[%s] ", LOG_LEVELS[level]);
@@ -1320,26 +1329,28 @@ static void log_wmessage(Cin_Log_Level level, const wchar_t *wmessage, ...) {
   cin_wvwritef(wmessage, args);
   rewrite_post_log();
   va_end(args);
-  LeaveCriticalSection(&log_lock);
+  unlock_logs();
 }
+#endif
 
-static void wwrite_safe(const char *str, uint32_t len) {
-  EnterCriticalSection(&log_lock);
+static void cin_write_safe(const char *str, uint32_t len) {
+  lock_logs();
   clear_preview(0);
   hide_cursor();
   cursor_home();
   cin_write(str, len);
   rewrite_post_log();
-  LeaveCriticalSection(&log_lock);
+  unlock_logs();
 }
 
 static void log_last_error(const char *message, ...) {
+  lock_logs();
+#ifdef _WIN32
   static const uint32_t dw_flags = FORMAT_MESSAGE_ALLOCATE_BUFFER |
                                    FORMAT_MESSAGE_FROM_SYSTEM |
                                    FORMAT_MESSAGE_IGNORE_INSERTS;
-  EnterCriticalSection(&log_lock);
   LPVOID buffer = NULL;
-  uint32_t code = GetLastError();
+  const uint32_t code = GetLastError();
   if (!FormatMessageW(dw_flags, NULL, code, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPWSTR)&buffer, 0, NULL)) {
     log_message(LOG_ERROR, "Failed to log GLE=%d - error with GLE=%d", code, GetLastError());
     return;
@@ -1352,6 +1363,10 @@ static void log_last_error(const char *message, ...) {
   assert(str[len - 2] == '\r');
   str[len - 1] = '\0';
   str[len - 2] = '\0';
+#else
+  const size_t code = (size_t)errno;
+  char *buffer = strerror((int32_t)code);
+#endif
   hide_cursor();
   cursor_home();
   cin_writef(CR "[%s] ", LOG_LEVELS[LOG_ERROR]);
@@ -1361,15 +1376,21 @@ static void log_last_error(const char *message, ...) {
   va_end(args);
   cin_writef(" - Code %lu: %s", code, (char *)buffer);
   rewrite_post_log();
+#ifdef _WIN32
   LocalFree(buffer);
-  LeaveCriticalSection(&log_lock);
+#endif
+  unlock_logs();
 }
 
 #define CIN_STRERROR_BYTES 95
 
 static inline void log_fopen_error(const char *filename, int32_t err) {
+#ifdef _WIN32
   char err_buf[CIN_STRERROR_BYTES];
   strerror_s(err_buf, CIN_STRERROR_BYTES, err);
+#else
+  char *err_buf = strerror(err);
+#endif
   log_message(LOG_ERROR, "Failed to open file '%s': %s", filename, err_buf);
 }
 
@@ -1759,12 +1780,12 @@ static inline uint32_t rand_between(uint32_t min, uint32_t max) {
 #else
   FILE *f = fopen("/dev/urandom", "rb");
   if (!f) {
-    log_message(LOG_ERROR, "Failed to open /dev/urandom: %s", strerror(errno));
+    log_last_error("Failed to open /dev/urandom");
     return min;
   }
   do {
     if (fread(&random, sizeof(random), 1, f) != 1) {
-      log_message(LOG_ERROR, "Failed to read /dev/urandom: %s", strerror(errno));
+      log_last_error("Failed to read /dev/urandom");
       fclose(f);
       return min;
     }
@@ -2413,7 +2434,7 @@ static inline void setup_file_path(char *dst, const char *src, size_t size) {
     if (only_root || valid_expand) {
       home = getenv("HOME");
       if (!home) {
-        log_message(LOG_ERROR, "Failed to expand '~'for path '%s': %s", src, strerror(errno));
+        log_last_error("Failed to expand '~'for path '%s'", src);
         return;
       }
     } else {
@@ -2429,7 +2450,7 @@ static inline void setup_file_path(char *dst, const char *src, size_t size) {
         pw = getpwnam(src_pos);
       }
       if (!pw) {
-        log_message(LOG_ERROR, "Username not found in '%s': %s", src, strerror(errno));
+        log_last_error("Username not found in '%s'", src);
         return;
       }
       home = pw->pw_dir;
@@ -2523,7 +2544,7 @@ static void setup_directory(const char *path, Tag_Directories *tag_dirs) {
 #else
     DIR *directory = opendir(path);
     if (!directory) {
-      log_message(LOG_ERROR, "Failed to match directory '%s':", dir.path, strerror(errno));
+      log_last_error("Failed to match directory '%s'", dir.path);
       continue;
     }
 #endif
@@ -2603,7 +2624,7 @@ static void setup_directory(const char *path, Tag_Directories *tag_dirs) {
       tmp_dir.len = path_len;
       struct stat statbuf;
       if (lstat(tmp_dir.path, &statbuf) < 0) {
-        log_message(LOG_ERROR, "Failed to get stat for '%s': %s", tmp_dir.path, strerror(errno));
+        log_last_error("Failed to get stat for '%s'", tmp_dir.path);
         continue;
       }
       const bool is_dir = S_ISDIR(statbuf.st_mode);
@@ -2630,7 +2651,7 @@ static void setup_directory(const char *path, Tag_Directories *tag_dirs) {
       errno = 0;
     }
     if (errno != 0) {
-      log_message(LOG_ERROR, "Failed to find next file: %s", strerror(errno));
+      log_last_error("Failed to find next file");
     }
 #endif
   }
@@ -2721,7 +2742,7 @@ static inline void setup_pattern(const char *pattern, Tag_Pattern_Items *tag_pat
     if (result == GLOB_NOMATCH) {
       log_message(LOG_ERROR, "Found no results for pattern '%s'", new_pattern);
     } else {
-      log_message(LOG_ERROR, "Failed to match pattern '%s': %s", new_pattern, strerror(errno));
+      log_last_error("Failed to match pattern '%s'", new_pattern);
     }
     globfree(&matches);
     return;
@@ -3369,7 +3390,7 @@ static bool overlap_write(Instance *instance, MPV_Packet type, const char *cmd, 
 #else
   const ssize_t write_result = write(instance->socket, msg->buf, msg->bytes);
   if (write_result < 0) {
-    log_message(LOG_ERROR, "Failed to write to file descriptor %d: %s", instance->socket, strerror(errno));
+    log_last_error("Failed to write to file descriptor %d", instance->socket);
   } else if (write_result < (ssize_t)msg->bytes) {
     log_message(LOG_ERROR, "Expected '%zu' bytes but received '%ld': %s", msg->bytes, bytes, msg->buf);
   }
@@ -3802,7 +3823,7 @@ static void *mpv_listener(void *arg) {
       assert(false);
       break;
     } else if (poll_result < 0) {
-      log_message(LOG_ERROR, "Listener thread failed poll: %s", strerror(errno));
+      log_last_error("Listener thread failed poll");
       assert(false);
       break;
     }
@@ -4226,12 +4247,12 @@ static void mpv_spawn(Instance *instance, size_t index) {
 #else
   pid_t pid = fork();
   if (pid < 0) {
-    log_message(LOG_ERROR, "Failed to fork process: %s", strerror(errno));
+    log_last_error("Failed to fork process");
     return;
   }
   if (pid == 0) {
     if (execvp(mpv_flags[0], mpv_flags) < 0) {
-      log_message(LOG_ERROR, "Failed to start mpv: %s", strerror(errno));
+      log_last_error("Failed to start mpv");
       exit(1);
     }
     assert(0);
@@ -4249,9 +4270,9 @@ static void mpv_spawn(Instance *instance, size_t index) {
   for (size_t i = 0; i < MPV_SPAWN_TRIES; ++i) {
     const int32_t fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) {
-      log_message(LOG_ERROR, "Socket creation failed: %s", strerror(errno));
+      log_last_error("Socket creation failed");
     } else if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-      log_message(LOG_ERROR, "Socket connection failed: %s", strerror(errno));
+      log_last_error("Socket connection failed");
       close(fd);
     } else {
       instance->socket = fd;
@@ -4295,7 +4316,7 @@ static inline bool init_mpv(void) {
   }
 #else
   if (pthread_create(&cin_io.listener, NULL, mpv_listener, NULL) != 0) {
-    log_message(LOG_ERROR, "Failed to create listener thread: %s", strerror(errno));
+    log_last_error("Failed to create listener thread");
     return false;
   }
 #endif
@@ -4324,7 +4345,7 @@ static inline bool timer_autoplay(Console_Timer_Ctx *ctx) {
       if (_j == _s && instance->socket)
 
 static void cmd_help_executor(void) {
-  wwrite_safe(cmd_ctx.help.items, (uint32_t)cmd_ctx.help.count);
+  cin_write_safe(cmd_ctx.help.items, (uint32_t)cmd_ctx.help.count);
 }
 
 static void cmd_help_validator(void) {
@@ -5399,7 +5420,7 @@ static void cmd_list_executor(void) {
     output.items[output.count - 1] = '\0';
   }
   assert(output.count);
-  wwrite_safe(output.items, (uint32_t)output.count);
+  cin_write_safe(output.items, (uint32_t)output.count);
   array_free_items(&arena_console, &output);
 }
 
@@ -5520,7 +5541,7 @@ static inline int32_t term_read(uint8_t *buf, const int32_t n, bool peek) {
 #else
   if (!peek) {
     if ((chars_read = read(STDIN_FILENO, buf, (size_t)n)) < 0) {
-      log_message(LOG_ERROR, "Failed to read %d from terminal: %s", n, strerror(errno));
+      log_last_error("Failed to read %d from terminal", n);
     }
   } else {
     struct pollfd pfd = {.fd = STDIN_FILENO, .events = POLLIN};
@@ -5528,13 +5549,13 @@ static inline int32_t term_read(uint8_t *buf, const int32_t n, bool peek) {
       const int32_t poll_result = poll(&pfd, 1, TERM_READ_WAIT_MS);
       if (poll_result == 0) break;
       if (poll_result < 0) {
-        log_message(LOG_ERROR, "Failed to peek: %s", strerror(errno));
+        log_last_error("Failed to peek");
         break;
       }
       if (pfd.revents & POLLIN && read(pfd.fd, buf + i, 1) > 0) {
         ++chars_read;
       } else {
-        log_message(LOG_ERROR, "Failed to read peek: %s", strerror(errno));
+        log_last_error("Failed to read peek");
         break;
       }
     }
