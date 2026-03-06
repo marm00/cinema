@@ -36,6 +36,7 @@
 #else
 #include <ctype.h>
 #include <dirent.h>
+#include <dlfcn.h>
 #include <errno.h>
 #include <glob.h>
 #include <poll.h>
@@ -127,6 +128,13 @@ typedef struct COORD {
   short X;
   short Y;
 } COORD;
+
+typedef struct RECT {
+  ssize_t right;
+  ssize_t bottom;
+  ssize_t left;
+  ssize_t top;
+} RECT;
 #endif
 
 #define align(a, b) (((a) + (b) - 1) & (~((b) - 1)))
@@ -3406,6 +3414,8 @@ static bool overlap_write(Instance *instance, MPV_Packet type, const char *cmd, 
   return true;
 }
 
+#ifdef _WIN32
+
 typedef struct Window_Data {
   union {
     DWORD pid;
@@ -3483,6 +3493,84 @@ static HWND find_window_of_console(void) {
   array_free_items(&arena_iocp_thread, &pids);
   return data.hwnd;
 }
+#else
+typedef struct _XDisplay Display;
+typedef unsigned long XID;
+typedef XID Window;
+typedef int Status;
+typedef int Bool;
+typedef Display *(*fn_XOpenDisplay)(const char *);
+typedef int (*fn_XCloseDisplay)(Display *);
+typedef Status (*fn_XQueryTree)(Display *, Window, Window *, Window *, Window **, unsigned int *);
+typedef int (*fn_XFetchName)(Display *, Window, char **);
+typedef int (*fn_XMoveResizeWindow)(Display *, Window, int, int, unsigned int, unsigned int);
+typedef int (*fn_XFlush)(Display *);
+typedef int (*fn_XSync)(Display *, Bool);
+typedef int (*fn_XFree)(void *);
+
+static void *pxlib;
+static fn_XOpenDisplay pXOpenDisplay;
+static fn_XCloseDisplay pXCloseDisplay;
+static fn_XQueryTree pXQueryTree;
+static fn_XFetchName pXFetchName;
+static fn_XMoveResizeWindow pXMoveResizeWindow;
+static fn_XFlush pXFlush;
+static fn_XSync pXSync;
+static fn_XFree pXFree;
+
+static bool init_xlib(void) {
+  if (!(pxlib = dlopen("libX11.so.6", RTLD_LAZY)) &&
+      !(pxlib = dlopen("libX11.so", RTLD_LAZY))) {
+    log_last_error("Failed to dlopen X11");
+    return false;
+  }
+  if (!(pXOpenDisplay = dlsym(pxlib, "XOpenDisplay"))) return false;
+  if (!(pXCloseDisplay = dlsym(pxlib, "XCloseDisplay"))) return false;
+  if (!(pXQueryTree = dlsym(pxlib, "XQueryTree"))) return false;
+  if (!(pXFetchName = dlsym(pxlib, "XFetchName"))) return false;
+  if (!(pXMoveResizeWindow = dlsym(pxlib, "XMoveResizeWindow"))) return false;
+  if (!(pXFlush = dlsym(pxlib, "XFlush"))) return false;
+  if (!(pXSync = dlsym(pxlib, "XSync"))) return false;
+  if (!(pXFree = dlsym(pxlib, "XFree"))) return false;
+}
+
+static Window find_window_by_name(Display *dsp, Window curr, const char *name) {
+  array_struct(Window) queue = {0};
+  array_push(&arena_console, &queue, curr);
+  Window result = 0;
+  uint32_t i = 0;
+  while (i < queue.count) {
+    Window curr = queue.items[i++];
+    Window root;
+    Window parent;
+    Window *children = NULL;
+    uint32_t nchildren;
+    if (!pXQueryTree(dsp, curr, &root, &parent, &children, &nchildren)) {
+      log_last_error("Failed to query X11 window tree");
+    } else {
+      for (uint32_t i = 0; i < nchildren; ++i) {
+        Window child = children[i];
+        char *child_name = NULL;
+        log_message(LOG_DEBUG, "Found child window: %s", child_name ? child_name : "NULL");
+        if (child_name) {
+          const bool match = strcmp(child_name, name) == 0;
+          pXFree(child_name);
+          if (match) {
+            log_message(LOG_DEBUG, "Child window is a match: %s", name);
+            array_clear(&queue);
+            result = child;
+            break;
+          }
+        }
+        array_push(&arena_console, &queue, child);
+      }
+    }
+    if (children) pXFree(children);
+  }
+  array_free_items(&arena_console, &queue);
+  return result;
+}
+#endif
 
 static inline void playlist_setup_shuffle(Playlist *playlist) {
   const uint32_t n = playlist->count;
@@ -4055,7 +4143,6 @@ static inline bool validate_screens(void) {
 }
 
 #ifdef _WIN32
-
 static wchar_t exe_path_mpv[CIN_MAX_PATH] = {0};
 static wchar_t exe_path_ytdlp[CIN_MAX_PATH] = {0};
 static wchar_t exe_path_chatterino[CIN_MAX_PATH] = {0};
@@ -5881,6 +5968,9 @@ int main(int argc, char **argv) {
   if (!init_documents()) exit(1);
   if (!init_timers()) exit(1);
   if (!init_mpv()) exit(1);
+#ifndef _WIN32
+  if (!init_xlib()) pxlib = NULL;
+#endif
   execute_startup_macros();
   for (;;) {
     show_cursor();
