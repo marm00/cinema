@@ -1240,6 +1240,18 @@ static inline bool cin_iscontinuatioon(char c) {
   return ((uint8_t)c & 0xC0) == 0x80;
 }
 
+static inline void cin_sleep(long millis) {
+#ifdef _WIN32
+  Sleep((DWORD)millis);
+#else
+  ssize_t nanos = millis * 1000 * 1000;
+  struct timespec duration = {
+      .tv_sec = nanos / (1000 * 1000 * 1000),
+      .tv_nsec = nanos % (1000 * 1000 * 1000)};
+  nanosleep(&duration, 0);
+#endif
+}
+
 static inline void write_preview(void) {
   cin_writef(ESC "7" CSI "%hd;1H" CSI "1m%.*s" CSI "22m" ESC "8",
              preview.pos.Y, preview.len, preview.items);
@@ -2387,7 +2399,7 @@ static struct {
 } dir_stack = {0};
 
 static struct {
-  array_struct_members(wchar_t);
+  array_struct_members(char);
   size_t supply;
   size_t demand;
 } clipboard = {0};
@@ -3326,7 +3338,7 @@ static bool create_pipe(Instance *instance, const wchar_t *name) {
         return false;
       }
       log_message(LOG_DEBUG, "Failed to find pipe. Trying again in %dms...", UNFOUND_WAIT);
-      Sleep(UNFOUND_WAIT);
+      cin_sleep(UNFOUND_WAIT);
     } else {
       // Unlikely error, try to resolve by waiting
       log_last_error("Could not connect to pipe - Waiting for %dms", FOUND_TIMEOUT);
@@ -3562,6 +3574,44 @@ static int xerror_handler(Display *d, XErrorEvent *e) {
   return 0;
 }
 
+static Window find_window_by_name(Display *dsp, Window curr, const char *name) {
+  array_struct(Window) queue = {0};
+  array_push(&arena_console, &queue, curr);
+  Window result = 0;
+  uint32_t i = 0;
+  while (i < queue.count) {
+    curr = queue.items[i++];
+    Window root;
+    Window parent;
+    Window *children = NULL;
+    uint32_t nchildren;
+    if (!pXQueryTree(dsp, curr, &root, &parent, &children, &nchildren)) {
+      log_last_error("Failed to query X11 window tree");
+    } else {
+      for (uint32_t j = 0; j < nchildren; ++j) {
+        Window child = children[j];
+        char *child_name = NULL;
+        log_message(LOG_DEBUG, "Found child window: %s", child_name ? child_name : "NULL");
+        if (child_name) {
+          const bool match = strcmp(child_name, name) == 0;
+          pXFree(child_name);
+          if (match) {
+            log_message(LOG_DEBUG, "Child window is a match: %s", name);
+            array_clear(&queue);
+            result = child;
+            break;
+          }
+        }
+        array_push(&arena_console, &queue, child);
+      }
+    }
+    if (children) pXFree(children);
+  }
+  array_free_items(&arena_console, &queue);
+  return result;
+}
+#endif
+
 static bool cin_iswindow(HWND window) {
 #ifdef _WIN32
   return IsWindow(window);
@@ -3617,44 +3667,6 @@ static int32_t cin_getwindow(HWND window, RECT *out_rect) {
   return status;
 #endif
 }
-
-static Window find_window_by_name(Display *dsp, Window curr, const char *name) {
-  array_struct(Window) queue = {0};
-  array_push(&arena_console, &queue, curr);
-  Window result = 0;
-  uint32_t i = 0;
-  while (i < queue.count) {
-    curr = queue.items[i++];
-    Window root;
-    Window parent;
-    Window *children = NULL;
-    uint32_t nchildren;
-    if (!pXQueryTree(dsp, curr, &root, &parent, &children, &nchildren)) {
-      log_last_error("Failed to query X11 window tree");
-    } else {
-      for (uint32_t j = 0; j < nchildren; ++j) {
-        Window child = children[j];
-        char *child_name = NULL;
-        log_message(LOG_DEBUG, "Found child window: %s", child_name ? child_name : "NULL");
-        if (child_name) {
-          const bool match = strcmp(child_name, name) == 0;
-          pXFree(child_name);
-          if (match) {
-            log_message(LOG_DEBUG, "Child window is a match: %s", name);
-            array_clear(&queue);
-            result = child;
-            break;
-          }
-        }
-        array_push(&arena_console, &queue, child);
-      }
-    }
-    if (children) pXFree(children);
-  }
-  array_free_items(&arena_console, &queue);
-  return result;
-}
-#endif
 
 static inline void playlist_setup_shuffle(Playlist *playlist) {
   const uint32_t n = playlist->count;
@@ -3797,8 +3809,8 @@ static inline void mpv_unlock(void) {
 }
 
 // NOTE: voidtools Everything supports pipe '|' as search separator and '"' for spaces
-#define CIN_CLIPBOARD_SEPARATOR L'|'
-#define CIN_CLIPBOARD_ENCLOSER L'"'
+#define CIN_CLIPBOARD_SEPARATOR '|'
+#define CIN_CLIPBOARD_ENCLOSER '"'
 
 static inline void iocp_parse(Instance *instance, const char *buf_start, size_t buf_offset) {
   const char *buf = buf_start + buf_offset;
@@ -3838,8 +3850,8 @@ static inline void iocp_parse(Instance *instance, const char *buf_start, size_t 
         // NOTE: If the request was delivered before mpv managed to create
         // the window, it will return something like "error: property
         // unavailable": retry.
-        static const uint32_t GET_WINDOW_DELAY = 200;
-        Sleep(GET_WINDOW_DELAY);
+        static const long GET_WINDOW_DELAY = 200;
+        cin_sleep(GET_WINDOW_DELAY);
         overlap_write(instance, MPV_WINDOW_ID, "get_property", "window-id", NULL);
         break;
       }
@@ -3864,16 +3876,13 @@ static inline void iocp_parse(Instance *instance, const char *buf_start, size_t 
       ++data;
       char *tail = strchr(data, '"');
       assert(tail);
-      const int32_t len_utf8 = (int32_t)(tail - data);
-      const int32_t len = utf8_to_utf16_nraw(data, len_utf8);
-      assert(len > 0);
-      const uint32_t len_u32 = (uint32_t)len;
-      wchar_t *url_utf16 = utf16_buf_raw.items;
+      const int32_t len = (int32_t)(tail - data);
+      assert(len >= 0);
       array_push(&arena_iocp_thread, &clipboard, CIN_CLIPBOARD_ENCLOSER);
-      wchar_t prev = L'\0';
-      for (uint32_t i = 0; i < len_u32; ++i) {
-        const wchar_t curr = url_utf16[i];
-        if (prev != L'\\' || curr != L'\\') {
+      char prev = '\0';
+      for (uint32_t i = 0; i < (uint32_t)len; ++i) {
+        const char curr = data[i];
+        if (prev != '\\' || curr != '\\') {
           array_push(&arena_iocp_thread, &clipboard, curr);
         }
         prev = curr;
@@ -3883,23 +3892,28 @@ static inline void iocp_parse(Instance *instance, const char *buf_start, size_t 
       if (++clipboard.supply == clipboard.demand) {
         clipboard.supply = 0;
         clipboard.demand = 0;
-        if (clipboard.count) clipboard.items[clipboard.count - 1] = L'\0';
+        if (clipboard.count) clipboard.items[clipboard.count - 1] = '\0';
+        cin_write_safe(clipboard.items, clipboard.count - 1);
+#ifdef _WIN32
         if (!OpenClipboard(NULL)) {
           log_last_error("Failed to open clipboard");
           return;
         }
         EmptyClipboard();
-        HGLOBAL hglb = GlobalAlloc(GMEM_MOVEABLE, array_bytes(&clipboard));
+        const int32_t len_utf16 = utf8_to_utf16_nraw(clipboard.items, (int32_t)clipboard.count);
+        assert(len_utf16 > 0);
+        HGLOBAL hglb = GlobalAlloc(GMEM_MOVEABLE, array_bytes(&utf16_buf_raw));
         if (!hglb) {
           log_last_error("Failed to allocate global memory for clipboard");
           CloseClipboard();
           return;
         }
         LPWSTR lpwstr = GlobalLock(hglb);
-        wmemcpy(lpwstr, clipboard.items, clipboard.count);
+        wmemcpy(lpwstr, utf16_buf_raw.items, (size_t)len_utf16);
         GlobalUnlock(hglb);
         SetClipboardData(CF_UNICODETEXT, hglb);
         CloseClipboard();
+#endif
       }
     } break;
     default:
@@ -4283,14 +4297,14 @@ static inline void chat_reposition(const Cin_Layout *layout) {
       }
       // since STARTUPINFOW is ignored, manually reposition
       static const size_t CHAT_REPOSITION_TRIES = 50;
-      static const uint32_t CHAT_REPOSITION_DELAY = 40;
+      static const long CHAT_REPOSITION_DELAY = 40;
       for (size_t i = 0; i < CHAT_REPOSITION_TRIES; ++i) {
-        chat.window = find_window_by_pid(pi->dwProcessId);
+        chat.window = find_window_by_pid(pi.dwProcessId);
         if (cin_isvisible(chat.window)) {
           SetWindowPos(chat.window, HWND_TOPMOST, x, y, cx, cy, SWP_SHOWWINDOW);
           break;
         }
-        Sleep(CHAT_REPOSITION_DELAY);
+        cin_sleep(CHAT_REPOSITION_DELAY);
       }
     }
   } else if (is_showing) {
@@ -4411,10 +4425,6 @@ static void mpv_spawn(Instance *instance, size_t index) {
   strncpy(addr.sun_path, socket_name, sizeof(addr.sun_path) - 1);
   static const size_t MPV_SPAWN_TRIES = 20;
   static const long MPV_SPAWN_DELAY = 100;
-  static const long MPV_SPAWN_NANOS = MPV_SPAWN_DELAY * 1000 * 1000;
-  struct timespec duration = {
-      .tv_sec = MPV_SPAWN_NANOS / (1000 * 1000 * 1000),
-      .tv_nsec = MPV_SPAWN_NANOS % (1000 * 1000 * 1000)};
   for (size_t i = 0; i < MPV_SPAWN_TRIES; ++i) {
     const int32_t fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) {
@@ -4432,7 +4442,7 @@ static void mpv_spawn(Instance *instance, size_t index) {
       write(listener_pipe[1], "x", 1);
       break;
     }
-    nanosleep(&duration, 0);
+    cin_sleep(MPV_SPAWN_DELAY);
   }
 #endif
   assert(instance->playlist);
