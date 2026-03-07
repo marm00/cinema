@@ -3277,12 +3277,12 @@ typedef struct Instance {
   HANDLE socket;
   STARTUPINFOW si;
   PROCESS_INFORMATION pi;
-  HWND window;
-  RECT rect;
 #else
   int32_t socket;
   int32_t listener_index;
 #endif
+  HWND window;
+  RECT rect;
   Playlist *playlist;
   bool full_screen;
   bool autoplay_mpv;
@@ -3505,6 +3505,7 @@ typedef Status (*fn_XQueryTree)(Display *, Window, Window *, Window *, Window **
 typedef int (*fn_XFetchName)(Display *, Window, char **);
 typedef Status (*fn_XGetGeometry)(Display *, Drawable, Window *, int *, int *, unsigned int *, unsigned int *, unsigned int *, unsigned int *);
 typedef int (*fn_XMoveResizeWindow)(Display *, Window, int, int, unsigned int, unsigned int);
+typedef Bool (*fn_XTranslateCoordinates)(Display *, Window, Window, int, int, int *, int *, Window *);
 typedef int (*fn_XSetErrorHandler)(int (*handler)(Display *, XErrorEvent *));
 typedef int (*fn_XFlush)(Display *);
 typedef int (*fn_XSync)(Display *, Bool);
@@ -3517,12 +3518,13 @@ static fn_XQueryTree pXQueryTree;
 static fn_XFetchName pXFetchName;
 static fn_XGetGeometry pXGetGeometry;
 static fn_XMoveResizeWindow pXMoveResizeWindow;
+static fn_XTranslateCoordinates pXTranslateCoordinates;
 static fn_XSetErrorHandler pXSetErrorHandler;
 static fn_XFlush pXFlush;
 static fn_XSync pXSync;
 static fn_XFree pXFree;
 
-#define XLOAD(symbol)                                                       \
+#define XLOAD(symbol)                                                      \
   do {                                                                     \
     assert(pxlib);                                                         \
     *(void **)(&p##symbol) = dlsym(pxlib, #symbol);                        \
@@ -3544,6 +3546,7 @@ static bool init_xlib(void) {
   XLOAD(XFetchName);
   XLOAD(XGetGeometry);
   XLOAD(XMoveResizeWindow);
+  XLOAD(XTranslateCoordinates);
   XLOAD(XSetErrorHandler);
   XLOAD(XFlush);
   XLOAD(XSync);
@@ -3559,7 +3562,7 @@ static int xerror_handler(Display *d, XErrorEvent *e) {
   return 0;
 }
 
-static inline bool cin_iswindow(HWND window) {
+static bool cin_iswindow(HWND window) {
 #ifdef _WIN32
   return IsWindow(window);
 #else
@@ -3581,6 +3584,37 @@ static inline bool cin_isvisible(HWND window) {
 #else
   // NOTE: does not check window map state
   return cin_iswindow(window);
+#endif
+}
+
+static int32_t cin_getwindow(HWND window, RECT *out_rect) {
+#ifdef _WIN32
+  return GetWindowRect(window, out_rect);
+#else
+  assert(pxlib);
+  pXSetErrorHandler(xerror_handler);
+  Window root;
+  int x, y;
+  unsigned int w, h, bw, d;
+  Status status = pXGetGeometry(NULL, window, &root, &x, &y, &w, &h, &bw, &d);
+  if (status) {
+    int screen_x, screen_y;
+    Window child;
+    status = pXTranslateCoordinates(NULL, window, root, 0, 0, &screen_x, &screen_y, &child);
+    if (status) {
+      out_rect->left = screen_x - (int)bw;
+      out_rect->top = screen_y - (int)bw;
+      out_rect->right = screen_x + (int)w + (int)bw;
+      out_rect->bottom = screen_y + (int)h + (int)bw;
+    } else {
+      log_message(LOG_ERROR, "Failed to translate window geometry");
+    }
+  } else {
+    log_message(LOG_ERROR, "Failed to get window geometry");
+  }
+  pXSync(NULL, false);
+  pXSetErrorHandler(NULL);
+  return status;
 #endif
 }
 
@@ -3817,7 +3851,7 @@ static inline void iocp_parse(Instance *instance, const char *buf_start, size_t 
       assert(cin_iswindow((HWND)window_id));
       assert(cin_isvisible((HWND)window_id));
       instance->window = (HWND)window_id;
-      GetWindowRect(instance->window, &instance->rect);
+      cin_getwindow(instance->window, &instance->rect);
     } break;
     case MPV_QUIT:
       mpv_kill(instance);
@@ -4467,7 +4501,7 @@ static void cmd_layout_executor(void) {
       if (old->socket) overlap_write(old, MPV_QUIT, "quit", NULL, NULL);
     } else if (old->socket) {
       log_message(LOG_INFO, "i=%u, screen=%zu", i);
-      assert(IsWindow(old->window));
+      assert(cin_iswindow(old->window));
       const char *geometry = (char *)screen_strings.items + layout->items[screen].offset;
       overlap_write(old, MPV_SET_GEOMETRY, "set_property", "geometry", geometry);
       if (old->full_screen) {
@@ -5097,8 +5131,8 @@ static void cmd_store_executor(void) {
   cmd_ctx.layout = layout;
   array_clear(&geometry_buf);
   cache_foreach(&cin_io.instances, Instance, i, instance) {
-    if (instance->socket && IsWindow(instance->window)) {
-      GetWindowRect(instance->window, &instance->rect);
+    if (instance->socket && cin_iswindow(instance->window)) {
+      cin_getwindow(instance->window, &instance->rect);
       const int32_t bytes = snprintf(NULL, 0, FSTR_RECT, FSTR_RECT_ARGS(instance->rect)) + 1;
       assert(bytes > 1);
       const uint32_t bytes_u32 = (uint32_t)bytes;
@@ -5116,9 +5150,9 @@ static void cmd_store_executor(void) {
   int32_t err = 0;
   char *buf = NULL;
   uint32_t buf_bytes = 0;
-  const bool has_chat = IsWindow(chat.window);
+  const bool has_chat = cin_iswindow(chat.window);
   if (has_chat) {
-    GetWindowRect(chat.window, &chat.rect);
+    cin_getwindow(chat.window, &chat.rect);
     layout->chat_rect = chat.rect;
   }
   if (!try_overwrite) goto append;
