@@ -3637,12 +3637,17 @@ static inline void playlist_play_core(Instance *instance, const char *arg) {
   }
 }
 
-static inline void playlist_play(Instance *instance) {
-  playlist_play_core(instance, NULL);
-}
-
 static inline void playlist_insert(Instance *instance) {
   playlist_play_core(instance, "insert-next");
+}
+
+static inline void playlist_play(Instance *instance) {
+  if (instance->autoplay_mpv) {
+    playlist_insert(instance);
+    overlap_write(instance, MPV_WRITE, "playlist-next", NULL, NULL);
+  } else {
+    playlist_play_core(instance, NULL);
+  }
 }
 
 #define CIN_MPVKEY_LEFT "\""
@@ -3734,9 +3739,6 @@ static inline void iocp_parse(Instance *instance, const char *buf_start, size_t 
     assert(msg->bytes);
     log_message(LOG_DEBUG, "Recovered original write: %p (%zu bytes)", msg, msg->bytes);
     switch (msg->ovl_ctx.type) {
-    case MPV_LOADFILE:
-      // overlap_write(instance, MPV_WRITE, "playlist-next", NULL, NULL);
-      break;
     case MPV_WINDOW_ID: {
       if (++mpv_supply == mpv_demand) mpv_unlock();
       char *data = strstr(buf, CIN_MPVKEY_DATA);
