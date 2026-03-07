@@ -18,7 +18,10 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+#ifdef _WIN32
 #define _CRT_RAND_S
+#define _CRT_SECURE_NO_DEPRECATE
+#endif
 
 #include <assert.h>
 #include <inttypes.h>
@@ -4107,6 +4110,13 @@ static inline bool init_repl(void) {
   array_init(&arena_console, &wwrite_buf, CIN_MAX_PATH);
   array_init(&arena_console, &utf16_buf_raw, CIN_MAX_PATH);
   array_init(&arena_console, &utf16_buf_norm, CIN_MAX_PATH);
+#endif
+  array_init(&arena_console, &write_buf, CIN_MAX_PATH);
+  array_init(&arena_console, &preview, CIN_MAX_PATH);
+  array_init(&arena_console, &utf8_buf, CIN_MAX_PATH_BYTES);
+  cin_swrite(PREFIX_STR);
+  return true;
+#ifdef _WIN32
 code_page:
   cin_swrite("Failed to modify console code page" CRLF);
   return false;
@@ -4116,11 +4126,6 @@ handle_in:
 handle_out:
   cin_swrite("Failed to setup console output handle" CRLF);
 #endif
-  array_init(&arena_console, &write_buf, CIN_MAX_PATH);
-  array_init(&arena_console, &preview, CIN_MAX_PATH);
-  array_init(&arena_console, &utf8_buf, CIN_MAX_PATH_BYTES);
-  cin_swrite(PREFIX_STR);
-  return true;
 memory:
   cin_swrite("Failed to allocate memory for repl/console" CRLF);
   return false;
@@ -4285,7 +4290,7 @@ static inline void chat_kill(void) {
 #endif
 }
 
-static inline size_t chat_spawn(void) {
+static inline size_t chat_spawn(const Cin_Layout *layout) {
 #ifdef _WIN32
   RECT chat_rect = layout->chat_rect;
   const int32_t x = (int32_t)chat_rect.left;
@@ -4339,10 +4344,10 @@ static inline void chat_reposition(const Cin_Layout *layout) {
     } else {
       static const size_t CHAT_REPOSITION_TRIES = 10;
       static const long CHAT_REPOSITION_DELAY = 100;
-      const size_t pid = chat_spawn();
+      const size_t pid = chat_spawn(layout);
       for (size_t i = 0; i < CHAT_REPOSITION_TRIES; ++i) {
 #ifdef _WIN32
-        chat.window = find_window_by_pid(pid);
+        chat.window = find_window_by_pid((uint32_t)pid);
 #else
         (void)pid;
         Window root = pXDefaultRootWindow(pxdisplay);
