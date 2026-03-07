@@ -42,6 +42,7 @@
 #include <poll.h>
 #include <pthread.h>
 #include <pwd.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stddef.h>
 #include <sys/ioctl.h>
@@ -135,6 +136,8 @@ typedef struct RECT {
   ssize_t left;
   ssize_t top;
 } RECT;
+
+typedef unsigned long HWND;
 #endif
 
 #define align(a, b) (((a) + (b) - 1) & (~((b) - 1)))
@@ -1233,7 +1236,7 @@ static inline void cin_getnum(const char **p, int64_t *out) {
   }
 }
 
-static inline bool cin_is_continuation(char c) {
+static inline bool cin_iscontinuatioon(char c) {
   return ((uint8_t)c & 0xC0) == 0x80;
 }
 
@@ -3489,13 +3492,20 @@ static HWND find_window_of_console(void) {
 typedef struct _XDisplay Display;
 typedef unsigned long XID;
 typedef XID Window;
+typedef XID Drawable;
 typedef int Status;
 typedef int Bool;
+typedef struct _XErrorEvent XErrorEvent;
+
+static_assert(sizeof(Window) == sizeof(HWND), "Changed types");
+
 typedef Display *(*fn_XOpenDisplay)(const char *);
 typedef int (*fn_XCloseDisplay)(Display *);
 typedef Status (*fn_XQueryTree)(Display *, Window, Window *, Window *, Window **, unsigned int *);
 typedef int (*fn_XFetchName)(Display *, Window, char **);
+typedef Status (*fn_XGetGeometry)(Display *, Drawable, Window *, int *, int *, unsigned int *, unsigned int *, unsigned int *, unsigned int *);
 typedef int (*fn_XMoveResizeWindow)(Display *, Window, int, int, unsigned int, unsigned int);
+typedef int (*fn_XSetErrorHandler)(int (*handler)(Display *, XErrorEvent *));
 typedef int (*fn_XFlush)(Display *);
 typedef int (*fn_XSync)(Display *, Bool);
 typedef int (*fn_XFree)(void *);
@@ -3505,10 +3515,22 @@ static fn_XOpenDisplay pXOpenDisplay;
 static fn_XCloseDisplay pXCloseDisplay;
 static fn_XQueryTree pXQueryTree;
 static fn_XFetchName pXFetchName;
+static fn_XGetGeometry pXGetGeometry;
 static fn_XMoveResizeWindow pXMoveResizeWindow;
+static fn_XSetErrorHandler pXSetErrorHandler;
 static fn_XFlush pXFlush;
 static fn_XSync pXSync;
 static fn_XFree pXFree;
+
+#define XLOAD(symbol)                                                       \
+  do {                                                                     \
+    assert(pxlib);                                                         \
+    *(void **)(&p##symbol) = dlsym(pxlib, #symbol);                        \
+    if (!p##symbol) {                                                      \
+      log_message(LOG_DEBUG, "Failed to load %s: %s", #symbol, dlerror()); \
+      return false;                                                        \
+    }                                                                      \
+  } while (0)
 
 static bool init_xlib(void) {
   if (!(pxlib = dlopen("libX11.so.6", RTLD_LAZY)) &&
@@ -3516,14 +3538,50 @@ static bool init_xlib(void) {
     log_last_error("Failed to dlopen X11");
     return false;
   }
-  if (!(pXOpenDisplay = dlsym(pxlib, "XOpenDisplay"))) return false;
-  if (!(pXCloseDisplay = dlsym(pxlib, "XCloseDisplay"))) return false;
-  if (!(pXQueryTree = dlsym(pxlib, "XQueryTree"))) return false;
-  if (!(pXFetchName = dlsym(pxlib, "XFetchName"))) return false;
-  if (!(pXMoveResizeWindow = dlsym(pxlib, "XMoveResizeWindow"))) return false;
-  if (!(pXFlush = dlsym(pxlib, "XFlush"))) return false;
-  if (!(pXSync = dlsym(pxlib, "XSync"))) return false;
-  if (!(pXFree = dlsym(pxlib, "XFree"))) return false;
+  XLOAD(XOpenDisplay);
+  XLOAD(XCloseDisplay);
+  XLOAD(XQueryTree);
+  XLOAD(XFetchName);
+  XLOAD(XGetGeometry);
+  XLOAD(XMoveResizeWindow);
+  XLOAD(XSetErrorHandler);
+  XLOAD(XFlush);
+  XLOAD(XSync);
+  XLOAD(XFree);
+  return true;
+}
+
+#undef XLOAD
+
+static int xerror_handler(Display *d, XErrorEvent *e) {
+  (void)d;
+  (void)e;
+  return 0;
+}
+
+static inline bool cin_iswindow(HWND window) {
+#ifdef _WIN32
+  return IsWindow(window);
+#else
+  assert(pxlib);
+  pXSetErrorHandler(xerror_handler);
+  Window root;
+  int x, y;
+  unsigned int w, h, bw, d;
+  Status status = pXGetGeometry(NULL, window, &root, &x, &y, &w, &h, &bw, &d);
+  pXSync(NULL, false);
+  pXSetErrorHandler(NULL);
+  return status != 0;
+#endif
+}
+
+static inline bool cin_isvisible(HWND window) {
+#ifdef _WIN32
+  return IsWindowVisible(window);
+#else
+  // NOTE: does not check window map state
+  return cin_iswindow(window);
+#endif
 }
 
 static Window find_window_by_name(Display *dsp, Window curr, const char *name) {
@@ -3532,7 +3590,7 @@ static Window find_window_by_name(Display *dsp, Window curr, const char *name) {
   Window result = 0;
   uint32_t i = 0;
   while (i < queue.count) {
-    Window curr = queue.items[i++];
+    curr = queue.items[i++];
     Window root;
     Window parent;
     Window *children = NULL;
@@ -3540,8 +3598,8 @@ static Window find_window_by_name(Display *dsp, Window curr, const char *name) {
     if (!pXQueryTree(dsp, curr, &root, &parent, &children, &nchildren)) {
       log_last_error("Failed to query X11 window tree");
     } else {
-      for (uint32_t i = 0; i < nchildren; ++i) {
-        Window child = children[i];
+      for (uint32_t j = 0; j < nchildren; ++j) {
+        Window child = children[j];
         char *child_name = NULL;
         log_message(LOG_DEBUG, "Found child window: %s", child_name ? child_name : "NULL");
         if (child_name) {
@@ -3756,8 +3814,8 @@ static inline void iocp_parse(Instance *instance, const char *buf_start, size_t 
       assert(cin_isnum(*data));
       intptr_t window_id = 0;
       for (; cin_isnum(*data); ++data) window_id = (window_id * 10) + *data - '0';
-      assert(IsWindow((HWND)window_id));
-      assert(IsWindowVisible((HWND)window_id));
+      assert(cin_iswindow((HWND)window_id));
+      assert(cin_isvisible((HWND)window_id));
       instance->window = (HWND)window_id;
       GetWindowRect(instance->window, &instance->rect);
     } break;
@@ -4145,11 +4203,20 @@ static bool init_executables(void) {
 #endif
 
 struct Chat {
-  STARTUPINFOW si;
-  PROCESS_INFORMATION pi;
   RECT rect;
   HWND window;
+#ifndef _WIN32
+  pid_t pid;
+#endif
 } chat = {0};
+
+static inline void chat_kill(void) {
+#ifdef _WIN32
+  PostMessageW(chat.window, WM_CLOSE, 0, 0);
+#else
+  kill(chat.pid, SIGTERM);
+#endif
+}
 
 static inline void chat_reposition(const Cin_Layout *layout) {
   RECT chat_rect = layout->chat_rect;
@@ -4158,21 +4225,22 @@ static inline void chat_reposition(const Cin_Layout *layout) {
   const int32_t cx = (int32_t)chat_rect.right;
   const int32_t cy = (int32_t)chat_rect.bottom;
   const bool should_show = chat_rect.bottom != LONG_MIN;
-  const bool is_showing = IsWindow(chat.window);
+  const bool is_showing = cin_iswindow(chat.window);
   if (should_show) {
     if (is_showing) {
       SetWindowPos(chat.window, HWND_TOPMOST, x, y, cx, cy, SWP_SHOWWINDOW);
     } else {
-      STARTUPINFOW *si = &chat.si;
-      PROCESS_INFORMATION *pi = &chat.pi;
-      si->dwFlags = STARTF_USEPOSITION | STARTF_USESIZE | STARTF_USESHOWWINDOW;
-      si->wShowWindow = SW_NORMAL;
-      si->dwX = (uint32_t)x;
-      si->dwXSize = (uint32_t)cx;
-      si->dwY = (uint32_t)y;
-      si->dwYSize = (uint32_t)cy;
-      si->cb = sizeof(*si);
-      if (!CreateProcessW(exe_path_chatterino, L"chatterino", NULL, NULL, FALSE, 0, NULL, NULL, si, pi)) {
+      // TODO: posix signal(SIGCHLD, SIG_IGN)
+      STARTUPINFOW si = {0};
+      PROCESS_INFORMATION pi = {0};
+      si.dwFlags = STARTF_USEPOSITION | STARTF_USESIZE | STARTF_USESHOWWINDOW;
+      si.wShowWindow = SW_NORMAL;
+      si.dwX = (uint32_t)x;
+      si.dwXSize = (uint32_t)cx;
+      si.dwY = (uint32_t)y;
+      si.dwYSize = (uint32_t)cy;
+      si.cb = sizeof(si);
+      if (!CreateProcessW(exe_path_chatterino, L"chatterino", NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
         if (GetLastError() == ERROR_FILE_NOT_FOUND) {
           log_last_error("Failed to find chatterino executable");
         } else {
@@ -4184,7 +4252,7 @@ static inline void chat_reposition(const Cin_Layout *layout) {
       static const uint32_t CHAT_REPOSITION_DELAY = 40;
       for (size_t i = 0; i < CHAT_REPOSITION_TRIES; ++i) {
         chat.window = find_window_by_pid(pi->dwProcessId);
-        if (IsWindowVisible(chat.window)) {
+        if (cin_isvisible(chat.window)) {
           SetWindowPos(chat.window, HWND_TOPMOST, x, y, cx, cy, SWP_SHOWWINDOW);
           break;
         }
@@ -4192,7 +4260,7 @@ static inline void chat_reposition(const Cin_Layout *layout) {
       }
     }
   } else if (is_showing) {
-    PostMessageW(chat.window, WM_CLOSE, 0, 0);
+    chat_kill();
   }
 }
 
@@ -4856,7 +4924,7 @@ static void cmd_idle_validator(void) {
 }
 
 static void cmd_kill_executor(void) {
-  PostMessageW(chat.window, WM_CLOSE, 0, 0);
+  chat_kill();
   mpv_target_foreach(i, instance) {
     log_message(LOG_DEBUG, "Closing PID=%lu", instance->pi.dwProcessId);
     overlap_write(instance, MPV_QUIT, "quit", NULL, NULL);
@@ -5430,7 +5498,7 @@ static void cmd_chat_executor(void) {
 }
 
 static void cmd_chat_validator(void) {
-  const bool is_showing = IsWindow(chat.window);
+  const bool is_showing = cin_iswindow(chat.window);
   set_preview(true, "%s chat", is_showing ? "reposition" : "show");
   cmd_ctx.executor = cmd_chat_executor;
 }
@@ -5467,7 +5535,7 @@ static void cmd_list_validator(void) {
 }
 
 static void cmd_quit_executor(void) {
-  PostMessageW(chat.window, WM_CLOSE, 0, 0);
+  chat_kill();
   cache_foreach(&cin_io.instances, Instance, i, instance) {
     log_message(LOG_DEBUG, "Closing PID=%lu", instance->pi.dwProcessId);
     overlap_write(instance, MPV_QUIT, "quit", NULL, NULL);
@@ -5480,6 +5548,7 @@ static void cmd_quit_executor(void) {
   SetConsoleMode(repl.out, repl.out_mode);
 #else
   tcsetattr(STDIN_FILENO, TCSANOW, &repl.modes);
+  if (pxlib) dlclose(pxlib);
 #endif
   exit(1);
 }
