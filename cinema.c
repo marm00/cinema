@@ -2181,15 +2181,9 @@ static inline bool conf_scopeget(void) {
 
 static bool parse_config(const char *filename) {
   bool ok = false;
-  FILE *file;
-#ifdef _WIN32
-  const int32_t err = fopen_s(&file, filename, "rt");
-#else
-  file = fopen(filename, "rt");
-  const int32_t err = file ? 0 : errno;
-#endif
-  if (err) {
-    log_fopen_error(filename, err);
+  FILE *file = fopen(filename, "rt");
+  if (!file) {
+    log_last_error("Failed to open file '%s'", filename);
     goto end;
   }
   array_init(&arena_console, &conf_parser.buf, CONF_LINE_CAP);
@@ -3513,6 +3507,7 @@ static_assert(sizeof(Window) == sizeof(HWND), "Changed types");
 
 typedef Display *(*fn_XOpenDisplay)(const char *);
 typedef int (*fn_XCloseDisplay)(Display *);
+typedef Window (*fn_XDefaultRootWindow)(Display *);
 typedef Status (*fn_XQueryTree)(Display *, Window, Window *, Window *, Window **, unsigned int *);
 typedef int (*fn_XFetchName)(Display *, Window, char **);
 typedef Status (*fn_XGetGeometry)(Display *, Drawable, Window *, int *, int *, unsigned int *, unsigned int *, unsigned int *, unsigned int *);
@@ -3524,8 +3519,11 @@ typedef int (*fn_XSync)(Display *, Bool);
 typedef int (*fn_XFree)(void *);
 
 static void *pxlib;
+static Display *pxdisplay;
+
 static fn_XOpenDisplay pXOpenDisplay;
 static fn_XCloseDisplay pXCloseDisplay;
+static fn_XDefaultRootWindow pXDefaultRootWindow;
 static fn_XQueryTree pXQueryTree;
 static fn_XFetchName pXFetchName;
 static fn_XGetGeometry pXGetGeometry;
@@ -3535,6 +3533,12 @@ static fn_XSetErrorHandler pXSetErrorHandler;
 static fn_XFlush pXFlush;
 static fn_XSync pXSync;
 static fn_XFree pXFree;
+
+static int xerror_handler(Display *d, XErrorEvent *e) {
+  (void)d;
+  (void)e;
+  return 0;
+}
 
 #define XLOAD(symbol)                                                      \
   do {                                                                     \
@@ -3554,6 +3558,7 @@ static bool init_xlib(void) {
   }
   XLOAD(XOpenDisplay);
   XLOAD(XCloseDisplay);
+  XLOAD(XDefaultRootWindow);
   XLOAD(XQueryTree);
   XLOAD(XFetchName);
   XLOAD(XGetGeometry);
@@ -3563,16 +3568,16 @@ static bool init_xlib(void) {
   XLOAD(XFlush);
   XLOAD(XSync);
   XLOAD(XFree);
+  pxdisplay = pXOpenDisplay(NULL);
+  if (!pxdisplay) {
+    log_message(LOG_ERROR, "Failed to open default display");
+    return false;
+  }
+  pXSetErrorHandler(xerror_handler);
   return true;
 }
 
 #undef XLOAD
-
-static int xerror_handler(Display *d, XErrorEvent *e) {
-  (void)d;
-  (void)e;
-  return 0;
-}
 
 static Window find_window_by_name(Display *dsp, Window curr, const char *name) {
   array_struct(Window) queue = {0};
@@ -3616,14 +3621,11 @@ static bool cin_iswindow(HWND window) {
 #ifdef _WIN32
   return IsWindow(window);
 #else
-  assert(pxlib);
-  pXSetErrorHandler(xerror_handler);
+  if (!pxlib || !window) return false;
   Window root;
   int x, y;
   unsigned int w, h, bw, d;
-  Status status = pXGetGeometry(NULL, window, &root, &x, &y, &w, &h, &bw, &d);
-  pXSync(NULL, false);
-  pXSetErrorHandler(NULL);
+  Status status = pXGetGeometry(pxdisplay, window, &root, &x, &y, &w, &h, &bw, &d);
   return status != 0;
 #endif
 }
@@ -3641,16 +3643,16 @@ static int32_t cin_getwindow(HWND window, RECT *out_rect) {
 #ifdef _WIN32
   return GetWindowRect(window, out_rect);
 #else
-  assert(pxlib);
+  if (!pxlib || !window) return 0;
   pXSetErrorHandler(xerror_handler);
   Window root;
   int x, y;
   unsigned int w, h, bw, d;
-  Status status = pXGetGeometry(NULL, window, &root, &x, &y, &w, &h, &bw, &d);
+  Status status = pXGetGeometry(pxdisplay, window, &root, &x, &y, &w, &h, &bw, &d);
   if (status) {
     int screen_x, screen_y;
     Window child;
-    status = pXTranslateCoordinates(NULL, window, root, 0, 0, &screen_x, &screen_y, &child);
+    status = pXTranslateCoordinates(pxdisplay, window, root, 0, 0, &screen_x, &screen_y, &child);
     if (status) {
       out_rect->left = screen_x - (int)bw;
       out_rect->top = screen_y - (int)bw;
@@ -3665,6 +3667,23 @@ static int32_t cin_getwindow(HWND window, RECT *out_rect) {
   pXSync(NULL, false);
   pXSetErrorHandler(NULL);
   return status;
+#endif
+}
+
+static int32_t cin_movewindow(HWND window, RECT rect) {
+  const int32_t x = (int32_t)rect.left;
+  const int32_t y = (int32_t)rect.top;
+  const int32_t cx = (int32_t)rect.right;
+  const int32_t cy = (int32_t)rect.bottom;
+#ifdef _WIN32
+  return SetWindowPos(window, HWND_TOPMOST, x, y, cx, cy, SWP_SHOWWINDOW);
+#else
+  assert(cx >= 0);
+  assert(cy >= 0);
+  int res = pXMoveResizeWindow(pxdisplay, window, x, y, (uint32_t)cx, (uint32_t)cy);
+  pXSync(pxdisplay, false);
+  pXFlush(NULL);
+  return res;
 #endif
 }
 
@@ -4088,12 +4107,6 @@ static inline bool init_repl(void) {
   array_init(&arena_console, &wwrite_buf, CIN_MAX_PATH);
   array_init(&arena_console, &utf16_buf_raw, CIN_MAX_PATH);
   array_init(&arena_console, &utf16_buf_norm, CIN_MAX_PATH);
-#endif
-  array_init(&arena_console, &write_buf, CIN_MAX_PATH);
-  array_init(&arena_console, &preview, CIN_MAX_PATH);
-  array_init(&arena_console, &utf8_buf, CIN_MAX_PATH_BYTES);
-  cin_swrite(PREFIX_STR);
-  return true;
 code_page:
   cin_swrite("Failed to modify console code page" CRLF);
   return false;
@@ -4102,6 +4115,12 @@ handle_in:
   return false;
 handle_out:
   cin_swrite("Failed to setup console output handle" CRLF);
+#endif
+  array_init(&arena_console, &write_buf, CIN_MAX_PATH);
+  array_init(&arena_console, &preview, CIN_MAX_PATH);
+  array_init(&arena_console, &utf8_buf, CIN_MAX_PATH_BYTES);
+  cin_swrite(PREFIX_STR);
+  return true;
 memory:
   cin_swrite("Failed to allocate memory for repl/console" CRLF);
   return false;
@@ -4266,42 +4285,71 @@ static inline void chat_kill(void) {
 #endif
 }
 
-static inline void chat_reposition(const Cin_Layout *layout) {
+static inline size_t chat_spawn(void) {
+#ifdef _WIN32
   RECT chat_rect = layout->chat_rect;
   const int32_t x = (int32_t)chat_rect.left;
   const int32_t y = (int32_t)chat_rect.top;
   const int32_t cx = (int32_t)chat_rect.right;
   const int32_t cy = (int32_t)chat_rect.bottom;
+  STARTUPINFOW si = {0};
+  PROCESS_INFORMATION pi = {0};
+  si.dwFlags = STARTF_USEPOSITION | STARTF_USESIZE | STARTF_USESHOWWINDOW;
+  si.wShowWindow = SW_NORMAL;
+  si.dwX = (uint32_t)x;
+  si.dwXSize = (uint32_t)cx;
+  si.dwY = (uint32_t)y;
+  si.dwYSize = (uint32_t)cy;
+  si.cb = sizeof(si);
+  // since STARTUPINFOW is ignored, manually reposition after
+  if (!CreateProcessW(exe_path_chatterino, L"chatterino", NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+    if (GetLastError() == ERROR_FILE_NOT_FOUND) {
+      log_last_error("Failed to find chatterino executable");
+    } else {
+      log_last_error("Failed to start chatterino executable even though it was found");
+    }
+  }
+  return pi.dwProcessId;
+#else
+  signal(SIGCHLD, SIG_IGN);
+  pid_t pid = fork();
+  if (pid < 0) {
+    log_last_error("Failed to fork process");
+    return 0;
+  }
+  if (pid == 0) {
+    if (execlp("chatterino", "chatterino") < 0) {
+      log_last_error("Failed to start mpv");
+      exit(1);
+    }
+    assert(false);
+  }
+  chat.pid = pid;
+  return (size_t)pid;
+#endif
+}
+
+static inline void chat_reposition(const Cin_Layout *layout) {
+  RECT chat_rect = layout->chat_rect;
   const bool should_show = chat_rect.bottom != LONG_MIN;
   const bool is_showing = cin_iswindow(chat.window);
   if (should_show) {
     if (is_showing) {
-      SetWindowPos(chat.window, HWND_TOPMOST, x, y, cx, cy, SWP_SHOWWINDOW);
+      cin_movewindow(chat.window, chat_rect);
     } else {
-      // TODO: posix signal(SIGCHLD, SIG_IGN)
-      STARTUPINFOW si = {0};
-      PROCESS_INFORMATION pi = {0};
-      si.dwFlags = STARTF_USEPOSITION | STARTF_USESIZE | STARTF_USESHOWWINDOW;
-      si.wShowWindow = SW_NORMAL;
-      si.dwX = (uint32_t)x;
-      si.dwXSize = (uint32_t)cx;
-      si.dwY = (uint32_t)y;
-      si.dwYSize = (uint32_t)cy;
-      si.cb = sizeof(si);
-      if (!CreateProcessW(exe_path_chatterino, L"chatterino", NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
-        if (GetLastError() == ERROR_FILE_NOT_FOUND) {
-          log_last_error("Failed to find chatterino executable");
-        } else {
-          log_last_error("Failed to start chatterino executable even though it was found");
-        }
-      }
-      // since STARTUPINFOW is ignored, manually reposition
-      static const size_t CHAT_REPOSITION_TRIES = 50;
-      static const long CHAT_REPOSITION_DELAY = 40;
+      static const size_t CHAT_REPOSITION_TRIES = 10;
+      static const long CHAT_REPOSITION_DELAY = 100;
+      const size_t pid = chat_spawn();
       for (size_t i = 0; i < CHAT_REPOSITION_TRIES; ++i) {
-        chat.window = find_window_by_pid(pi.dwProcessId);
+#ifdef _WIN32
+        chat.window = find_window_by_pid(pid);
+#else
+        (void)pid;
+        Window root = pXDefaultRootWindow(pxdisplay);
+        chat.window = find_window_by_name(pxdisplay, root, "chatterino");
+#endif
         if (cin_isvisible(chat.window)) {
-          SetWindowPos(chat.window, HWND_TOPMOST, x, y, cx, cy, SWP_SHOWWINDOW);
+          cin_movewindow(chat.window, chat_rect);
           break;
         }
         cin_sleep(CHAT_REPOSITION_DELAY);
@@ -4970,7 +5018,7 @@ static void cmd_idle_validator(void) {
 static void cmd_kill_executor(void) {
   chat_kill();
   mpv_target_foreach(i, instance) {
-    log_message(LOG_DEBUG, "Closing PID=%lu", instance->pi.dwProcessId);
+    log_message(LOG_DEBUG, "Closing Window=%lu", instance->window);
     overlap_write(instance, MPV_QUIT, "quit", NULL, NULL);
   }
 }
@@ -5156,8 +5204,6 @@ static void cmd_store_executor(void) {
     }
   }
   if (geometry_buf.count > 0) geometry_buf.items[--geometry_buf.count] = '\0';
-  FILE *file = NULL;
-  int32_t err = 0;
   char *buf = NULL;
   uint32_t buf_bytes = 0;
   const bool has_chat = cin_iswindow(chat.window);
@@ -5168,9 +5214,9 @@ static void cmd_store_executor(void) {
   if (!try_overwrite) goto append;
   int32_t scope_line = layout->scope_line;
   const uint32_t name_len = layout->name_len - 1;
-  err = fopen_s(&file, CIN_CONF_FILENAME, "rb");
-  if (err) {
-    log_fopen_error(CIN_CONF_FILENAME, err);
+  FILE *file = fopen(CIN_CONF_FILENAME, "rb");
+  if (!file) {
+    log_last_error("Failed to open file '%s'", CIN_CONF_FILENAME);
   } else {
     fseek(file, 0, SEEK_END);
     assert(ftell(file) > 0);
@@ -5264,9 +5310,9 @@ static void cmd_store_executor(void) {
       *overwrite++ = '\n';
     }
     const size_t used_bytes = (size_t)(tail - buf);
-    err = fopen_s(&file, CIN_CONF_FILENAME, "wb");
-    if (err) {
-      log_fopen_error(CIN_CONF_FILENAME, err);
+    file = fopen(CIN_CONF_FILENAME, "wb");
+    if (!file) {
+      log_last_error("Failed to open file '%s'", CIN_CONF_FILENAME);
     } else {
       fwrite(buf, 1, used_bytes, file);
       fclose(file);
@@ -5289,9 +5335,9 @@ static void cmd_store_executor(void) {
 append:
   if (buf) arena_free_pos(&arena_console, (uint8_t *)buf, buf_bytes + 1U);
   scope_line = 2;
-  err = fopen_s(&file, CIN_CONF_FILENAME, "ab+");
-  if (err) {
-    log_fopen_error(CIN_CONF_FILENAME, err);
+  file = fopen(CIN_CONF_FILENAME, "ab+");
+  if (!file) {
+    log_last_error("Failed to open file '%s'", CIN_CONF_FILENAME);
   } else {
     rewind(file);
     int32_t c;
@@ -5581,7 +5627,7 @@ static void cmd_list_validator(void) {
 static void cmd_quit_executor(void) {
   chat_kill();
   cache_foreach(&cin_io.instances, Instance, i, instance) {
-    log_message(LOG_DEBUG, "Closing PID=%lu", instance->pi.dwProcessId);
+    log_message(LOG_DEBUG, "Closing Window=%lu", instance->window);
     overlap_write(instance, MPV_QUIT, "quit", NULL, NULL);
   }
   clear_preview(0);
@@ -5592,7 +5638,12 @@ static void cmd_quit_executor(void) {
   SetConsoleMode(repl.out, repl.out_mode);
 #else
   tcsetattr(STDIN_FILENO, TCSANOW, &repl.modes);
-  if (pxlib) dlclose(pxlib);
+  if (pxlib) {
+    if (pxdisplay) {
+      pXCloseDisplay(pxdisplay);
+    }
+    dlclose(pxlib);
+  }
 #endif
   exit(1);
 }
