@@ -3266,13 +3266,6 @@ typedef struct Read_Buffer {
   struct Read_Buffer *next;
 } Read_Buffer;
 
-typedef struct Console_Timer_Ctx {
-  PTP_TIMER timer;
-  int64_t millis;
-  bool (*f)(struct Console_Timer_Ctx *ctx);
-  cache_node_struct_members(Console_Timer_Ctx);
-} Console_Timer_Ctx;
-
 typedef struct Instance {
   Read_Buffer *buf_head;
   Read_Buffer *buf_tail;
@@ -3288,7 +3281,6 @@ typedef struct Instance {
   int32_t listener_index;
 #endif
   Playlist *playlist;
-  Console_Timer_Ctx *timer;
   bool full_screen;
   bool autoplay_mpv;
   bool locked;
@@ -4007,48 +3999,6 @@ memory:
   return false;
 }
 
-typedef enum {
-  _CIN_TIMER_END
-} Console_Timer_Type;
-
-static cache_struct(Console_Timer_Ctx) timer_cache = {0};
-
-static inline void reset_console_timer(Console_Timer_Ctx *ctx) {
-  LARGE_INTEGER t;
-  FILETIME ft;
-  // set union then read parts
-  t.QuadPart = ctx->millis * -10000LL;
-  ft.dwHighDateTime = (uint32_t)t.HighPart;
-  ft.dwLowDateTime = (uint32_t)t.LowPart;
-  SetThreadpoolTimer(ctx->timer, &ft, 0, 0);
-}
-
-static VOID CALLBACK console_timer_callback(PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_TIMER Timer) {
-  (void)Instance;
-  (void)Timer;
-  Console_Timer_Ctx *ctx = (Console_Timer_Ctx *)Context;
-  const bool restart = ctx->f(ctx);
-  if (restart) reset_console_timer(ctx);
-}
-
-static inline Console_Timer_Ctx *register_console_timer(bool (*f)(Console_Timer_Ctx *ctx), int64_t millis) {
-  Console_Timer_Ctx *ctx = NULL;
-  cache_get_zero(&arena_console, &timer_cache, ctx);
-  assert(ctx);
-  ctx->millis = millis;
-  ctx->f = f;
-  ctx->timer = CreateThreadpoolTimer(console_timer_callback, ctx, NULL);
-  if (ctx->timer == NULL) {
-    log_last_error("Failed to register console timer");
-    return NULL;
-  }
-  return ctx;
-}
-
-static inline bool init_timers(void) {
-  return true;
-}
-
 #define COMMAND_NUMBERS_CAP 8
 #define COMMAND_ERROR_MESSAGE "ERROR: "
 #define COMMAND_ERROR_MESSAGE_LEN cin_strlen(COMMAND_ERROR_MESSAGE)
@@ -4414,18 +4364,6 @@ static inline bool init_mpv(void) {
     return false;
   }
 #endif
-  return true;
-}
-
-static inline bool timer_autoplay(Console_Timer_Ctx *ctx) {
-  bool targets = false;
-  cache_foreach(&cin_io.instances, Instance, i, o) {
-    if (o->socket && o->timer == ctx) {
-      targets = true;
-      playlist_play(o);
-    }
-  }
-  if (!targets) cache_put(&timer_cache, ctx);
   return true;
 }
 
@@ -4976,6 +4914,7 @@ static void cmd_mute_validator(void) {
 }
 
 static void cmd_autoplay_executor(void) {
+  const char *duration = cmd_ctx.unicode;
   char *p = cmd_ctx.unicode;
   int64_t seconds = -1;
   if (p && cin_isnum(*p)) {
@@ -4986,33 +4925,36 @@ static void cmd_autoplay_executor(void) {
       seconds += *p - '0';
       ++p;
     }
+    if (*p) *p = '\0';
   }
   if (seconds > 0) {
-    const int64_t millis = seconds * 1000LL;
-    Console_Timer_Ctx *timer = register_console_timer(timer_autoplay, millis);
-    assert(timer);
-    bool targets = false;
     mpv_target_foreach(i, instance) {
-      targets = true;
-      instance->timer = timer;
-      if (instance->autoplay_mpv) overlap_write(instance, MPV_WRITE, "set_property", "loop", "inf");
-      instance->autoplay_mpv = false;
+      if (!instance->autoplay_mpv) {
+        overlap_write(instance, MPV_WRITE, "set_property", "loop", "no");
+        instance->autoplay_mpv = true;
+      }
+      overlap_write(instance, MPV_WRITE, "set_property", "length", duration);
+      overlap_write(instance, MPV_WRITE, "set_property", "image-display-duration", duration);
+      playlist_insert(instance);
     }
-    if (targets) reset_console_timer(timer);
-    else cache_put(&timer_cache, timer);
   } else if (seconds == 0) {
     mpv_target_foreach(i, instance) {
-      instance->timer = NULL;
-      if (instance->autoplay_mpv) overlap_write(instance, MPV_WRITE, "set_property", "loop", "inf");
+      if (instance->autoplay_mpv) {
+        overlap_write(instance, MPV_WRITE, "set_property", "loop", "inf");
+        overlap_write(instance, MPV_WRITE, "set_property", "length", "none");
+      }
       instance->autoplay_mpv = false;
     }
   } else {
     mpv_target_foreach(i, instance) {
-      instance->timer = NULL;
       if (!instance->autoplay_mpv) {
-        instance->autoplay_mpv = true;
         overlap_write(instance, MPV_WRITE, "set_property", "loop", "no");
+        instance->autoplay_mpv = true;
+      } else {
+        overlap_write(instance, MPV_WRITE, "set_property", "length", "none");
       }
+      // NOTE: default=5 https://mpv.io/manual/stable/#options-image-display-duration
+      overlap_write(instance, MPV_WRITE, "set_property", "image-display-duration", "5");
       playlist_insert(instance);
     }
   }
@@ -5048,7 +4990,6 @@ static void cmd_lock_executor(void) {
   mpv_target_foreach(i, instance) {
     instance->locked = !instance->locked;
     if (!instance->locked) playlist_play(instance);
-    instance->timer = NULL;
     if (instance->autoplay_mpv) overlap_write(instance, MPV_WRITE, "set_property", "loop", "inf");
     instance->autoplay_mpv = false;
   }
@@ -5966,7 +5907,6 @@ int main(int argc, char **argv) {
 // on linux we run the exes without searching
 #endif
   if (!init_documents()) exit(1);
-  if (!init_timers()) exit(1);
   if (!init_mpv()) exit(1);
 #ifndef _WIN32
   if (!init_xlib()) pxlib = NULL;
