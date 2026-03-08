@@ -2805,7 +2805,7 @@ static inline void setup_url(char *url, Tag_Url_Items *tag_url_items) {
   const int32_t len = utf16_to_utf8(utf16_buf_raw.items);
   uint8_t *doc = utf8_buf.items;
 #else
-  const int32_t len = (int32_t)strlen(url);
+  const int32_t len = (int32_t)strlen(url) + 1;
   uint8_t *doc = (uint8_t *)url;
 #endif
   assert(len > 0);
@@ -2829,7 +2829,7 @@ static inline void setup_tag(char *tag, Tag_Items *tag_items) {
   const int32_t len = utf16_to_utf8(utf16_buf_norm.items);
   uint8_t *name = utf8_buf.items;
 #else
-  const int32_t len = utf8_norm(tag);
+  const int32_t len = utf8_norm(tag) + 1;
   uint8_t *name = (uint8_t *)tag;
 #endif
   assert(len > 0);
@@ -2886,7 +2886,7 @@ static inline void setup_layout(char *name, Cin_Layout *layout) {
   const uint32_t len = (uint32_t)utf16_to_utf8(utf16_buf_norm.items);
   uint8_t *layout_name = utf8_buf.items;
 #else
-  const uint32_t len = (uint32_t)utf8_norm(name);
+  const uint32_t len = (uint32_t)utf8_norm(name) + 1;
   uint8_t *layout_name = (uint8_t *)name;
 #endif
   assert(len > 0);
@@ -2904,7 +2904,7 @@ static inline void setup_macro(char *name, Cin_Macro *macro, bool startup) {
   assert(len_utf8 > 1);
   radix_insert(macro_tree, utf8_buf.items, (uint32_t)len_utf8, macro);
 #else
-  const int32_t len = utf8_norm(name);
+  const int32_t len = utf8_norm(name) + 1;
   assert(len > 0);
   radix_insert(macro_tree, (uint8_t *)name, (uint32_t)len, macro);
 #endif
@@ -3095,7 +3095,7 @@ static bool reinit_documents(void) {
   const int32_t result = libsais_gsa(docs.items, docs.gsa, d_bytes, remainder, NULL);
 #endif
   if (result != 0) {
-    log_message(LOG_ERROR, "Failed to build SA");
+    log_message(LOG_ERROR, "Failed to build SA with code %d", result);
     return false;
   }
   int32_t *tmp = arena_bump_T(&arena_docs, int32_t, (uint32_t)d_bytes);
