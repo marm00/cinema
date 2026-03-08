@@ -1088,7 +1088,6 @@ static inline bool term_get_cursor(COORD *cursor) {
   cursor->X = info.dwCursorPosition.X - info.srWindow.Left;
   cursor->Y = info.dwCursorPosition.Y - info.srWindow.Top + 1;
 #else
-  // TODO: log lock
   cin_swrite(CSI "6n");
   char pos[16];
   ssize_t n = read(STDIN_FILENO, pos, sizeof(pos) - 1);
@@ -2890,7 +2889,7 @@ static inline void setup_layout(char *name, Cin_Layout *layout) {
   const uint32_t len = (uint32_t)utf8_norm(name);
   uint8_t *layout_name = (uint8_t *)name;
 #endif
-  assert(len > 1);
+  assert(len > 0);
   layout->name_offset = layout_strings.count;
   layout->name_len = len;
   array_extend(&arena_console, &layout_strings, layout_name, len);
@@ -4096,8 +4095,8 @@ static inline bool init_repl(void) {
 #else
   tcgetattr(STDIN_FILENO, &repl.modes);
   struct termios tmp = repl.modes;
-  tmp.c_iflag &= (tcflag_t)~ICANON;
-  tmp.c_iflag &= (tcflag_t)~ECHO;
+  tmp.c_lflag &= (tcflag_t)~ICANON;
+  tmp.c_lflag &= (tcflag_t)~ECHO;
   tcsetattr(STDIN_FILENO, TCSANOW, &tmp);
 #endif
   if (!arena_chunk_init(&arena_console, CIN_ARENA_CAP)) goto memory;
@@ -4316,6 +4315,7 @@ static inline size_t chat_spawn(const Cin_Layout *layout) {
   }
   return pi.dwProcessId;
 #else
+  (void)layout;
   signal(SIGCHLD, SIG_IGN);
   pid_t pid = fork();
   if (pid < 0) {
@@ -6092,11 +6092,13 @@ int main(int argc, char **argv) {
     hide_cursor();
     const COORD size_change = term_get_size(&repl.size);
     if (size_change.X) {
+      lock_logs();
       term_get_cursor(&repl.cursor);
       const uint32_t curr_index = cursor_to_index(repl.cursor, (uint32_t)repl.size.X);
       const uint32_t i = curr_index > repl.msg_index ? curr_index - repl.msg_index : curr_index;
       const short new_home_y = index_y(i, (uint32_t)repl.size.X);
       repl.home.Y = new_home_y;
+      unlock_logs();
     } else if (size_change.Y < 0) {
       repl.home.Y = min(repl.home.Y, repl.size.Y - 1);
     }
