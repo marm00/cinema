@@ -3598,8 +3598,9 @@ static Window find_window_by_name(Display *dsp, Window curr, const char *name) {
       for (uint32_t j = 0; j < nchildren; ++j) {
         Window child = children[j];
         char *child_name = NULL;
-        log_message(LOG_DEBUG, "Found child window: %s", child_name ? child_name : "NULL");
+        pXFetchName(dsp, child, &child_name);
         if (child_name) {
+          log_message(LOG_DEBUG, "Named child window: %s", child_name);
           const bool match = strcmp(child_name, name) == 0;
           pXFree(child_name);
           if (match) {
@@ -3684,7 +3685,6 @@ static int32_t cin_movewindow(HWND window, RECT rect) {
   assert(cy >= 0);
   int res = pXMoveResizeWindow(pxdisplay, window, x, y, (uint32_t)cx, (uint32_t)cy);
   pXSync(pxdisplay, false);
-  pXFlush(NULL);
   return res;
 #endif
 }
@@ -4033,7 +4033,7 @@ static void *mpv_listener(void *arg) {
   array_push(&arena_iocp_thread, &listener_pfds, root_pfd);
   for (;;) {
     const nfds_t nfds = (nfds_t)listener_pfds.count;
-    const int32_t poll_result = poll(listener_pfds.items, nfds, 1000);
+    const int32_t poll_result = poll(listener_pfds.items, nfds, -1);
     if (poll_result == 0) {
       log_message(LOG_ERROR, "Listener thread timed out polling");
       assert(false);
@@ -4323,8 +4323,12 @@ static inline size_t chat_spawn(const Cin_Layout *layout) {
     return 0;
   }
   if (pid == 0) {
-    if (execlp("chatterino", "chatterino") < 0) {
-      log_last_error("Failed to start mpv");
+    FILE *dev_null = fopen("/dev/null", "w");
+    dup2(fileno(dev_null), STDOUT_FILENO);
+    dup2(fileno(dev_null), STDERR_FILENO);
+    fclose(dev_null);
+    if (execlp("chatterino", "chatterino", NULL) < 0) {
+      log_last_error("Failed to start chatterino");
       exit(1);
     }
     assert(false);
