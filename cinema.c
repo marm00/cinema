@@ -1288,6 +1288,7 @@ static void log_preview(void) {
 
 static inline void rewrite_post_log(void) {
   const COORD prev = repl.home;
+  // TODO: interrupt and let main thread read
   term_get_cursor(&repl.cursor);
   const COORD next = repl.cursor;
   const short line_shift = next.Y - prev.Y;
@@ -4052,6 +4053,7 @@ static void *mpv_listener(void *arg) {
       // map so next poll includes them
       assert(listener_pfds_to_instances.count >= next_index);
       Instance *instance = listener_pfds_to_instances.items[next_index];
+      assert(instance);
       instance->listener_index = (int32_t)next_index;
       struct pollfd new_pfd = {.fd = instance->socket, .events = POLLIN};
       array_push(&arena_iocp_thread, &listener_pfds, new_pfd);
@@ -4346,8 +4348,8 @@ static inline void chat_reposition(const Cin_Layout *layout) {
     if (is_showing) {
       cin_movewindow(chat.window, chat_rect);
     } else {
-      static const size_t CHAT_REPOSITION_TRIES = 10;
-      static const long CHAT_REPOSITION_DELAY = 100;
+      static const size_t CHAT_REPOSITION_TRIES = 50;
+      static const long CHAT_REPOSITION_DELAY = 200;
       const size_t pid = chat_spawn(layout);
       for (size_t i = 0; i < CHAT_REPOSITION_TRIES; ++i) {
 #ifdef _WIN32
@@ -4470,6 +4472,10 @@ static void mpv_spawn(Instance *instance, size_t index) {
     return;
   }
   if (pid == 0) {
+    FILE *dev_null = fopen("/dev/null", "w");
+    dup2(fileno(dev_null), STDOUT_FILENO);
+    dup2(fileno(dev_null), STDERR_FILENO);
+    fclose(dev_null);
     if (execvp(mpv_flags[0], mpv_flags) < 0) {
       log_last_error("Failed to start mpv");
       exit(1);
@@ -4485,11 +4491,12 @@ static void mpv_spawn(Instance *instance, size_t index) {
   for (size_t i = 0; i < MPV_SPAWN_TRIES; ++i) {
     const int32_t fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) {
-      log_last_error("Socket creation failed");
+      log_last_error("Socket creation failed, retrying in %ldms", MPV_SPAWN_DELAY);
     } else if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-      log_last_error("Socket connection failed");
+      log_last_error("Socket connection failed, retrying in %ldms", MPV_SPAWN_DELAY);
       close(fd);
     } else {
+      log_message(LOG_DEBUG, "Created socket %d", fd);
       instance->socket = fd;
       instance->buf_head = arena_bump_T1(&arena_io, Read_Buffer);
       instance->buf_tail = instance->buf_head;
@@ -4530,6 +4537,7 @@ static inline bool init_mpv(void) {
     return false;
   }
 #else
+  pipe(listener_pipe);
   if (pthread_create(&cin_io.listener, NULL, mpv_listener, NULL) != 0) {
     log_last_error("Failed to create listener thread");
     return false;
@@ -6090,6 +6098,7 @@ int main(int argc, char **argv) {
   for (;;) {
     show_cursor();
     uint8_t byte;
+    assert(false);
     if (!term_read(&byte, 1, false)) {
       break;
     }
