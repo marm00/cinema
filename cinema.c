@@ -1286,10 +1286,40 @@ static void log_preview(void) {
   }
 }
 
+#ifndef _WIN32
+static pthread_t listener_thread;
+static int32_t interrupt_pipe[2];
+static pthread_mutex_t interrupt_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t interrupt_done = PTHREAD_COND_INITIALIZER;
+static bool interrupt_pending = false;
+
+static inline void interrupt_start(void) {
+  pthread_mutex_lock(&interrupt_lock);
+  interrupt_pending = true;
+  write(interrupt_pipe[1], "x", 1);
+  while (interrupt_pending) {
+    pthread_cond_wait(&interrupt_done, &interrupt_lock);
+  }
+  pthread_mutex_unlock(&interrupt_lock);
+}
+
+static inline void interrupt_finish(void) {
+  char _val;
+  read(interrupt_pipe[0], &_val, 1);
+  pthread_mutex_lock(&interrupt_lock);
+  interrupt_pending = false;
+  pthread_cond_signal(&interrupt_done);
+  pthread_mutex_unlock(&interrupt_lock);
+}
+#endif
+
 static inline void rewrite_post_log(void) {
   const COORD prev = repl.home;
-  // TODO: interrupt and let main thread read
-  term_get_cursor(&repl.cursor);
+  if (pthread_equal(pthread_self(), listener_thread)) {
+    interrupt_start();
+  } else {
+    term_get_cursor(&repl.cursor);
+  }
   const COORD next = repl.cursor;
   const short line_shift = next.Y - prev.Y;
   assert(line_shift >= 0);
@@ -1320,7 +1350,7 @@ static CRITICAL_SECTION log_lock;
 #define lock_logs() EnterCriticalSection(&log_lock)
 #define unlock_logs() LeaveCriticalSection(&log_lock)
 #else
-static pthread_mutex_t log_lock;
+static pthread_mutex_t log_lock = PTHREAD_MUTEX_INITIALIZER;
 #define lock_logs() pthread_mutex_lock(&log_lock)
 #define unlock_logs() pthread_mutex_unlock(&log_lock)
 #endif
@@ -3307,8 +3337,6 @@ static struct {
   Instance_Cache instances;
 #ifdef _WIN32
   HANDLE iocp;
-#else
-  pthread_t listener;
 #endif
 } cin_io = {0};
 
@@ -3787,7 +3815,7 @@ static inline void playlist_play(Instance *instance) {
 
 #ifndef _WIN32
 static int32_t listener_pipe[2];
-static pthread_mutex_t listener_lock;
+static pthread_mutex_t listener_lock = PTHREAD_MUTEX_INITIALIZER;
 static array_struct(struct pollfd) listener_pfds = {0};
 static array_struct(Instance *) listener_pfds_to_instances = {0};
 #endif
@@ -4537,8 +4565,9 @@ static inline bool init_mpv(void) {
     return false;
   }
 #else
+  pipe(interrupt_pipe);
   pipe(listener_pipe);
-  if (pthread_create(&cin_io.listener, NULL, mpv_listener, NULL) != 0) {
+  if (pthread_create(&listener_thread, NULL, mpv_listener, NULL) != 0) {
     log_last_error("Failed to create listener thread");
     return false;
   }
@@ -5757,25 +5786,49 @@ static inline int32_t term_read(uint8_t *buf, const int32_t n, bool peek) {
     }
   }
 #else
+  struct pollfd pfds[2] = {{.fd = STDIN_FILENO, .events = POLLIN},
+                           {.fd = interrupt_pipe[0], .events = POLLIN}};
+  struct pollfd pfd_input = pfds[0];
+  struct pollfd pfd_interrupt = pfds[1];
   if (!peek) {
-    if ((chars_read = (int32_t)read(STDIN_FILENO, buf, (size_t)n)) < 0) {
-      log_last_error("Failed to read %d from terminal", n);
+    for (;;) {
+      const int32_t poll_result = poll(pfds, 2, -1);
+      if (poll_result <= 0) {
+        log_last_error("Failed to peek");
+        break;
+      }
+      if (pfd_interrupt.revents & POLLIN) {
+        term_get_cursor(&repl.cursor);
+        interrupt_finish();
+      }
+      if (pfd_input.revents & POLLIN) {
+        chars_read = (int32_t)read(STDIN_FILENO, buf, (size_t)n);
+        if (chars_read < 0) log_last_error("Failed to read %d from terminal", n);
+        break;
+      }
     }
   } else {
-    struct pollfd pfd = {.fd = STDIN_FILENO, .events = POLLIN};
-    for (int32_t i = 0; i < n; ++i) {
-      const int32_t poll_result = poll(&pfd, 1, TERM_READ_WAIT_MS);
+    int32_t i = 0;
+    bool interrupt = false;
+    while (i < n) {
+      const int32_t poll_result = poll(pfds, 2, TERM_READ_WAIT_MS);
       if (poll_result == 0) break;
       if (poll_result < 0) {
         log_last_error("Failed to peek");
         break;
       }
-      if (pfd.revents & POLLIN && read(pfd.fd, buf + i, 1) > 0) {
+      if (pfd_interrupt.revents & POLLIN) interrupt = true;
+      if (pfd_input.revents & POLLIN && read(pfd_input.fd, buf + i, 1) > 0) {
         ++chars_read;
+        ++i;
       } else {
         log_last_error("Failed to read peek");
         break;
       }
+    }
+    if (interrupt) {
+      term_get_cursor(&repl.cursor);
+      interrupt_finish();
     }
   }
 #endif
