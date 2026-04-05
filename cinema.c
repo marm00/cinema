@@ -4076,7 +4076,7 @@ static void *mpv_listener(void *arg) {
       char _val;
       read(listener_pipe[0], &_val, 1);
       pthread_mutex_lock(&listener_lock);
-      const uint32_t next_index = listener_pfds.count;
+      const uint32_t next_index = listener_pfds.count - 1;
       // main thread has added 1 or more instances
       // map so next poll includes them
       assert(listener_pfds_to_instances.count >= next_index);
