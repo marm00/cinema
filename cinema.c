@@ -5790,8 +5790,6 @@ static inline int32_t term_read(uint8_t *buf, const int32_t n, bool peek) {
 #else
   struct pollfd pfds[2] = {{.fd = STDIN_FILENO, .events = POLLIN},
                            {.fd = interrupt_pipe[0], .events = POLLIN}};
-  struct pollfd pfd_input = pfds[0];
-  struct pollfd pfd_interrupt = pfds[1];
   if (!peek) {
     for (;;) {
       const int32_t poll_result = poll(pfds, 2, -1);
@@ -5799,11 +5797,11 @@ static inline int32_t term_read(uint8_t *buf, const int32_t n, bool peek) {
         log_last_error("Failed to peek");
         break;
       }
-      if (pfd_interrupt.revents & POLLIN) {
+      if (pfds[1].revents & POLLIN) {
         term_get_cursor(&repl.cursor);
         interrupt_finish();
       }
-      if (pfd_input.revents & POLLIN) {
+      if (pfds[0].revents & POLLIN) {
         chars_read = (int32_t)read(STDIN_FILENO, buf, (size_t)n);
         if (chars_read < 0) log_last_error("Failed to read %d from terminal", n);
         break;
@@ -5819,8 +5817,8 @@ static inline int32_t term_read(uint8_t *buf, const int32_t n, bool peek) {
         log_last_error("Failed to peek");
         break;
       }
-      if (pfd_interrupt.revents & POLLIN) interrupt = true;
-      if (pfd_input.revents & POLLIN && read(pfd_input.fd, buf + i, 1) > 0) {
+      if (pfds[1].revents & POLLIN) interrupt = true;
+      if (pfds[0].revents & POLLIN && read(pfds[0].fd, buf + i, 1) > 0) {
         ++chars_read;
         ++i;
       } else {
