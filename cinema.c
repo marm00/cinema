@@ -1313,10 +1313,22 @@ static inline void interrupt_finish(void) {
 }
 #endif
 
+#ifdef _WIN32
+static CRITICAL_SECTION log_lock;
+#define lock_logs() EnterCriticalSection(&log_lock)
+#define unlock_logs() LeaveCriticalSection(&log_lock)
+#else
+static pthread_mutex_t log_lock = PTHREAD_MUTEX_INITIALIZER;
+#define lock_logs() pthread_mutex_lock(&log_lock)
+#define unlock_logs() pthread_mutex_unlock(&log_lock)
+#endif
+
 static inline void rewrite_post_log(void) {
   const COORD prev = repl.home;
   if (pthread_equal(pthread_self(), listener_thread)) {
+    unlock_logs();
     interrupt_start();
+    lock_logs();
   } else {
     term_get_cursor(&repl.cursor);
   }
@@ -1344,16 +1356,6 @@ static inline void rewrite_post_log(void) {
   log_preview();
   show_cursor();
 }
-
-#ifdef _WIN32
-static CRITICAL_SECTION log_lock;
-#define lock_logs() EnterCriticalSection(&log_lock)
-#define unlock_logs() LeaveCriticalSection(&log_lock)
-#else
-static pthread_mutex_t log_lock = PTHREAD_MUTEX_INITIALIZER;
-#define lock_logs() pthread_mutex_lock(&log_lock)
-#define unlock_logs() pthread_mutex_unlock(&log_lock)
-#endif
 
 static void log_message(Cin_Log_Level level, const char *message, ...) {
   if (level > GLOBAL_LOG_LEVEL) {
@@ -6151,7 +6153,6 @@ int main(int argc, char **argv) {
   for (;;) {
     show_cursor();
     uint8_t byte;
-    assert(false);
     if (!term_read(&byte, 1, false)) {
       break;
     }
