@@ -2494,7 +2494,7 @@ static inline void setup_file_path(char *dst, const char *src, size_t size) {
         return;
       }
     } else {
-      char *username_tail = strchr(src_pos, '/');
+      char *username_tail = (char *)strchr(src_pos, '/');
       struct passwd *pw = NULL;
       errno = 0;
       if (username_tail) {
@@ -3865,7 +3865,7 @@ static inline void mpv_unlock(void) {
 static inline void iocp_parse(Instance *instance, const char *buf_start, size_t buf_offset) {
   const char *buf = buf_start + buf_offset;
   char *p = NULL;
-  if ((p = strstr(buf, CIN_MPVKEY_EVENT))) {
+  if ((p = (char *)strstr(buf, CIN_MPVKEY_EVENT))) {
     p += cin_strlen(CIN_MPVKEY_EVENT);
     assert(*p == '\"');
     ++p;
@@ -3883,7 +3883,7 @@ static inline void iocp_parse(Instance *instance, const char *buf_start, size_t 
     } else if (CIN_MPVVAL(p, "file-loaded")) {
       if (instance->autoplay_mpv) playlist_insert(instance);
     }
-  } else if ((p = strstr(buf, CIN_MPVKEY_REQUEST))) {
+  } else if ((p = (char *)strstr(buf, CIN_MPVKEY_REQUEST))) {
     p += cin_strlen(CIN_MPVKEY_REQUEST);
     assert(cin_isnum(*p));
     int64_t req_id = *p - '0';
@@ -3895,7 +3895,7 @@ static inline void iocp_parse(Instance *instance, const char *buf_start, size_t 
     switch (msg->ovl_ctx.type) {
     case MPV_WINDOW_ID: {
       if (++mpv_supply == mpv_demand) mpv_unlock();
-      char *data = strstr(buf, CIN_MPVKEY_DATA);
+      char *data = (char *)strstr(buf, CIN_MPVKEY_DATA);
       if (!data) {
         // NOTE: If the request was delivered before mpv managed to create
         // the window, it will return something like "error: property
@@ -3919,7 +3919,7 @@ static inline void iocp_parse(Instance *instance, const char *buf_start, size_t 
       mpv_kill(instance);
       break;
     case MPV_GET_PATH: {
-      char *data = strstr(buf, CIN_MPVKEY_DATA);
+      char *data = (char *)strstr(buf, CIN_MPVKEY_DATA);
       assert(data);
       data += cin_strlen(CIN_MPVKEY_DATA);
       assert(*data == '"');
