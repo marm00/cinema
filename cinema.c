@@ -4502,6 +4502,7 @@ static void mpv_spawn(Instance *instance, size_t index) {
     return;
   }
   if (pid == 0) {
+    signal(SIGCHLD, SIG_DFL);
     FILE *dev_null = fopen("/dev/null", "w");
     dup2(fileno(dev_null), STDOUT_FILENO);
     dup2(fileno(dev_null), STDERR_FILENO);
