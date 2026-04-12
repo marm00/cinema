@@ -3631,7 +3631,7 @@ static Window find_window_by_name(Display *dsp, Window curr, const char *name) {
         char *child_name = NULL;
         pXFetchName(dsp, child, &child_name);
         if (child_name) {
-          log_message(LOG_DEBUG, "Named child window: %s", child_name);
+          log_message(LOG_TRACE, "Named child window: %s", child_name);
           const bool match = strcmp(child_name, name) == 0;
           pXFree(child_name);
           if (match) {
@@ -3698,7 +3698,7 @@ static int32_t cin_getwindow(HWND window, RECT *out_rect) {
   } else {
     log_message(LOG_ERROR, "Failed to get window geometry");
   }
-  pXSync(NULL, false);
+  pXFlush(pxdisplay);
   pXSetErrorHandler(NULL);
   return status;
 #endif
