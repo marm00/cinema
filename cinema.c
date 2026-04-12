@@ -3613,6 +3613,7 @@ static bool init_xlib(void) {
 #undef XLOAD
 
 static Window find_window_by_name(Display *dsp, Window curr, const char *name) {
+  const size_t name_len = strlen(name);
   array_struct(Window) queue = {0};
   array_push(&arena_console, &queue, curr);
   Window result = 0;
@@ -3632,7 +3633,7 @@ static Window find_window_by_name(Display *dsp, Window curr, const char *name) {
         pXFetchName(dsp, child, &child_name);
         if (child_name) {
           log_message(LOG_TRACE, "Named child window: %s", child_name);
-          const bool match = strcmp(child_name, name) == 0;
+          const bool match = strncmp(child_name, name, name_len) == 0;
           pXFree(child_name);
           if (match) {
             log_message(LOG_DEBUG, "Child window is a match: %s", name);
@@ -4387,7 +4388,7 @@ static inline void chat_reposition(const Cin_Layout *layout) {
 #else
         (void)pid;
         Window root = pXDefaultRootWindow(pxdisplay);
-        chat.window = find_window_by_name(pxdisplay, root, "chatterino");
+        chat.window = find_window_by_name(pxdisplay, root, "Chatterino");
 #endif
         if (cin_isvisible(chat.window)) {
           cin_movewindow(chat.window, chat_rect);
