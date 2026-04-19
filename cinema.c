@@ -1015,6 +1015,7 @@ static void cin_wvwritef(const wchar_t *format, va_list args) {
 #define TERM_DEFAULT 0x31
 #define TERM_TAB 0x09
 #define TERM_RETURN 0x0d
+#define TERM_LINEFEED 0x0a
 #define TERM_BACK 0x7f
 #define TERM_BACK_CTRL 0x08
 #define TERM_SPACE 0x20
@@ -6056,6 +6057,7 @@ static bool term_proc_char(char byte) {
   bool new_preview = true;
   switch (byte) {
   case TERM_TAB:
+  case TERM_LINEFEED:
   case TERM_RETURN: {
     clear_full();
     assert(repl.msg->items);
