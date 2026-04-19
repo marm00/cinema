@@ -5234,7 +5234,7 @@ static void cmd_store_executor(void) {
   } else {
     layout = arena_bump_T1(&arena_console, Cin_Layout);
     assert(cmd_ctx.unicode);
-    name = (char *)utf8_buf.items;
+    name = cmd_ctx.unicode;
     setup_layout(name, layout);
   }
   cmd_ctx.layout = layout;
