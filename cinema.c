@@ -2485,7 +2485,10 @@ DEFINE_SETUP_FILE_PATH(wchar_t, L'\\', L'/', L'\0', wmemcpy)
 static inline void setup_file_path(char *dst, const char *src, size_t size) {
   // tilde expansion, username substitution
   const bool expand = *src == '~';
-  if (expand) {
+  if (!expand) {
+    assert(size <= CIN_MAX_PATH);
+    memcpy(dst, src, size);
+  } else {
     const char *src_pos = src + 1;
     const bool only_root = !*(src_pos);
     const bool valid_expand = *(src_pos) == '/';
@@ -2539,14 +2542,13 @@ static void setup_directory(const char *path, Tag_Directories *tag_dirs) {
   Directory_Path root_dir = {.len = len};
   wmemcpy(root_dir.path, utf16_buf_norm.items, len);
 #else
-  char new_path[CIN_MAX_PATH];
-  setup_file_path(new_path, path, CIN_MAX_PATH);
-  const int32_t len_i32 = utf8_norm(new_path) + 1;
-  path = new_path;
+  Directory_Path root_dir = {0};
+  setup_file_path(root_dir.path, path, CIN_MAX_PATH);
+  path = root_dir.path;
+  const int32_t len_i32 = utf8_norm(root_dir.path) + 1;
   assert(len_i32 > 0);
   const uint32_t len = (uint32_t)len_i32;
-  Directory_Path root_dir = {.len = len};
-  memcpy(root_dir.path, path, len);
+  root_dir.len = len;
   const uint32_t bytes = len;
 #endif
   array_push(&arena_console, &dir_stack, root_dir);
@@ -2675,11 +2677,12 @@ static void setup_directory(const char *path, Tag_Directories *tag_dirs) {
     Directory_Path tmp_dir = dir;
     while ((entry = readdir(directory))) {
       char *file = entry->d_name;
-      const size_t file_len = (size_t)entry->d_reclen;
+      const size_t file_len = strlen(file) + 1;
       tmp_dir.len = dir.len;
-      const size_t path_len = tmp_dir.len + file_len;
+      // tmp_dir.len also includes null terminator
+      const size_t path_len = tmp_dir.len + file_len - 1;
       if (path_len >= CIN_MAX_PATH) continue;
-      memcpy(tmp_dir.path + tmp_dir.len, file, file_len);
+      memcpy(tmp_dir.path + tmp_dir.len - 1, file, file_len);
       tmp_dir.len = path_len;
       struct stat statbuf;
       if (lstat(tmp_dir.path, &statbuf) < 0) {
@@ -2688,11 +2691,13 @@ static void setup_directory(const char *path, Tag_Directories *tag_dirs) {
       }
       const bool is_dir = S_ISDIR(statbuf.st_mode);
       if (is_dir) {
-        assert(tmp_dir.path[tmp_dir.len - 1] == '\0');
-        assert(tmp_dir.len > 0);
-        ++dir_stack.abs_count;
-        array_ensure_capacity_core(&arena_console, &dir_stack, dir_stack.abs_count, false);
-        array_push(&arena_console, &dir_stack, tmp_dir);
+        if (strcmp(file, ".") != 0 && strcmp(file, "..") != 0) {
+          assert(tmp_dir.path[tmp_dir.len - 1] == '\0');
+          assert(tmp_dir.len > 0);
+          ++dir_stack.abs_count;
+          array_ensure_capacity_core(&arena_console, &dir_stack, dir_stack.abs_count, false);
+          array_push(&arena_console, &dir_stack, tmp_dir);
+        }
       } else {
         const table_key_pos tail_offset = array_bytes(&docs);
         int32_t tail_doc = (int32_t)tail_offset;
