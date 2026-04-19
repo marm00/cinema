@@ -2482,32 +2482,34 @@ static Radix_Tree *macro_tree = NULL;
 DEFINE_SETUP_FILE_PATH(char, '\\', '/', '\0', memcpy)
 DEFINE_SETUP_FILE_PATH(wchar_t, L'\\', L'/', L'\0', wmemcpy)
 #else
-static inline void setup_file_path(char *dst, const char *src, size_t size) {
+static inline void setup_file_path(char *dst, const char *src, size_t dst_size) {
   // tilde expansion, username substitution
   const bool expand = *src == '~';
+  size_t len = 0;
   if (!expand) {
-    assert(size <= CIN_MAX_PATH);
-    memcpy(dst, src, size);
+    len = strlen(src) + 1;
+    memcpy(dst, src, len);
   } else {
     const char *src_pos = src + 1;
     const bool only_root = !*(src_pos);
     const bool valid_expand = *(src_pos) == '/';
+    const bool expand_anon = only_root || valid_expand;
     char *home = NULL;
-    if (only_root || valid_expand) {
+    char *home_tail = (char *)strchr(src_pos, '/');
+    if (expand_anon) {
       home = getenv("HOME");
       if (!home) {
         log_last_error("Failed to expand '~'for path '%s'", src);
         return;
       }
     } else {
-      char *username_tail = (char *)strchr(src_pos, '/');
       struct passwd *pw = NULL;
       errno = 0;
-      if (username_tail) {
-        char tmp = *username_tail;
-        *username_tail = '\0';
+      if (home_tail) {
+        char tmp = *home_tail;
+        *home_tail = '\0';
         pw = getpwnam(src_pos);
-        *username_tail = tmp;
+        *home_tail = tmp;
       } else {
         pw = getpwnam(src_pos);
       }
@@ -2519,16 +2521,21 @@ static inline void setup_file_path(char *dst, const char *src, size_t size) {
     }
     assert(home);
     assert(*home);
-    const char *path_tail = src + (only_root ? 1 : 2);
     const size_t home_len = strlen(home);
-    const size_t path_len = *path_tail ? strlen(path_tail) : 0;
+    const size_t path_len = *home_tail ? strlen(home_tail) : 0;
     const size_t new_path_len = home_len + path_len + 1;
-    if (size < new_path_len) {
-      log_message(LOG_ERROR, "Buffer too small to expand '~': %zu < %zu", size, new_path_len);
+    if (dst_size < new_path_len) {
+      log_message(LOG_ERROR, "Buffer too small to expand '~': %zu < %zu", dst_size, new_path_len);
       return;
     }
+    len = new_path_len;
     memcpy(dst, home, home_len);
-    memcpy(dst + home_len, path_tail, path_len);
+    memcpy(dst + home_len, home_tail, path_len);
+  }
+  if (len > 1 && *(dst + len - 2) != '/') {
+    assert(len < CIN_MAX_PATH);
+    *(dst + len - 1) = '/';
+    *(dst + len) = '\0';
   }
 }
 #endif
