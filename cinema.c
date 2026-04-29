@@ -877,6 +877,7 @@ static struct REPL {
   COORD home;
   COORD cursor;
   COORD size;
+  char buf_byte;
 } repl = {0};
 
 static struct Console_Preview {
@@ -1095,6 +1096,11 @@ static inline bool term_get_cursor(COORD *cursor) {
   if (n <= 0) {
     ok = false;
   } else {
+    if (pos[0] != TERM_ESC) {
+      // consumed user input
+      repl.buf_byte = pos[0];
+      n = read(STDIN_FILENO, pos, sizeof(pos) - 1);
+    }
     pos[n] = '\0';
     ok = sscanf(pos, CSI "%hd;%hdR", &cursor->Y, &cursor->X) == 2;
   }
@@ -5815,6 +5821,10 @@ static inline int32_t term_read(uint8_t *buf, const int32_t n, bool peek) {
       if (pfds[1].revents & POLLIN) {
         term_get_cursor(&repl.cursor);
         interrupt_finish();
+        if (repl.buf_byte) {
+          chars_read = 1;
+          break;
+        }
       }
       if (pfds[0].revents & POLLIN) {
         chars_read = (int32_t)read(STDIN_FILENO, buf, (size_t)n);
@@ -6169,6 +6179,10 @@ int main(int argc, char **argv) {
     uint8_t byte;
     if (!term_read(&byte, 1, false)) {
       break;
+    }
+    if (repl.buf_byte) {
+      byte = (uint8_t)repl.buf_byte;
+      repl.buf_byte = '\0';
     }
     hide_cursor();
     const COORD size_change = term_get_size(&repl.size);
