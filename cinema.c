@@ -4103,12 +4103,14 @@ static void *mpv_listener(void *arg) {
       assert(listener_pfds_to_instances.count >= next_index);
       Instance *instance = listener_pfds_to_instances.items[next_index];
       assert(instance);
+      assert(instance->socket);
       struct pollfd new_pfd = {.fd = instance->socket, .events = POLLIN};
       array_push(&arena_iocp_thread, &listener_pfds, new_pfd);
       pthread_mutex_unlock(&listener_lock);
     }
-    uint32_t w = 0;
-    for (uint32_t i = 1; i < listener_pfds.count; ++i) {
+    const uint32_t nfds = listener_pfds.count;
+    int32_t w = -1;
+    for (uint32_t i = 1; i < nfds; ++i) {
       struct pollfd pfd = listener_pfds.items[i];
       Instance *instance = listener_pfds_to_instances.items[i - 1];
       if (instance->socket) {
@@ -4122,13 +4124,13 @@ static void *mpv_listener(void *arg) {
             // socket has been terminated, mpv likely closed manually
           }
         }
-        if (w) {
+        if (w >= 0) {
           listener_pfds.items[w] = listener_pfds.items[i];
           listener_pfds_to_instances.items[w - 1] = listener_pfds_to_instances.items[i - 1];
           ++w;
         }
       } else {
-        if (!w) w = i;
+        if (w < 0) w = (int32_t)i;
         --listener_pfds.count;
         --listener_pfds_to_instances.count;
       }
