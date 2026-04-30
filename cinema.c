@@ -872,12 +872,12 @@ static struct REPL {
   DWORD out_mode;
 #else
   struct termios modes;
+  array_struct(char) in_buf;
 #endif
   uint32_t msg_index;
   COORD home;
   COORD cursor;
   COORD size;
-  char buf_byte;
 } repl = {0};
 
 static struct Console_Preview {
@@ -1096,13 +1096,19 @@ static inline bool term_get_cursor(COORD *cursor) {
   if (n <= 0) {
     ok = false;
   } else {
-    if (pos[0] != TERM_ESC) {
-      // consumed user input
-      repl.buf_byte = pos[0];
-      n = read(STDIN_FILENO, pos, sizeof(pos) - 1);
-    }
-    pos[n] = '\0';
-    ok = sscanf(pos, CSI "%hd;%hdR", &cursor->Y, &cursor->X) == 2;
+    static const int32_t MAX_CURSOR_RETRIES = 5;
+    int32_t i = 0;
+    do {
+      char tmp_tail = pos[n];
+      pos[n] = '\0';
+      ok = sscanf(pos, CSI "%hd;%hdR", &cursor->Y, &cursor->X) == 2;
+      if (!ok) {
+        // consumed user input
+        pos[n] = tmp_tail;
+        array_extend(&arena_console, &repl.in_buf, pos, (uint32_t)n);
+        n = read(STDIN_FILENO, pos, sizeof(pos) - 1);
+      }
+    } while (!ok && i++ < MAX_CURSOR_RETRIES);
   }
 #endif
   assert(ok && "Failed to get new cursor position");
@@ -4119,6 +4125,7 @@ static void *mpv_listener(void *arg) {
         if (bytes > 0) {
           iocp_process(instance, (size_t)bytes);
         } else {
+          // socket has been terminated, mpv likely closed manually
           assert(false && "reading terminated socket");
         }
       }
@@ -5813,6 +5820,16 @@ static inline int32_t term_read(uint8_t *buf, const int32_t n, bool peek) {
                            {.fd = interrupt_pipe[0], .events = POLLIN}};
   if (!peek) {
     for (;;) {
+      if (repl.in_buf.count) {
+        chars_read = min((int32_t)repl.in_buf.count, n);
+        memcpy(buf, repl.in_buf.items, (size_t)chars_read);
+        if ((int32_t)repl.in_buf.count > chars_read) {
+          size_t in_buf_remainder = repl.in_buf.count - (uint32_t)chars_read;
+          memmove(repl.in_buf.items, repl.in_buf.items + chars_read, in_buf_remainder);
+        }
+        repl.in_buf.count -= (uint32_t)chars_read;
+        break;
+      }
       const int32_t poll_result = poll(pfds, 2, -1);
       if (poll_result <= 0) {
         log_last_error("Failed to peek");
@@ -5821,10 +5838,6 @@ static inline int32_t term_read(uint8_t *buf, const int32_t n, bool peek) {
       if (pfds[1].revents & POLLIN) {
         term_get_cursor(&repl.cursor);
         interrupt_finish();
-        if (repl.buf_byte) {
-          chars_read = 1;
-          break;
-        }
       }
       if (pfds[0].revents & POLLIN) {
         chars_read = (int32_t)read(STDIN_FILENO, buf, (size_t)n);
@@ -6179,10 +6192,6 @@ int main(int argc, char **argv) {
     uint8_t byte;
     if (!term_read(&byte, 1, false)) {
       break;
-    }
-    if (repl.buf_byte) {
-      byte = (uint8_t)repl.buf_byte;
-      repl.buf_byte = '\0';
     }
     hide_cursor();
     const COORD size_change = term_get_size(&repl.size);
