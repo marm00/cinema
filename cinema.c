@@ -3345,7 +3345,6 @@ typedef struct Instance {
   PROCESS_INFORMATION pi;
 #else
   int32_t socket;
-  int32_t listener_index;
 #endif
   HWND window;
   RECT rect;
@@ -3853,11 +3852,6 @@ static inline void mpv_kill(Instance *instance) {
   --instance->playlist->targets;
 #ifndef _WIN32
   close(instance->socket);
-  pthread_mutex_lock(&listener_lock);
-  const uint32_t fd_index = (uint32_t)instance->listener_index;
-  array_remove(&listener_pfds_to_instances, fd_index);
-  array_remove(&listener_pfds, fd_index);
-  pthread_mutex_unlock(&listener_lock);
 #endif
   Read_Buffer *buf_head = instance->buf_head;
   Read_Buffer *buf_tail = instance->buf_tail;
@@ -4089,8 +4083,7 @@ static void *mpv_listener(void *arg) {
   struct pollfd root_pfd = {.fd = listener_pipe[0], .events = POLLIN};
   array_push(&arena_iocp_thread, &listener_pfds, root_pfd);
   for (;;) {
-    const nfds_t nfds = (nfds_t)listener_pfds.count;
-    const int32_t poll_result = poll(listener_pfds.items, nfds, -1);
+    const int32_t poll_result = poll(listener_pfds.items, (nfds_t)listener_pfds.count, -1);
     if (poll_result == 0) {
       log_message(LOG_ERROR, "Listener thread timed out polling");
       assert(false);
@@ -4110,24 +4103,34 @@ static void *mpv_listener(void *arg) {
       assert(listener_pfds_to_instances.count >= next_index);
       Instance *instance = listener_pfds_to_instances.items[next_index];
       assert(instance);
-      instance->listener_index = (int32_t)next_index;
       struct pollfd new_pfd = {.fd = instance->socket, .events = POLLIN};
       array_push(&arena_iocp_thread, &listener_pfds, new_pfd);
       pthread_mutex_unlock(&listener_lock);
     }
-    for (nfds_t i = 1; i < nfds; ++i) {
+    uint32_t w = 0;
+    for (uint32_t i = 1; i < listener_pfds.count; ++i) {
       struct pollfd pfd = listener_pfds.items[i];
-      if (pfd.revents & POLLIN) {
-        Instance *instance = listener_pfds_to_instances.items[i - 1];
-        char *start = instance->buf_tail->buf + instance->buf_tail->bytes;
-        const size_t to_read = sizeof(instance->buf_tail->buf) - instance->buf_tail->bytes;
-        const ssize_t bytes = read(pfd.fd, start, to_read);
-        if (bytes > 0) {
-          iocp_process(instance, (size_t)bytes);
-        } else {
-          // socket has been terminated, mpv likely closed manually
-          assert(false && "reading terminated socket");
+      Instance *instance = listener_pfds_to_instances.items[i - 1];
+      if (instance->socket) {
+        if (pfd.revents & POLLIN) {
+          char *start = instance->buf_tail->buf + instance->buf_tail->bytes;
+          const size_t to_read = sizeof(instance->buf_tail->buf) - instance->buf_tail->bytes;
+          const ssize_t bytes = read(pfd.fd, start, to_read);
+          if (bytes > 0) {
+            iocp_process(instance, (size_t)bytes);
+          } else {
+            // socket has been terminated, mpv likely closed manually
+          }
         }
+        if (w) {
+          listener_pfds.items[w] = listener_pfds.items[i];
+          listener_pfds_to_instances.items[w - 1] = listener_pfds_to_instances.items[i - 1];
+          ++w;
+        }
+      } else {
+        if (!w) w = i;
+        --listener_pfds.count;
+        --listener_pfds_to_instances.count;
       }
     }
   }
@@ -4344,7 +4347,7 @@ static inline void chat_kill(void) {
 #ifdef _WIN32
   PostMessageW(chat.window, WM_CLOSE, 0, 0);
 #else
-  kill(chat.pid, SIGTERM);
+  if (chat.pid) kill(chat.pid, SIGTERM);
 #endif
 }
 
