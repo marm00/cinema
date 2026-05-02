@@ -1099,13 +1099,18 @@ static inline bool term_get_cursor(COORD *cursor) {
     static const int32_t MAX_CURSOR_RETRIES = 5;
     int32_t i = 0;
     do {
-      char tmp_tail = pos[n];
       pos[n] = '\0';
-      ok = sscanf(pos, CSI "%hd;%hdR", &cursor->Y, &cursor->X) == 2;
+      const char *p = pos;
+      const char *candidate = strchr(p, TERM_ESC);
+      if (candidate && p != candidate) {
+        ptrdiff_t diff = candidate - p;
+        array_extend(&arena_console, &repl.in_buf, p, (uint32_t)diff);
+        p = candidate;
+      }
+      ok = sscanf(p, CSI "%hd;%hdR", &cursor->Y, &cursor->X) == 2;
       if (!ok) {
-        // consumed user input
-        pos[n] = tmp_tail;
-        array_extend(&arena_console, &repl.in_buf, pos, (uint32_t)n);
+        size_t remainder = strlen(p);
+        array_extend(&arena_console, &repl.in_buf, p, (uint32_t)remainder);
         n = read(STDIN_FILENO, pos, sizeof(pos) - 1);
       }
     } while (!ok && i++ < MAX_CURSOR_RETRIES);
