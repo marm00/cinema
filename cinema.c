@@ -18,7 +18,10 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+#ifdef _WIN32
 #define _CRT_RAND_S
+#define _CRT_SECURE_NO_DEPRECATE
+#endif
 
 #include <assert.h>
 #include <inttypes.h>
@@ -27,17 +30,38 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <wchar.h>
 
-#if defined(_WIN32)
+#ifdef _WIN32
+#include <wchar.h>
 #include <windows.h>
 #pragma comment(lib, "user32")
 #pragma comment(lib, "advapi32")
+#else
+#include <ctype.h>
+#include <dirent.h>
+#include <dlfcn.h>
+#include <errno.h>
+#include <glob.h>
+#include <poll.h>
+#include <pthread.h>
+#include <pwd.h>
+#include <signal.h>
+#include <stdarg.h>
+#include <stddef.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <sys/param.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
+#include <termios.h>
+#include <time.h>
+#include <unistd.h>
 #endif
 
 #include "libsais.h"
 
-#if defined(CIN_OPENMP)
+#ifdef CIN_OPENMP
 #include <omp.h>
 #endif
 
@@ -49,7 +73,7 @@ typedef enum {
   LOG_TRACE
 } Cin_Log_Level;
 
-#if !defined(LOG_LEVEL)
+#ifndef LOG_LEVEL
 #define LOG_LEVEL LOG_WARNING
 #endif
 
@@ -57,23 +81,27 @@ static const Cin_Log_Level GLOBAL_LOG_LEVEL = LOG_LEVEL;
 static const char *LOG_LEVELS[LOG_TRACE + 1] = {"ERROR", "WARNING", "INFO", "DEBUG", "TRACE"};
 
 static struct Cin_System {
-  // Assuming large pages is the default, design around always committing
-  DWORD alloc_type;
   size_t page_size;
+  uint32_t alloc_type;
   int32_t threads;
 } cin_system = {
-    .alloc_type = MEM_RESERVE | MEM_COMMIT,
+#ifdef _WIN32
     .page_size = 4096,
-    .threads = 1};
+    .alloc_type = MEM_RESERVE | MEM_COMMIT,
+    .threads = 1
+#else
+    .page_size = 4096,
+    .alloc_type = MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE,
+    .threads = 1
+#endif
+};
 
 static inline bool init_os(void) {
+#ifdef _WIN32
   SYSTEM_INFO system;
   GetSystemInfo(&system);
   cin_system.page_size = (size_t)system.dwPageSize;
   cin_system.threads = (int32_t)system.dwNumberOfProcessors;
-#if defined(CIN_OPENMP)
-  omp_set_num_threads(cin_system.threads);
-#endif
   HANDLE token;
   if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES, &token)) {
     LUID luid;
@@ -88,8 +116,32 @@ static inline bool init_os(void) {
     }
     CloseHandle(token);
   }
+#else
+  cin_system.threads = (int32_t)sysconf(_SC_NPROCESSORS_ONLN);
+#endif
+#ifdef CIN_OPENMP
+  omp_set_num_threads(cin_system.threads);
+#endif
   return true;
 }
+
+#ifndef _WIN32
+#define min(a, b) (((a) < (b)) ? (a) : (b))
+#define max(a, b) (((a) > (b)) ? (a) : (b))
+typedef struct COORD {
+  short X;
+  short Y;
+} COORD;
+
+typedef struct RECT {
+  ssize_t right;
+  ssize_t bottom;
+  ssize_t left;
+  ssize_t top;
+} RECT;
+
+typedef unsigned long HWND;
+#endif
 
 #define align(a, b) (((a) + (b) - 1) & (~((b) - 1)))
 #define CIN_PTR ((uint32_t)__SIZEOF_POINTER__)
@@ -105,6 +157,7 @@ static inline bool init_os(void) {
 #define CIN_ARENA_CAP megabytes(2)
 #define CIN_ARENA_BYTES align(sizeof(Arena), 64)
 #define cin_ispow2(n) ((n) && ((n) & ((n) - 1)) == 0)
+#define cin_strlen(str) (sizeof((str)) / sizeof(*(str)) - 1)
 
 static inline uint32_t log2_floor(uint32_t n) {
   assert(n > 0U && "0 is undefined behavior");
@@ -171,14 +224,26 @@ static inline Arena_Chunk *arena_chunk_init(Arena *arena, uint32_t bytes) {
   assert(arena);
   assert(cin_system.page_size <= CIN_ARENA_MAX);
   const size_t dwSize = align(bytes, cin_system.page_size);
+#ifdef _WIN32
   Arena_Chunk *chunk = VirtualAlloc(NULL, dwSize, cin_system.alloc_type, PAGE_READWRITE);
   if (!chunk) {
-    DWORD code = GetLastError();
-    printf("Cinema crashed with code %lu trying to use VirtualAlloc", code);
+    uint32_t code = GetLastError();
+    printf("Cinema crashed with code %u trying to allocate memory with VirtualAlloc", code);
     // https://learn.microsoft.com/en-us/windows/win32/debug/system-error-codes
     assert(false);
     exit(1);
   }
+#else
+  Arena_Chunk *chunk = mmap(NULL, dwSize, PROT_READ | PROT_WRITE,
+                            (int32_t)cin_system.alloc_type, -1, 0);
+  if (chunk == MAP_FAILED) {
+    printf("Cinema crashed trying to allocate memory with mmap: %s", strerror(errno));
+    // https://kernel.googlesource.com/pub/scm/linux/kernel/git/nico/archive/+/v0.97/include/linux/errno.h
+    assert(false);
+    exit(1);
+  }
+  madvise(chunk, dwSize, MADV_HUGEPAGE);
+#endif
   chunk->prev = arena->curr;
   chunk->count = CIN_ARENA_HEADER;
   chunk->capacity = (uint32_t)dwSize;
@@ -260,7 +325,7 @@ static inline void arena_slice_reinit(Arena *arena, Arena_Slice *slice, uint32_t
   if (block) {
     arena->free_list[class] = block->next;
     slice->items = (uint8_t *)block;
-    if (zero) ZeroMemory(slice->items, slice->size);
+    if (zero) memset(slice->items, 0, slice->size);
   } else {
     slice->items = arena_bump(arena, slice->size, alignment);
   }
@@ -385,7 +450,7 @@ static inline void arena_slice_free(Arena *arena, Arena_Slice *slice) {
       (c)->free_list = (c)->free_list->next_free;                  \
       if ((zero)) {                                                \
         void *_next = (out_node)->next;                            \
-        ZeroMemory((out_node), (c)->cache_node_bytes);             \
+        memset((out_node), 0, (c)->cache_node_bytes);              \
         (out_node)->next = _next;                                  \
       }                                                            \
     } else {                                                       \
@@ -562,16 +627,9 @@ static_assert(CIN_PTR == 8 ? (CIN_ARRAY_SIZE == 24) : true, "bytes updated (poss
 #define array_extend_zero(arena, a, new_items, n) \
   array_extend_core((arena), (a), (new_items), (n), true)
 
-#define array_wextend(arena, a, new_items, n)           \
-  do {                                                  \
-    array_reserve((arena), (a), (n));                   \
-    wmemcpy((a)->items + (a)->count, (new_items), (n)); \
-    (a)->count += (n);                                  \
-  } while (0)
-
-#define array_wsextend(arena, a, new_items) \
-  array_wextend((arena), (a), (new_items),  \
-                sizeof((new_items)) / sizeof(*((new_items))) - 1);
+#define array_sextend(arena, a, new_items) \
+  array_extend((arena), (a), (new_items),  \
+               sizeof((new_items)) / sizeof(*((new_items))) - 1)
 
 #define array_splice(arena, a, i, new_items, n)                       \
   do {                                                                \
@@ -582,15 +640,6 @@ static_assert(CIN_PTR == 8 ? (CIN_ARRAY_SIZE == 24) : true, "bytes updated (poss
             ((a)->count - (i)) * sizeof(*(a)->items));                \
     memcpy((a)->items + (i), (new_items), (n) * sizeof(*(a)->items)); \
     (a)->count += (n);                                                \
-  } while (0)
-
-#define array_wsplice(arena, a, i, new_items, n)                          \
-  do {                                                                    \
-    assert((i) <= (a)->count);                                            \
-    array_reserve((arena), (a), (n));                                     \
-    wmemmove((a)->items + (i) + (n), (a)->items + (i), (a)->count - (i)); \
-    wmemcpy((a)->items + (i), (new_items), (n));                          \
-    (a)->count += (n);                                                    \
   } while (0)
 
 #define array_insert(arena, a, i, new_item)              \
@@ -606,15 +655,15 @@ static_assert(CIN_PTR == 8 ? (CIN_ARRAY_SIZE == 24) : true, "bytes updated (poss
     (a)->count++;                                        \
   } while (0)
 
-#define array_winsert(arena, a, i, new_item)                              \
-  do {                                                                    \
-    assert((i) <= (a)->count);                                            \
-    array_reserve((arena), (a), 1);                                       \
-    if ((i) < (a)->count) {                                               \
-      wmemmove((a)->items + (i) + 1, (a)->items + (i), (a)->count - (i)); \
-    }                                                                     \
-    (a)->items[(i)] = (new_item);                                         \
-    (a)->count++;                                                         \
+#define array_remove(a, i)                               \
+  do {                                                   \
+    assert((i) <= (a)->count);                           \
+    if ((i) < (a)->count) {                              \
+      memmove((a)->items + (i) + 1,                      \
+              (a)->items + (i),                          \
+              ((a)->count - (i)) * sizeof(*(a)->items)); \
+    }                                                    \
+    --(a)->count;                                        \
   } while (0)
 
 #define array_pop(a)    \
@@ -672,463 +721,50 @@ static_assert(CIN_PTR == 8 ? (CIN_ARRAY_SIZE == 24) : true, "bytes updated (poss
     }                                               \
   } while (0)
 
+#ifdef _WIN32
+#define array_wextend(arena, a, new_items, n)           \
+  do {                                                  \
+    array_reserve((arena), (a), (n));                   \
+    wmemcpy((a)->items + (a)->count, (new_items), (n)); \
+    (a)->count += (n);                                  \
+  } while (0)
+
+#define array_wsextend(arena, a, new_items) \
+  array_wextend((arena), (a), (new_items),  \
+                sizeof((new_items)) / sizeof(*((new_items))) - 1)
+
+#define array_wsplice(arena, a, i, new_items, n)                          \
+  do {                                                                    \
+    assert((i) <= (a)->count);                                            \
+    array_reserve((arena), (a), (n));                                     \
+    wmemmove((a)->items + (i) + (n), (a)->items + (i), (a)->count - (i)); \
+    wmemcpy((a)->items + (i), (new_items), (n));                          \
+    (a)->count += (n);                                                    \
+  } while (0)
+
+#define array_winsert(arena, a, i, new_item)                              \
+  do {                                                                    \
+    assert((i) <= (a)->count);                                            \
+    array_reserve((arena), (a), 1);                                       \
+    if ((i) < (a)->count) {                                               \
+      wmemmove((a)->items + (i) + 1, (a)->items + (i), (a)->count - (i)); \
+    }                                                                     \
+    (a)->items[(i)] = (new_item);                                         \
+    (a)->count++;                                                         \
+  } while (0)
+#endif
+
 static Arena arena_console = {0};
 static Arena arena_docs = {0};
 static Arena arena_io = {0};
 static Arena arena_iocp_thread = {0};
 
-// https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
-// A path can have 248 "characters" (260 - 12 = 248)
-// with 12 reserved for 8.3 file name.
-// This refers to a WCHAR sequence (UTF-16 code units),
-// i.e., wchar_t, such that max bytes = (248 * 2) = 496
-// of UTF-16 data or (260 * 2) = 520 upper bound
-// This is different from the full storage since
-// a surrogate pair character can hold 2 wchar_t or
-// (260 * 2 * 2) = 1040 bytes, exceeding the bound
-// if many/all characters need 2 code units
-// The cFileName from winapi uses a wchar_t buffer of
-// 260 (MAX_PATH) so surrogate pairs get truncated
-#define CIN_MAX_PATH MAX_PATH
-#define CIN_MAX_PATH_BYTES (MAX_PATH * 4)
-#define CIN_MAX_WRITABLE_PATH (MAX_PATH - 12)
-#define CIN_MAX_WRITABLE_PATH_BYTES ((MAX_PATH - 12) * 4)
-#define CIN_COMMAND_PROMPT_LIMIT 8191
-#define CIN_MAX_LOG_MESSAGE 1024
+array_struct(uint8_t) utf8_buf = {0};
 
-typedef struct Console_Message {
-  array_struct_members(wchar_t);
-  struct Console_Message *prev;
-  struct Console_Message *next;
-} Console_Message;
-
-#define CIN_CM_CAP 64
-
-static Console_Message *create_console_message(void) {
-  Console_Message *msg = arena_bump_T1(&arena_console, Console_Message);
-  assert(msg);
-  array_init(&arena_console, msg, CIN_CM_CAP);
-  msg->next = NULL;
-  msg->prev = NULL;
-  return msg;
-}
-
-static struct REPL {
-  Console_Message *msg;
-  HANDLE out;
-  HANDLE in;
-  HANDLE window;
-  DWORD msg_index;
-  COORD home;
-  CONSOLE_CURSOR_INFO cursor_info;
-  DWORD dwSize_X;
-  DWORD _filled;
-  DWORD in_mode;
-  BOOL viewport_bound;
-} repl = {0};
-
-static struct Console_Preview {
-  array_struct_members(wchar_t);
-  DWORD prev_len;
-  DWORD len;
-  COORD pos;
-} preview = {0};
-
-static array_struct(wchar_t) wwrite_buf = {0};
-static array_struct(char) write_buf = {0};
-
-static inline void wswrite(const wchar_t *str) {
-  assert(wcslen(str) <= SIZE_MAX && "Corrupted string");
-  const size_t len = wcslen(str);
-  WriteConsoleW(repl.out, str, (DWORD)len, NULL, NULL);
-}
-
-static inline void wwrite(const wchar_t *str, DWORD len) {
-  WriteConsoleW(repl.out, str, len, NULL, NULL);
-}
-
-static void wwritef(const wchar_t *format, ...) {
-  va_list args;
-  va_list args_dup;
-  va_start(args, format);
-  va_copy(args_dup, args);
-  const int32_t len_i32 = _vscwprintf(format, args);
-  assert(len_i32 >= 0);
-  const uint32_t len = (uint32_t)len_i32;
-  va_end(args);
-  array_resize(&arena_console, &wwrite_buf, len + 1);
-  _vsnwprintf_s(wwrite_buf.items, len + 1, len, format, args_dup);
-  va_end(args_dup);
-  WriteConsoleW(repl.out, wwrite_buf.items, len, NULL, NULL);
-}
-
-static void wvwritef(const wchar_t *format, va_list args) {
-  va_list args_dup;
-  va_copy(args_dup, args);
-  const int32_t len_i32 = _vscwprintf(format, args_dup);
-  assert(len_i32 >= 0);
-  const uint32_t len = (uint32_t)len_i32;
-  va_end(args_dup);
-  array_resize(&arena_console, &wwrite_buf, len + 1);
-  _vsnwprintf_s(wwrite_buf.items, len + 1, len, format, args);
-  WriteConsoleW(repl.out, wwrite_buf.items, len, NULL, NULL);
-}
-
-static inline void swrite(const char *str) {
-  assert(strlen(str) <= SIZE_MAX && "Corrupted string");
-  const size_t len = strlen(str);
-  WriteConsoleA(repl.out, str, (DWORD)len, NULL, NULL);
-}
-
-static inline void write(const char *str, DWORD len) {
-  WriteConsoleA(repl.out, str, len, NULL, NULL);
-}
-
-static void writef(const char *format, ...) {
-  va_list args;
-  va_list args_dup;
-  va_start(args, format);
-  va_copy(args_dup, args);
-  const int32_t len_i32 = _vscprintf(format, args);
-  assert(len_i32 >= 0);
-  const uint32_t len = (uint32_t)len_i32;
-  va_end(args);
-  array_resize(&arena_console, &write_buf, len + 1);
-  _vsnprintf_s(write_buf.items, len + 1, len, format, args_dup);
-  va_end(args_dup);
-  WriteConsoleA(repl.out, write_buf.items, len, NULL, NULL);
-}
-
-static void vwritef(const char *format, va_list args) {
-  va_list args_dup;
-  va_copy(args_dup, args);
-  const int32_t len_i32 = _vscprintf(format, args_dup);
-  assert(len_i32 >= 0);
-  const uint32_t len = (uint32_t)len_i32;
-  va_end(args_dup);
-  array_resize(&arena_console, &write_buf, len + 1);
-  _vsnprintf_s(write_buf.items, len + 1, len, format, args);
-  WriteConsoleA(repl.out, write_buf.items, len, NULL, NULL);
-}
-
-#define cin_strlen(str) (sizeof((str)) / sizeof(*(str)) - 1)
-#define CIN_SPACE 0x20
-#define PREFIX_TOKEN L'>'
-#define PREFIX 2
-#define PREFIX_STR L"\r> "
-#define PREFIX_ABS L">"
-#define PREFIX_STRLEN cin_strlen(PREFIX_STR)
-#define PREFIX_ABSLEN cin_strlen(PREFIX_ABS)
-#define WCRLF L"\r\n"
-#define WCRLF_LEN 2
-#define WCR L"\r"
-#define WCR_LEN 1
-#define CR "\r"
-#define CR_LEN 1
-#define CRLF "\r\n"
-
-static inline void hide_cursor(void) {
-  repl.cursor_info.bVisible = false;
-  SetConsoleCursorInfo(repl.out, &repl.cursor_info);
-}
-
-static inline void show_cursor(void) {
-  repl.cursor_info.bVisible = true;
-  SetConsoleCursorInfo(repl.out, &repl.cursor_info);
-}
-
-static inline SHORT index_x(DWORD index, DWORD dwSize_X) {
-  assert(index % dwSize_X <= SHRT_MAX);
-  return (SHORT)(index % dwSize_X);
-}
-
-static inline SHORT index_x_repl(DWORD index) {
-  return index_x(PREFIX + index, repl.dwSize_X);
-}
-
-static inline SHORT index_y(DWORD index, DWORD dwSize_X) {
-  assert(index / dwSize_X <= SHRT_MAX);
-  return (SHORT)(index / dwSize_X);
-}
-
-static inline SHORT index_y_repl(DWORD index) {
-  return repl.home.Y + index_y(PREFIX + index, repl.dwSize_X);
-}
-
-static inline COORD index_to_cursor(DWORD index, DWORD dwSize_X) {
-  return (COORD){.X = index_x(index, dwSize_X), .Y = index_y(index, dwSize_X)};
-}
-
-static inline COORD index_to_cursor_repl(DWORD index) {
-  return (COORD){.X = index_x_repl(index), .Y = index_y_repl(index)};
-}
-
-static inline DWORD cursor_to_index(COORD cursor, DWORD dwSize_X) {
-  assert(cursor.X >= 0);
-  assert(cursor.Y >= 0);
-  return (DWORD)cursor.X + ((DWORD)cursor.Y * dwSize_X);
-}
-
-static inline COORD curr_cursor(void) {
-  return index_to_cursor_repl(repl.msg_index);
-}
-
-static inline COORD tail_cursor(void) {
-  return index_to_cursor_repl(repl.msg->count);
-}
-
-static inline COORD home_cursor(void) {
-  return repl.home;
-}
-
-static inline void cursor_home(void) {
-  SetConsoleCursorPosition(repl.out, repl.home);
-}
-
-static inline void cursor_curr(void) {
-  SetConsoleCursorPosition(repl.out, curr_cursor());
-}
-
-static inline void cursor_tail(void) {
-  SetConsoleCursorPosition(repl.out, tail_cursor());
-}
-
-static inline void cursor_set(COORD cursor) {
-  SetConsoleCursorPosition(repl.out, cursor);
-}
-
-static inline void clear_tail(DWORD count) {
-  FillConsoleOutputCharacterW(repl.out, CIN_SPACE, count, tail_cursor(), &repl._filled);
-}
-
-static inline void clear_full(void) {
-  FillConsoleOutputCharacterW(repl.out, CIN_SPACE, repl.msg->count, repl.home, &repl._filled);
-}
-
-static inline void clear_preview(SHORT pos) {
-  assert(pos >= 0);
-  assert((DWORD)pos < repl.dwSize_X);
-  preview.pos.X = pos;
-  const DWORD leftover = preview.len - (DWORD)pos;
-  FillConsoleOutputCharacterW(repl.out, CIN_SPACE, leftover, preview.pos, &repl._filled);
-}
-
-static inline void set_preview_pos(SHORT y) {
-  assert(y > 0);
-  preview.pos.X = 0;
-  preview.pos.Y = y;
-}
-
-static inline bool ctrl_on(const PINPUT_RECORD input) {
-  return input->Event.KeyEvent.dwControlKeyState & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED);
-}
-
-static inline BOOL GetConsoleScreenBufferInfo_safe(HANDLE hConsoleOutput, PCONSOLE_SCREEN_BUFFER_INFO lpConsoleScreenBufferInfo) {
-  if (!GetConsoleScreenBufferInfo(hConsoleOutput, lpConsoleScreenBufferInfo)) return FALSE;
-  if (repl.viewport_bound) return TRUE;
-  const SHORT cur_y = lpConsoleScreenBufferInfo->dwCursorPosition.Y;
-  const SHORT max_y = lpConsoleScreenBufferInfo->dwSize.Y - 1;
-  const DWORD max_x = (DWORD)lpConsoleScreenBufferInfo->dwSize.X;
-  if (cur_y < max_y) return TRUE;
-  HANDLE fresh_buffer = CreateConsoleScreenBuffer(GENERIC_READ | GENERIC_WRITE,
-                                                  FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                                  NULL, CONSOLE_TEXTMODE_BUFFER, NULL);
-  if (fresh_buffer == INVALID_HANDLE_VALUE) return FALSE;
-  if (!SetConsoleScreenBufferSize(fresh_buffer, lpConsoleScreenBufferInfo->dwSize)) return FALSE;
-  if (!SetConsoleActiveScreenBuffer(fresh_buffer)) return FALSE;
-  DWORD mode;
-  GetConsoleMode(fresh_buffer, &mode);
-  SetConsoleMode(fresh_buffer, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
-  DWORD written;
-  WriteConsoleA(fresh_buffer, "\x1b[2J\x1b[3J\x1b[H", 12, &written, NULL);
-  SetConsoleMode(fresh_buffer, mode);
-  repl.out = fresh_buffer;
-  repl.dwSize_X = max_x;
-  SetConsoleCursorPosition(repl.out, (COORD){.X = 0, .Y = 0});
-  repl.home.Y = 0;
-  preview.pos.Y = 1;
-  const SHORT msg_tail = index_y_repl(repl.msg->count) + 1;
-  if (msg_tail >= max_y) {
-    repl.msg_index = 0;
-    array_clear(repl.msg);
-    wwritef(L"NOTE: Input message too large (tail at line %hd >= console"
-            " screen buffer height limit %hd). Cinema resolved this by fully"
-            " clearing your input. Your console terminal supports roughly"
-            " %lu characters (cells)." WCRLF,
-            msg_tail, max_y, max_x * (DWORD)max_y);
-  }
-  static bool notify_buffer_refresh = true;
-  if (notify_buffer_refresh) {
-    wwritef(L"NOTE: Console screen buffer height limit reached (%hd>=%hd)."
-            " Cinema resolved this by activating a fresh buffer. The content of"
-            " the previous buffer will be available once Cinema is closed."
-            " If you want to prevent this situation in the future, increase"
-            " the screen buffer size (height) of your console." WCRLF,
-            cur_y, max_y);
-  } else {
-    wwritef(L"Cut off? Increase console size and retry");
-  }
-  notify_buffer_refresh = false;
-  if (!GetConsoleScreenBufferInfo(repl.out, lpConsoleScreenBufferInfo)) return FALSE;
-  repl.home.Y = lpConsoleScreenBufferInfo->dwCursorPosition.Y;
-  const SHORT preview_shift = (SHORT)((repl.msg->count + PREFIX) / max_x) + 1;
-  set_preview_pos(repl.home.Y + preview_shift);
-  if (!FlushConsoleInputBuffer(repl.in)) return FALSE;
-  return TRUE;
-}
-
-static inline int32_t lcps_from(const uint8_t *a, const uint8_t *b, int32_t start) {
-  a += start;
-  b += start;
-  int32_t matching = start;
-  while (*a && *b && *(a++) == *(b++)) ++matching;
-  return matching;
-}
-
-static inline int32_t lcps(const uint8_t *a, const uint8_t *b) {
-  return lcps_from(a, b, 0);
-}
-
-static inline bool cin_isloweralpha(char c) {
-  return c <= 'z' && c >= 'a';
-}
-
-static inline bool cin_lower_isalpha(char *out) {
-  if (*out <= 'Z' && *out >= 'A') {
-    *out += ('a' - 'A');
-    return true;
-  }
-  return cin_isloweralpha(*out);
-}
-
-static inline bool cin_isnum(char c) {
-  return c <= '9' && c >= '0';
-}
-
-static inline wchar_t cin_wlower(wchar_t c) {
-  if (c <= L'Z' && c >= 'A') return c + (L'a' - L'A');
-  if (c < 128) return c;
-  wchar_t unicode = c;
-  LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE, &c, 1, &unicode, 1, NULL, NULL, 0);
-  return unicode;
-}
-
-static inline bool cin_wisloweralpha(wchar_t c) {
-  return c <= L'z' && c >= L'a';
-}
-
-static inline bool cin_wisnum(wchar_t c) {
-  return c <= L'9' && c >= L'0';
-}
-
-static inline bool cin_wisnum_1based(wchar_t c) {
-  return c <= L'9' && c >= L'1';
-}
-
-static inline void cin_getnum(const char **p, int64_t *out) {
-  *out = 0;
-  while (cin_isnum(**p)) {
-    *out *= 10;
-    *out += **p - '0';
-    ++*p;
-  }
-}
-
-static void log_preview(void) {
-  if (!preview.count) return;
-  const DWORD msg_len = preview.count;
-  preview.len = min(preview.count, repl.dwSize_X);
-  assert(wmemchr(preview.items, PREFIX_TOKEN, preview.len) == NULL);
-  // set cursor to scroll down (and prep next write if < repl.dwSize_X)
-  SetConsoleCursorPosition(repl.out, preview.pos);
-  if (msg_len < repl.dwSize_X) {
-    wwrite(preview.items, msg_len);
-  } else if (msg_len > repl.dwSize_X) {
-    assert(msg_len > 3);
-    const DWORD tmp1_pos = repl.dwSize_X - 1;
-    const DWORD tmp2_pos = repl.dwSize_X - 2;
-    const DWORD tmp3_pos = repl.dwSize_X - 3;
-    const wchar_t tmp1 = preview.items[tmp1_pos];
-    const wchar_t tmp2 = preview.items[tmp2_pos];
-    const wchar_t tmp3 = preview.items[tmp3_pos];
-    preview.items[tmp1_pos] = '.';
-    preview.items[tmp2_pos] = '.';
-    preview.items[tmp3_pos] = '.';
-    WriteConsoleOutputCharacterW(repl.out, preview.items, preview.len, preview.pos, &repl._filled);
-    preview.items[tmp1_pos] = tmp1;
-    preview.items[tmp2_pos] = tmp2;
-    preview.items[tmp3_pos] = tmp3;
-  } else {
-    WriteConsoleOutputCharacterW(repl.out, preview.items, preview.len, preview.pos, &repl._filled);
-  }
-  FillConsoleOutputAttribute(repl.out, FOREGROUND_INTENSITY, preview.len, preview.pos, &repl._filled);
-  cursor_curr();
-  preview.prev_len = preview.len;
-}
-
-static inline void rewrite_post_log(void) {
-  CONSOLE_SCREEN_BUFFER_INFO buffer_info;
-  GetConsoleScreenBufferInfo_safe(repl.out, &buffer_info);
-  repl.dwSize_X = (DWORD)buffer_info.dwSize.X;
-  assert(repl.msg->count + PREFIX <= SHRT_MAX && "SHORT overflow");
-  assert(buffer_info.dwCursorPosition.Y < SHRT_MAX && "SHORT overflow");
-  const SHORT tail_x = buffer_info.dwCursorPosition.X;
-  if (repl.msg->count + PREFIX > (DWORD)tail_x) {
-    const DWORD leftover = repl.msg->count + PREFIX - (DWORD)tail_x;
-    FillConsoleOutputCharacterW(repl.out, CIN_SPACE, leftover, buffer_info.dwCursorPosition, &repl._filled);
-  }
-  repl.home.Y += buffer_info.dwCursorPosition.Y - repl.home.Y + 1;
-  const SHORT y_diff = preview.pos.Y - repl.home.Y;
-  if (y_diff == -1) {
-    if (preview.len > (DWORD)tail_x) clear_preview(tail_x);
-  } else if (y_diff == 0) {
-    const DWORD x = min(repl.msg->count + PREFIX, repl.dwSize_X);
-    if (preview.len > x && x < repl.dwSize_X) clear_preview((SHORT)x);
-  } else if (y_diff > 0) {
-    const SHORT x = index_x_repl(repl.msg->count);
-    if (preview.len > (DWORD)x) clear_preview(x);
-  }
-  wwrite(WCRLF, WCRLF_LEN);
-  if (repl.viewport_bound) {
-    wwrite(WCRLF, WCRLF_LEN);
-    CONSOLE_SCREEN_BUFFER_INFO post_scroll_info;
-    GetConsoleScreenBufferInfo(repl.out, &post_scroll_info);
-    repl.home.Y = post_scroll_info.dwCursorPosition.Y - 1;
-    SetConsoleCursorPosition(repl.out, (COORD){.X = 0, .Y = repl.home.Y});
-  }
-  wwrite(PREFIX_STR, PREFIX_STRLEN);
-  wwrite(repl.msg->items, repl.msg->count);
-  const SHORT preview_offset = (SHORT)((repl.msg->count + PREFIX) / repl.dwSize_X) + 1;
-  const SHORT preview_line = repl.home.Y + preview_offset;
-  set_preview_pos(preview_line);
-  log_preview();
-  show_cursor();
-}
-
-static CRITICAL_SECTION log_lock;
-
-static void log_message(Cin_Log_Level level, const char *message, ...) {
-  if (level > GLOBAL_LOG_LEVEL) {
-    return;
-  }
-  EnterCriticalSection(&log_lock);
-  hide_cursor();
-  cursor_home();
-  writef(CR "[%s] ", LOG_LEVELS[level]);
-  va_list args;
-  va_start(args, message);
-  vwritef(message, args);
-  rewrite_post_log();
-  va_end(args);
-  LeaveCriticalSection(&log_lock);
-}
-
+#ifdef _WIN32
 array_define(UTF16_Buffer, wchar_t);
-array_define(UTF8_Buffer, uint8_t);
-
 static UTF16_Buffer utf16_buf_raw = {0};
 static UTF16_Buffer utf16_buf_norm = {0};
-static UTF8_Buffer utf8_buf = {0};
 
 static inline int32_t utf16_to_utf8(const wchar_t *wstr) {
   // https://learn.microsoft.com/en-us/windows/win32/api/stringapiset/nf-stringapiset-widechartomultibyte
@@ -1179,41 +815,625 @@ static inline int32_t utf8_to_utf16_norm(const char *str) {
   assert(len);
   return utf16_norm(utf16_buf_raw.items);
 }
+#endif
 
+static inline int32_t utf8_norm(char *str) {
+  // does not include null-terminator in return value length
+  int32_t len = 0;
+  for (; *str; ++len, ++str) *str = (char)tolower(*str);
+  return len;
+}
+
+#ifdef _WIN32
+// https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
+// A path can have 248 "characters" (260 - 12 = 248)
+// with 12 reserved for 8.3 file name.
+// This refers to a WCHAR sequence (UTF-16 code units),
+// i.e., wchar_t, such that max bytes = (248 * 2) = 496
+// of UTF-16 data or (260 * 2) = 520 upper bound
+// This is different from the full storage since
+// a surrogate pair character can hold 2 wchar_t or
+// (260 * 2 * 2) = 1040 bytes, exceeding the bound
+// if many/all characters need 2 code units
+// The cFileName from winapi uses a wchar_t buffer of
+// 260 (MAX_PATH) so surrogate pairs get truncated
+#define CIN_MAX_PATH MAX_PATH
+#define CIN_MAX_PATH_BYTES (MAX_PATH * 4)
+#else
+#define CIN_MAX_PATH PATH_MAX
+#define CIN_MAX_PATH_BYTES CIN_MAX_PATH
+#endif
+
+typedef struct Console_Message {
+  array_struct_members(char);
+  struct Console_Message *prev;
+  struct Console_Message *next;
+} Console_Message;
+
+#define CIN_CM_CAP 64
+
+static Console_Message *create_console_message(void) {
+  Console_Message *msg = arena_bump_T1(&arena_console, Console_Message);
+  assert(msg);
+  array_init(&arena_console, msg, CIN_CM_CAP);
+  msg->next = NULL;
+  msg->prev = NULL;
+  return msg;
+}
+
+static struct REPL {
+  Console_Message *msg;
+  Console_Message *msg_tail;
+#ifdef _WIN32
+  HANDLE out;
+  HANDLE in;
+  DWORD in_mode;
+  DWORD out_mode;
+#else
+  struct termios modes;
+  array_struct(char) in_buf;
+#endif
+  uint32_t msg_index;
+  COORD home;
+  COORD cursor;
+  COORD size;
+} repl = {0};
+
+static struct Console_Preview {
+  array_struct_members(char);
+  uint32_t len;
+  COORD pos;
+} preview = {0};
+
+static array_struct(char) write_buf = {0};
+
+#ifdef _WIN32
+static inline void cin_wwrite_utf8(const char *str, uint32_t len) {
+  assert(len);
+  const int32_t len_i32 = utf8_to_utf16_nraw(str, (int32_t)len);
+  assert(len_i32 > 0);
+  wchar_t *utf16_str = utf16_buf_raw.items;
+  WriteConsoleW(repl.out, utf16_str, (uint32_t)len_i32, NULL, NULL);
+}
+#endif
+
+static inline void cin_write(const char *str, uint32_t len) {
+#ifdef _WIN32
+  cin_wwrite_utf8(str, len);
+#else
+  write(STDOUT_FILENO, str, len);
+#endif
+}
+
+static inline void cin_swrite(const char *str) {
+  assert(strlen(str) <= SIZE_MAX && "Corrupted string");
+  const size_t len = strlen(str);
+  cin_write(str, (uint32_t)len);
+}
+
+#ifdef __GNUC__
+#define PRINTF_ATTR(fmt, arg) __attribute__((format(printf, fmt, arg)))
+#else
+#define PRINTF_ATTR(fmt, arg)
+#endif
+
+static void PRINTF_ATTR(1, 2) cin_writef(const char *format, ...) {
+  va_list args;
+  va_list args_dup;
+  va_start(args, format);
+  va_copy(args_dup, args);
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wformat-nonliteral"
+  const int32_t len_i32 = vsnprintf(NULL, 0, format, args);
+  assert(len_i32 >= 0);
+  const uint32_t len = (uint32_t)len_i32;
+  va_end(args);
+  array_resize(&arena_console, &write_buf, len + 1);
+  vsnprintf(write_buf.items, len + 1, format, args_dup);
+#pragma clang diagnostic pop
+  va_end(args_dup);
+  cin_write(write_buf.items, len);
+}
+
+static void PRINTF_ATTR(1, 0) cin_vwritef(const char *format, va_list args) {
+  va_list args_dup;
+  va_copy(args_dup, args);
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wformat-nonliteral"
+  const int32_t len_i32 = vsnprintf(NULL, 0, format, args_dup);
+  assert(len_i32 >= 0);
+  const uint32_t len = (uint32_t)len_i32;
+  va_end(args_dup);
+  array_resize(&arena_console, &write_buf, len + 1);
+  vsnprintf(write_buf.items, len + 1, format, args);
+#pragma clang diagnostic pop
+  cin_write(write_buf.items, len);
+}
+
+#ifdef _WIN32
+static array_struct(wchar_t) wwrite_buf = {0};
+
+static inline void cin_wwrite(const wchar_t *str, uint32_t len) {
+  WriteConsoleW(repl.out, str, len, NULL, NULL);
+}
+
+static inline void cin_wswrite(const wchar_t *str) {
+  assert(wcslen(str) <= SIZE_MAX && "Corrupted string");
+  const size_t len = wcslen(str);
+  WriteConsoleW(repl.out, str, (uint32_t)len, NULL, NULL);
+}
+
+static void cin_wwritef(const wchar_t *format, ...) {
+  va_list args;
+  va_list args_dup;
+  va_start(args, format);
+  va_copy(args_dup, args);
+  const int32_t len_i32 = _vscwprintf(format, args);
+  assert(len_i32 >= 0);
+  const uint32_t len = (uint32_t)len_i32;
+  va_end(args);
+  array_resize(&arena_console, &wwrite_buf, len + 1);
+  _vsnwprintf_s(wwrite_buf.items, len + 1, len, format, args_dup);
+  va_end(args_dup);
+  WriteConsoleW(repl.out, wwrite_buf.items, len, NULL, NULL);
+}
+
+static void cin_wvwritef(const wchar_t *format, va_list args) {
+  va_list args_dup;
+  va_copy(args_dup, args);
+  const int32_t len_i32 = _vscwprintf(format, args_dup);
+  assert(len_i32 >= 0);
+  const uint32_t len = (uint32_t)len_i32;
+  va_end(args_dup);
+  array_resize(&arena_console, &wwrite_buf, len + 1);
+  _vsnwprintf_s(wwrite_buf.items, len + 1, len, format, args);
+  WriteConsoleW(repl.out, wwrite_buf.items, len, NULL, NULL);
+}
+#endif
+
+#define HOME_X 2
+#define CR "\r"
+#define CRLF "\r\n"
+#define WCRLF L"\r\n"
+#define PREFIX_STR CR "> "
+#define ESC "\x1b"
+#define CSI "\x1b["
+#define TERM_REPLACEMENT "\xEF\xBF\xBD"
+#define TERM_ESC 0x1b
+#define TERM_LBRACKET 0x5b
+#define TERM_HOME 0x48
+#define TERM_END 0x46
+#define TERM_DELETE 0x33
+#define TERM_TILDE 0x7e
+#define TERM_SEMICOLON 0x3b
+#define TERM_UP 0x41
+#define TERM_DOWN 0x42
+#define TERM_PAGEUP 0x35
+#define TERM_PAGEDOWN 0x36
+#define TERM_LEFT 0x44
+#define TERM_RIGHT 0x43
+#define TERM_DEFAULT 0x31
+#define TERM_TAB 0x09
+#define TERM_RETURN 0x0d
+#define TERM_LINEFEED 0x0a
+#define TERM_BACK 0x7f
+#define TERM_BACK_CTRL 0x08
+#define TERM_SPACE 0x20
+#define TERM_CURSOR_POS 0x52
+#define TERM_SEQUENCE_MAX 8
+#define TERM_READ_WAIT_MS 5
+
+static inline void hide_cursor(void) {
+  cin_swrite(CSI "?25l");
+}
+
+static inline void show_cursor(void) {
+  cin_swrite(CSI "?25h");
+}
+
+static inline short index_x(uint32_t index, uint32_t dwSize_X) {
+  assert(index % dwSize_X <= SHRT_MAX);
+  return (short)(index % dwSize_X);
+}
+
+static inline short index_x_repl(uint32_t index) {
+  assert(repl.size.X >= 0);
+  return index_x(HOME_X + index, (uint32_t)repl.size.X);
+}
+
+static inline short index_y(uint32_t index, uint32_t dwSize_X) {
+  assert(index / dwSize_X <= SHRT_MAX);
+  return (short)(index / dwSize_X);
+}
+
+static inline short index_y_repl(uint32_t index) {
+  assert(repl.size.X >= 0);
+  return repl.home.Y + index_y(HOME_X + index, (uint32_t)repl.size.X);
+}
+
+static inline COORD index_to_cursor(uint32_t index, uint32_t dwSize_X) {
+  return (COORD){.X = index_x(index, dwSize_X), .Y = index_y(index, dwSize_X)};
+}
+
+static inline COORD index_to_cursor_repl(uint32_t index) {
+  return (COORD){.X = index_x_repl(index), .Y = index_y_repl(index)};
+}
+
+static inline uint32_t cursor_to_index(COORD cursor, uint32_t dwSize_X) {
+  assert(cursor.X >= 0);
+  assert(cursor.Y >= 0);
+  return (uint32_t)cursor.X + ((uint32_t)cursor.Y * dwSize_X);
+}
+
+static inline COORD curr_cursor(void) {
+  return index_to_cursor_repl(repl.msg_index);
+}
+
+static inline COORD tail_cursor(void) {
+  return index_to_cursor_repl(repl.msg->count);
+}
+
+static inline COORD home_cursor(void) {
+  return repl.home;
+}
+
+static inline COORD preview_cursor(void) {
+  return preview.pos;
+}
+
+static inline bool term_get_cursor(COORD *cursor) {
+  bool ok = true;
+#ifdef _WIN32
+  CONSOLE_SCREEN_BUFFER_INFO info;
+  GetConsoleScreenBufferInfo(repl.out, &info);
+  cursor->X = info.dwCursorPosition.X - info.srWindow.Left;
+  cursor->Y = info.dwCursorPosition.Y - info.srWindow.Top + 1;
+#else
+  cin_swrite(CSI "6n");
+  char pos[16];
+  ssize_t n = read(STDIN_FILENO, pos, sizeof(pos) - 1);
+  if (n <= 0) {
+    ok = false;
+  } else {
+    static const int32_t MAX_CURSOR_RETRIES = 5;
+    int32_t i = 0;
+    do {
+      pos[n] = '\0';
+      const char *p = pos;
+      const char *candidate = strchr(p, TERM_ESC);
+      if (candidate && p != candidate) {
+        ptrdiff_t diff = candidate - p;
+        array_extend(&arena_console, &repl.in_buf, p, (uint32_t)diff);
+        p = candidate;
+      }
+      ok = sscanf(p, CSI "%hd;%hdR", &cursor->Y, &cursor->X) == 2;
+      if (!ok) {
+        size_t remainder = strlen(p);
+        array_extend(&arena_console, &repl.in_buf, p, (uint32_t)remainder);
+        n = read(STDIN_FILENO, pos, sizeof(pos) - 1);
+      }
+    } while (!ok && i++ < MAX_CURSOR_RETRIES);
+  }
+#endif
+  assert(ok && "Failed to get new cursor position");
+  return ok;
+}
+
+static inline COORD term_get_size(COORD *size) {
+  COORD size_change = {0};
+  const short prev_x = size->X;
+  const short prev_y = size->Y;
+#ifdef _WIN32
+  CONSOLE_SCREEN_BUFFER_INFO info;
+  GetConsoleScreenBufferInfo(repl.out, &info);
+  size->X = info.srWindow.Right - info.srWindow.Left + 1;
+  size->Y = info.srWindow.Bottom - info.srWindow.Top + 1;
+#else
+  struct winsize ws;
+  ioctl(STDIN_FILENO, TIOCGWINSZ, &ws);
+  size->X = (short)ws.ws_col;
+  size->Y = (short)ws.ws_row;
+#endif
+  size_change.X = size->X - prev_x;
+  size_change.Y = size->Y - prev_y;
+  return size_change;
+}
+
+static inline void term_get_info(COORD *cursor, COORD *size) {
+  term_get_cursor(cursor);
+  term_get_size(size);
+}
+
+static inline void term_set_cursor(COORD coord) {
+  cin_writef(CSI "%hd;%hdH", coord.Y, coord.X + 1);
+}
+
+static inline void cursor_home(void) {
+  term_set_cursor(repl.home);
+}
+
+static inline void cursor_curr(void) {
+  term_set_cursor(curr_cursor());
+}
+
+static inline void cursor_tail(void) {
+  term_set_cursor(tail_cursor());
+}
+
+static inline void term_clear(COORD pos, uint32_t cells, bool set_before, bool set_after) {
+  assert(cells < SHRT_MAX);
+  if (set_before) term_set_cursor(pos);
+  short n = (short)cells;
+  const short max_removed = repl.size.X - pos.X;
+  short removed = min(n, max_removed);
+  cin_writef(CSI "%hdX", removed);
+  if (n > removed) {
+    for (n -= removed; n > 0; n -= removed) {
+      cin_writef(CSI "1E" CSI "%hdX", n);
+      removed = min(n, repl.size.X);
+    }
+    term_set_cursor(pos);
+  } else if (set_after) {
+    term_set_cursor(pos);
+  }
+}
+
+static inline void clear_tail(uint32_t count, bool set_before) {
+  term_clear(tail_cursor(), count, set_before, false);
+}
+
+static inline void clear_full(void) {
+  term_clear(home_cursor(), repl.msg->count, true, false);
+}
+
+static inline void clear_preview(short pos) {
+  assert(pos >= 0);
+  assert(pos < repl.size.X);
+  preview.pos.X = pos;
+  const uint32_t leftover = preview.len - (uint32_t)pos;
+  term_clear(preview_cursor(), leftover, true, false);
+}
+
+static inline void set_preview_row(short y) {
+  assert(y > 0);
+  preview.pos.X = 0;
+  preview.pos.Y = y;
+}
+
+static inline int32_t lcps_from(const uint8_t *a, const uint8_t *b, int32_t start) {
+  a += start;
+  b += start;
+  int32_t matching = start;
+  while (*a && *b && *(a++) == *(b++)) ++matching;
+  return matching;
+}
+
+static inline int32_t lcps(const uint8_t *a, const uint8_t *b) {
+  return lcps_from(a, b, 0);
+}
+
+static inline bool cin_isloweralpha(char c) {
+  return c <= 'z' && c >= 'a';
+}
+
+static inline char cin_lower(char c) {
+  // NOTE: Might want to use LCMapString on Windows
+  return (char)tolower(c);
+}
+
+static inline bool cin_lower_isalpha(char *out) {
+  *out = cin_lower(*out);
+  return cin_isloweralpha(*out);
+}
+
+static inline bool cin_isnum(char c) {
+  return c <= '9' && c >= '0';
+}
+
+static inline bool cin_isnum_1based(char c) {
+  return c <= '9' && c >= '1';
+}
+
+static inline bool cin_wisloweralpha(wchar_t c) {
+  return c <= L'z' && c >= L'a';
+}
+
+static inline bool cin_wisnum(wchar_t c) {
+  return c <= L'9' && c >= L'0';
+}
+
+static inline bool cin_wisnum_1based(wchar_t c) {
+  return c <= L'9' && c >= L'1';
+}
+
+static inline void cin_getnum(const char **p, int64_t *out) {
+  *out = 0;
+  while (cin_isnum(**p)) {
+    *out *= 10;
+    *out += **p - '0';
+    ++*p;
+  }
+}
+
+static inline bool cin_iscontinuatioon(char c) {
+  return ((uint8_t)c & 0xC0) == 0x80;
+}
+
+static inline void cin_sleep(long millis) {
+#ifdef _WIN32
+  Sleep((DWORD)millis);
+#else
+  ssize_t nanos = millis * 1000 * 1000;
+  struct timespec duration = {
+      .tv_sec = nanos / (1000 * 1000 * 1000),
+      .tv_nsec = nanos % (1000 * 1000 * 1000)};
+  nanosleep(&duration, 0);
+#endif
+}
+
+static inline void write_preview(void) {
+  cin_writef(ESC "7" CSI "%hd;1H" CSI "1m%.*s" CSI "22m" ESC "8",
+             preview.pos.Y, preview.len, preview.items);
+}
+
+static void log_preview(void) {
+  if (!preview.count) return;
+  assert(repl.size.X >= 0);
+  // preview.count includes the null terminator
+  const bool use_ellipses = preview.count - 1 > (uint32_t)repl.size.X;
+  if (use_ellipses) {
+    preview.len = (uint32_t)repl.size.X;
+    assert(preview.len > 3);
+    const short tmp1_pos = repl.size.X - 1;
+    const short tmp2_pos = repl.size.X - 2;
+    const short tmp3_pos = repl.size.X - 3;
+    const char tmp1 = preview.items[tmp1_pos];
+    const char tmp2 = preview.items[tmp2_pos];
+    const char tmp3 = preview.items[tmp3_pos];
+    preview.items[tmp1_pos] = '.';
+    preview.items[tmp2_pos] = '.';
+    preview.items[tmp3_pos] = '.';
+    write_preview();
+    preview.items[tmp1_pos] = tmp1;
+    preview.items[tmp2_pos] = tmp2;
+    preview.items[tmp3_pos] = tmp3;
+  } else {
+    preview.len = preview.count - 1;
+    write_preview();
+  }
+}
+
+#ifndef _WIN32
+static pthread_t listener_thread;
+static int32_t interrupt_pipe[2];
+static pthread_mutex_t interrupt_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t interrupt_done = PTHREAD_COND_INITIALIZER;
+static bool interrupt_pending = false;
+
+static inline void interrupt_start(void) {
+  pthread_mutex_lock(&interrupt_lock);
+  interrupt_pending = true;
+  write(interrupt_pipe[1], "x", 1);
+  while (interrupt_pending) {
+    pthread_cond_wait(&interrupt_done, &interrupt_lock);
+  }
+  pthread_mutex_unlock(&interrupt_lock);
+}
+
+static inline void interrupt_finish(void) {
+  char _val;
+  read(interrupt_pipe[0], &_val, 1);
+  pthread_mutex_lock(&interrupt_lock);
+  interrupt_pending = false;
+  pthread_cond_signal(&interrupt_done);
+  pthread_mutex_unlock(&interrupt_lock);
+}
+#endif
+
+#ifdef _WIN32
+static CRITICAL_SECTION log_lock;
+#define lock_logs() EnterCriticalSection(&log_lock)
+#define unlock_logs() LeaveCriticalSection(&log_lock)
+#else
+static pthread_mutex_t log_lock = PTHREAD_MUTEX_INITIALIZER;
+#define lock_logs() pthread_mutex_lock(&log_lock)
+#define unlock_logs() pthread_mutex_unlock(&log_lock)
+#endif
+
+static inline void rewrite_post_log(void) {
+  const COORD prev = repl.home;
+#ifdef _WIN32
+  term_get_cursor(&repl.cursor);
+#else
+  if (pthread_equal(pthread_self(), listener_thread)) {
+    unlock_logs();
+    interrupt_start();
+    lock_logs();
+  } else {
+    term_get_cursor(&repl.cursor);
+  }
+#endif
+  const COORD next = repl.cursor;
+  const short line_shift = next.Y - prev.Y;
+  assert(line_shift >= 0);
+  short leftover = 0;
+  if (line_shift == 0) {
+    const short tail_x = index_x_repl((uint32_t)repl.msg->count);
+    leftover = (short)preview.len - tail_x;
+  }
+  cin_writef(CSI "0K\n> %.*s" CSI "%hdX", repl.msg->count, repl.msg->items, leftover);
+  repl.home.Y = next.Y + 1;
+  const short msg_lines = index_y(HOME_X + repl.msg->count, (uint32_t)repl.size.X) + 1;
+  if (repl.home.Y + msg_lines >= repl.size.Y) {
+    const short excess_lines = (repl.home.Y + msg_lines) - repl.size.Y;
+    repl.home.Y -= excess_lines;
+    cin_swrite("\n" CSI "1A");
+  }
+  set_preview_row(repl.home.Y + msg_lines);
+  assert(repl.home.Y < repl.size.Y);
+  assert(preview.pos.Y <= repl.size.Y);
+  assert(preview.pos.Y > repl.home.Y);
+  cursor_curr();
+  log_preview();
+  show_cursor();
+}
+
+static void log_message(Cin_Log_Level level, const char *message, ...) {
+  if (level > GLOBAL_LOG_LEVEL) {
+    return;
+  }
+  lock_logs();
+  hide_cursor();
+  cursor_home();
+  cin_writef(CR "[%s] ", LOG_LEVELS[level]);
+  va_list args;
+  va_start(args, message);
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wformat-nonliteral"
+  cin_vwritef(message, args);
+#pragma clang diagnostic pop
+  rewrite_post_log();
+  va_end(args);
+  unlock_logs();
+}
+
+#ifdef _WIN32
 static void log_wmessage(Cin_Log_Level level, const wchar_t *wmessage, ...) {
   if (level > GLOBAL_LOG_LEVEL) {
     return;
   }
-  EnterCriticalSection(&log_lock);
+  lock_logs();
   hide_cursor();
   cursor_home();
-  writef(CR "[%s] ", LOG_LEVELS[level]);
+  cin_writef(CR "[%s] ", LOG_LEVELS[level]);
   va_list args;
   va_start(args, wmessage);
-  wvwritef(wmessage, args);
+  cin_wvwritef(wmessage, args);
   rewrite_post_log();
   va_end(args);
-  LeaveCriticalSection(&log_lock);
+  unlock_logs();
 }
+#endif
 
-static void wwrite_safe(const wchar_t *str, DWORD len) {
-  EnterCriticalSection(&log_lock);
+static void cin_write_safe(const char *str, uint32_t len) {
+  lock_logs();
   clear_preview(0);
   hide_cursor();
   cursor_home();
-  wwrite(str, len);
+  cin_write(str, len);
   rewrite_post_log();
-  LeaveCriticalSection(&log_lock);
+  unlock_logs();
 }
 
 static void log_last_error(const char *message, ...) {
-  static const DWORD dw_flags = FORMAT_MESSAGE_ALLOCATE_BUFFER |
-                                FORMAT_MESSAGE_FROM_SYSTEM |
-                                FORMAT_MESSAGE_IGNORE_INSERTS;
-  EnterCriticalSection(&log_lock);
+  lock_logs();
+#ifdef _WIN32
+  static const uint32_t dw_flags = FORMAT_MESSAGE_ALLOCATE_BUFFER |
+                                   FORMAT_MESSAGE_FROM_SYSTEM |
+                                   FORMAT_MESSAGE_IGNORE_INSERTS;
   LPVOID buffer = NULL;
-  DWORD code = GetLastError();
-  if (!FormatMessageA(dw_flags, NULL, code, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPTSTR)&buffer, 0, NULL)) {
+  const uint32_t code = GetLastError();
+  if (!FormatMessageW(dw_flags, NULL, code, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPWSTR)&buffer, 0, NULL)) {
     log_message(LOG_ERROR, "Failed to log GLE=%d - error with GLE=%d", code, GetLastError());
     return;
   }
@@ -1225,24 +1445,37 @@ static void log_last_error(const char *message, ...) {
   assert(str[len - 2] == '\r');
   str[len - 1] = '\0';
   str[len - 2] = '\0';
+#else
+  const size_t code = (size_t)errno;
+  char *buffer = strerror((int32_t)code);
+#endif
   hide_cursor();
   cursor_home();
-  writef(CR "[%s] ", LOG_LEVELS[LOG_ERROR]);
+  cin_writef(CR "[%s] ", LOG_LEVELS[LOG_ERROR]);
   va_list args;
   va_start(args, message);
-  vwritef(message, args);
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wformat-nonliteral"
+  cin_vwritef(message, args);
+#pragma clang diagnostic pop
   va_end(args);
-  writef(" - Code %lu: %s", code, (char *)buffer);
+  cin_writef(" - Code %lu: %s", code, (char *)buffer);
   rewrite_post_log();
+#ifdef _WIN32
   LocalFree(buffer);
-  LeaveCriticalSection(&log_lock);
+#endif
+  unlock_logs();
 }
 
 #define CIN_STRERROR_BYTES 95
 
 static inline void log_fopen_error(const char *filename, int32_t err) {
+#ifdef _WIN32
   char err_buf[CIN_STRERROR_BYTES];
   strerror_s(err_buf, CIN_STRERROR_BYTES, err);
+#else
+  char *err_buf = strerror(err);
+#endif
   log_message(LOG_ERROR, "Failed to open file '%s': %s", filename, err_buf);
 }
 
@@ -1292,13 +1525,13 @@ typedef void (*patricia_fn)(void);
 
 typedef struct Patricia_Node {
   struct Patricia_Node *edges[COMMAND_ALPHABET];
-  const wchar_t *suffix;
+  const char *suffix;
   size_t len;
   patricia_fn fn;
   int32_t min;
 } Patricia_Node;
 
-static inline Patricia_Node *patricia_node(const wchar_t *suffix, size_t len) {
+static inline Patricia_Node *patricia_node(const char *suffix, size_t len) {
   Patricia_Node *node = arena_bump_T1(&arena_console, Patricia_Node);
   assert(node);
   node->suffix = suffix;
@@ -1306,27 +1539,27 @@ static inline Patricia_Node *patricia_node(const wchar_t *suffix, size_t len) {
   return node;
 }
 
-static inline size_t patricia_lcp(const wchar_t *a, const wchar_t *b, size_t max) {
+static inline size_t patricia_lcp(const char *a, const char *b, size_t max) {
   size_t i = 0;
   while (i < max && a[i] && a[i] == b[i]) ++i;
   return i;
 }
 
-static inline patricia_fn patricia_query(Patricia_Node *root, const wchar_t *pattern) {
+static inline patricia_fn patricia_query(Patricia_Node *root, const char *pattern) {
   assert(root);
-  assert(wcslen(pattern) > 0);
-  assert((*pattern >= L'a' && *pattern <= L'z'));
+  assert(strlen(pattern) > 0);
+  assert((*pattern >= 'a' && *pattern <= 'z'));
   Patricia_Node *node = root;
-  const wchar_t *p = pattern;
+  const char *p = pattern;
   while (*p) {
-    assert((*p >= L'a' && *p <= L'z'));
-    const int32_t i = *p - L'a';
+    assert((*p >= 'a' && *p <= 'z'));
+    const int32_t i = *p - 'a';
     Patricia_Node *edge = node->edges[i];
     if (edge == NULL) {
       return NULL;
     }
     const size_t common = patricia_lcp(p, edge->suffix, edge->len);
-    if (p[common] == L'\0') {
+    if (p[common] == '\0') {
       return edge->fn;
     }
     if (common < edge->len) {
@@ -1338,18 +1571,18 @@ static inline patricia_fn patricia_query(Patricia_Node *root, const wchar_t *pat
   return node->fn;
 }
 
-static inline void patricia_insert(Patricia_Node *root, const wchar_t *str, patricia_fn fn) {
+static inline void patricia_insert(Patricia_Node *root, const char *str, patricia_fn fn) {
   assert(root);
-  assert(wcslen(str) > 0);
-  assert((*str >= L'a' && *str <= L'z'));
+  assert(strlen(str) > 0);
+  assert((*str >= 'a' && *str <= 'z'));
   Patricia_Node *node = root;
-  const wchar_t *p = str;
+  const char *p = str;
   while (*p) {
-    assert((*p >= L'a' && *p <= L'z'));
-    const int32_t i = *p - L'a';
+    assert((*p >= 'a' && *p <= 'z'));
+    const int32_t i = *p - 'a';
     Patricia_Node *edge = node->edges[i];
     if (edge == NULL) {
-      const size_t edge_len = wcslen(p);
+      const size_t edge_len = strlen(p);
       edge = patricia_node(p, edge_len);
       edge->fn = fn;
       node->edges[i] = edge;
@@ -1363,7 +1596,7 @@ static inline void patricia_insert(Patricia_Node *root, const wchar_t *str, patr
     const size_t common = patricia_lcp(p, edge->suffix, edge->len);
     if (common == edge->len) {
       p += common;
-      if (*p == L'\0') {
+      if (*p == '\0') {
         edge->min = -1;
         edge->fn = fn;
         return;
@@ -1374,17 +1607,17 @@ static inline void patricia_insert(Patricia_Node *root, const wchar_t *str, patr
       edge->suffix += common;
       edge->len -= common;
       node->edges[i] = split;
-      split->edges[edge->suffix[0] - L'a'] = edge;
+      split->edges[edge->suffix[0] - 'a'] = edge;
       p += common;
-      if (*p == L'\0') {
+      if (*p == '\0') {
         split->min = -1;
         split->fn = fn;
       } else {
-        const size_t remainder_len = wcslen(p);
+        const size_t remainder_len = strlen(p);
         Patricia_Node *remainder = patricia_node(p, remainder_len);
         remainder->fn = fn;
-        const int32_t edge_i = edge->suffix[0] - L'a';
-        const int32_t next_i = *p - L'a';
+        const int32_t edge_i = edge->suffix[0] - 'a';
+        const int32_t next_i = *p - 'a';
         split->edges[next_i] = remainder;
         // update internal node lexicographical minimum
         if (next_i < edge_i) {
@@ -1626,8 +1859,24 @@ static inline uint32_t rand_between(uint32_t min, uint32_t max) {
   assert(range);
   const uint32_t upper = UINT_MAX - (UINT_MAX % range);
   uint32_t random;
+#ifdef _WIN32
   do rand_s(&random);
   while (random >= upper);
+#else
+  FILE *f = fopen("/dev/urandom", "rb");
+  if (!f) {
+    log_last_error("Failed to open /dev/urandom");
+    return min;
+  }
+  do {
+    if (fread(&random, sizeof(random), 1, f) != 1) {
+      log_last_error("Failed to read /dev/urandom");
+      fclose(f);
+      return min;
+    }
+  } while (random >= upper);
+  fclose(f);
+#endif
   return min + (random % range);
 }
 
@@ -1988,10 +2237,9 @@ static inline bool conf_scopeget(void) {
 
 static bool parse_config(const char *filename) {
   bool ok = false;
-  FILE *file;
-  const int32_t err = fopen_s(&file, filename, "rt");
-  if (err) {
-    log_fopen_error(filename, err);
+  FILE *file = fopen(filename, "rt");
+  if (!file) {
+    log_last_error("Failed to open file '%s'", filename);
     goto end;
   }
   array_init(&arena_console, &conf_parser.buf, CONF_LINE_CAP);
@@ -2119,6 +2367,7 @@ struct Document_Collection {
 } docs = {0};
 
 static inline void docs_push(const uint8_t *utf8, int32_t len) {
+  // len should include null-terminator
   array_extend_zero(&arena_docs, &docs, utf8, (uint32_t)len);
   ++docs.doc_count;
 }
@@ -2134,7 +2383,11 @@ typedef struct Directory_Node {
 } Directory_Node;
 
 typedef struct Directory_Path {
+#ifdef _WIN32
   wchar_t path[CIN_MAX_PATH];
+#else
+  char path[CIN_MAX_PATH];
+#endif
   size_t len;
 } Directory_Path;
 
@@ -2187,7 +2440,7 @@ typedef struct Cin_Layout {
 } Cin_Layout;
 
 typedef struct Cin_Macro {
-  array_struct_members(wchar_t);
+  array_struct_members(char);
 } Cin_Macro;
 
 static struct {
@@ -2196,7 +2449,7 @@ static struct {
 } dir_stack = {0};
 
 static struct {
-  array_struct_members(wchar_t);
+  array_struct_members(char);
   size_t supply;
   size_t demand;
 } clipboard = {0};
@@ -2223,48 +2476,128 @@ static Radix_Tree *tag_tree = NULL;
 static Radix_Tree *layout_tree = NULL;
 static Radix_Tree *macro_tree = NULL;
 
-static inline void setup_file_path(wchar_t *path, int32_t *len) {
-  assert(len);
-  for (wchar_t *p = path; *p; ++p) {
-    if (*p == L'\\') {
-      *p++ = L'/';
-      wchar_t *dups = p;
-      while (*dups == L'\\') ++dups;
-      if (p != dups) {
-        const ptrdiff_t removed = dups - p;
-        const ptrdiff_t pos = dups - path;
-        assert((size_t)*len >= (size_t)pos);
-        const size_t remainder = (size_t)*len - (size_t)pos;
-        wmemcpy(p, dups, remainder);
-        p = dups;
-        *len -= (int32_t)removed;
-      }
-    }
+#ifdef _WIN32
+#define DEFINE_SETUP_FILE_PATH(T, backward, forward, terminator, memcpy_fn) \
+  static inline void setup_file_path_##T(T *path, int32_t *len) {           \
+    assert(len);                                                            \
+    for (T *p = path; *p; ++p) {                                            \
+      if (*p == backward) {                                                 \
+        *p++ = forward;                                                     \
+        T *dups = p;                                                        \
+        while (*dups == backward) ++dups;                                   \
+        if (p != dups) {                                                    \
+          const ptrdiff_t removed = dups - p;                               \
+          const ptrdiff_t pos = dups - path;                                \
+          assert((size_t)*len >= (size_t)pos);                              \
+          const size_t remainder = (size_t)*len - (size_t)pos;              \
+          memcpy_fn(p, dups, remainder);                                    \
+          p = dups;                                                         \
+          *len -= (int32_t)removed;                                         \
+        }                                                                   \
+      }                                                                     \
+    }                                                                       \
+    *(path + (size_t)*len) = terminator;                                    \
   }
-  *(path + (size_t)*len) = L'\0';
+
+DEFINE_SETUP_FILE_PATH(char, '\\', '/', '\0', memcpy)
+DEFINE_SETUP_FILE_PATH(wchar_t, L'\\', L'/', L'\0', wmemcpy)
+#else
+static inline void setup_file_path(char *dst, const char *src, size_t dst_size) {
+  // tilde expansion, username substitution
+  const bool expand = *src == '~';
+  size_t len = 0;
+  if (!expand) {
+    len = strlen(src) + 1;
+    memcpy(dst, src, len);
+  } else {
+    const char *src_pos = src + 1;
+    const bool only_root = !*(src_pos);
+    const bool valid_expand = *(src_pos) == '/';
+    const bool expand_anon = only_root || valid_expand;
+    char *home = NULL;
+    char *home_tail = (char *)strchr(src_pos, '/');
+    if (expand_anon) {
+      home = getenv("HOME");
+      if (!home) {
+        log_last_error("Failed to expand '~'for path '%s'", src);
+        return;
+      }
+    } else {
+      struct passwd *pw = NULL;
+      errno = 0;
+      if (home_tail) {
+        char tmp = *home_tail;
+        *home_tail = '\0';
+        pw = getpwnam(src_pos);
+        *home_tail = tmp;
+      } else {
+        pw = getpwnam(src_pos);
+      }
+      if (!pw) {
+        log_last_error("Username not found in '%s'", src);
+        return;
+      }
+      home = pw->pw_dir;
+    }
+    assert(home);
+    assert(*home);
+    const size_t home_len = strlen(home);
+    const size_t path_len = *home_tail ? strlen(home_tail) : 0;
+    const size_t new_path_len = home_len + path_len + 1;
+    if (dst_size < new_path_len) {
+      log_message(LOG_ERROR, "Buffer too small to expand '~': %zu < %zu", dst_size, new_path_len);
+      return;
+    }
+    len = new_path_len;
+    memcpy(dst, home, home_len);
+    memcpy(dst + home_len, home_tail, path_len);
+  }
+  if (len > 1 && *(dst + len - 2) != '/') {
+    assert(len < CIN_MAX_PATH);
+    *(dst + len - 1) = '/';
+    *(dst + len) = '\0';
+  }
 }
+#endif
 
 static void setup_directory(const char *path, Tag_Directories *tag_dirs) {
+#ifdef _WIN32
   int32_t len_utf16 = utf8_to_utf16_norm(path);
   assert(len_utf16);
-  setup_file_path(utf16_buf_norm.items, &len_utf16);
+  setup_file_path_wchar_t(utf16_buf_norm.items, &len_utf16);
   const size_t len = (size_t)len_utf16;
   Directory_Path root_dir = {.len = len};
   wmemcpy(root_dir.path, utf16_buf_norm.items, len);
+#else
+  Directory_Path root_dir = {0};
+  setup_file_path(root_dir.path, path, CIN_MAX_PATH);
+  path = root_dir.path;
+  const int32_t len_i32 = utf8_norm(root_dir.path) + 1;
+  assert(len_i32 > 0);
+  const uint32_t len = (uint32_t)len_i32;
+  root_dir.len = len;
+  const uint32_t bytes = len;
+#endif
   array_push(&arena_console, &dir_stack, root_dir);
   while (dir_stack.count > 0) {
     Directory_Path dir = dir_stack.items[--dir_stack.count];
-    log_wmessage(LOG_DEBUG, L"Path: %ls", dir.path);
     assert(dir.path);
     assert(dir.len > 0);
     assert(dir.path[dir.len - 1] == L'\0');
+#ifdef _WIN32
+    log_wmessage(LOG_DEBUG, L"Path: %s", dir.path);
     const int32_t bytes_i32 = utf16_to_utf8(dir.path);
     assert(bytes_i32 > 0);
     const uint32_t bytes = (uint32_t)bytes_i32;
+    char *str_src = (char *)utf8_buf.items;
+#else
+    log_message(LOG_DEBUG, "Path: %s", dir.path);
+    char *str_src = dir.path;
+#endif
     array_reserve(&arena_console, &directory_strings, bytes + 1);
     uint8_t *strings = directory_strings.items;
     const uint32_t str_offset = directory_strings.count;
-    memcpy(strings + str_offset, utf8_buf.items, bytes);
+    memcpy(strings + str_offset, str_src, bytes);
     const uint32_t node_tail = directory_nodes.count;
     Table_Key key = {.strings = strings, .pos = str_offset, .len = bytes};
     table_value dup_index = table_find(&dir_table, &key);
@@ -2274,6 +2607,7 @@ static void setup_directory(const char *path, Tag_Directories *tag_dirs) {
       }
       continue;
     }
+#ifdef _WIN32
     if (--dir.len + 2 >= CIN_MAX_PATH) {
       // We have to append 2 chars \ and * for the correct pattern
       log_wmessage(LOG_ERROR, L"Directory name too long: %ls", dir.path);
@@ -2295,6 +2629,13 @@ static void setup_directory(const char *path, Tag_Directories *tag_dirs) {
       log_last_error("Failed to match directory '%ls'", dir.path);
       continue;
     }
+#else
+    DIR *directory = opendir(path);
+    if (!directory) {
+      log_last_error("Failed to match directory '%s'", dir.path);
+      continue;
+    }
+#endif
     // Commit the new directory
     array_grow(&arena_console, &directory_strings, bytes);
     array_grow(&arena_console, &directory_nodes, 1);
@@ -2307,6 +2648,7 @@ static void setup_directory(const char *path, Tag_Directories *tag_dirs) {
     }
     table_value inserted = table_insert(&arena_console, &dir_table, &key, (table_value)node_tail);
     assert(inserted == -1);
+#ifdef _WIN32
     do {
       if (data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
         continue; // skip junction
@@ -2356,17 +2698,65 @@ static void setup_directory(const char *path, Tag_Directories *tag_dirs) {
       log_last_error("Failed to find next file");
     }
     FindClose(search);
+#else
+    struct dirent *entry = NULL;
+    errno = 0;
+    Directory_Path tmp_dir = dir;
+    while ((entry = readdir(directory))) {
+      char *file = entry->d_name;
+      const size_t file_len = strlen(file) + 1;
+      tmp_dir.len = dir.len;
+      // tmp_dir.len also includes null terminator
+      const size_t path_len = tmp_dir.len + file_len - 1;
+      if (path_len >= CIN_MAX_PATH) continue;
+      memcpy(tmp_dir.path + tmp_dir.len - 1, file, file_len);
+      tmp_dir.len = path_len;
+      struct stat statbuf;
+      if (lstat(tmp_dir.path, &statbuf) < 0) {
+        log_last_error("Failed to get stat for '%s'", tmp_dir.path);
+        continue;
+      }
+      const bool is_dir = S_ISDIR(statbuf.st_mode);
+      if (is_dir) {
+        if (strcmp(file, ".") != 0 && strcmp(file, "..") != 0) {
+          assert(tmp_dir.path[tmp_dir.len - 1] == '\0');
+          assert(tmp_dir.len > 0);
+          ++dir_stack.abs_count;
+          array_ensure_capacity_core(&arena_console, &dir_stack, dir_stack.abs_count, false);
+          array_push(&arena_console, &dir_stack, tmp_dir);
+        }
+      } else {
+        const table_key_pos tail_offset = array_bytes(&docs);
+        int32_t tail_doc = (int32_t)tail_offset;
+        docs_push((uint8_t *)tmp_dir.path, (int32_t)path_len);
+        if (conf_parser.has_patterns) {
+          Table_Key pat_key = {.strings = docs.items, .pos = tail_offset, .len = (table_key_len)path_len};
+          table_value dup_doc = table_insert(&arena_console, &pat_table, &pat_key, tail_doc);
+          if (dup_doc >= 0) {
+            docs_pop((int32_t)len);
+            tail_doc = (int32_t)dup_doc;
+          }
+        }
+        array_push(&arena_console, node, tail_doc);
+      }
+      errno = 0;
+    }
+    if (errno != 0) {
+      log_last_error("Failed to find next file");
+    }
+#endif
   }
   assert(dir_stack.count == 0);
 }
 
 static inline void setup_pattern(const char *pattern, Tag_Pattern_Items *tag_pattern_items) {
+#ifdef _WIN32
   // Processes all files (not directories) that match the pattern
   // https://support.microsoft.com/en-us/office/examples-of-wildcard-characters-939e153f-bd30-47e4-a763-61897c87b3f4
   int32_t len_utf16 = utf8_to_utf16_norm(pattern);
   assert(len_utf16);
   assert(utf16_buf_norm.items[len_utf16 - 1] == L'\0');
-  setup_file_path(utf16_buf_norm.items, &len_utf16);
+  setup_file_path_wchar_t(utf16_buf_norm.items, &len_utf16);
   wchar_t *separator = wcsrchr(utf16_buf_norm.items, L'/');
   if (separator == NULL || *(separator + 1) == L'\0') {
     log_message(LOG_ERROR, "Not a valid pattern: '%s', end properly with '\\...'", pattern);
@@ -2380,8 +2770,8 @@ static inline void setup_pattern(const char *pattern, Tag_Pattern_Items *tag_pat
   const wchar_t prev_tail = utf16_buf_norm.items[dir_len];
   utf16_buf_norm.items[dir_len] = L'\0';
   static wchar_t abs_buf[CIN_MAX_PATH];
-  DWORD abs_len = GetFullPathNameW(utf16_buf_norm.items, CIN_MAX_PATH, abs_buf, NULL);
-  setup_file_path(abs_buf, (int32_t *)&abs_len);
+  uint32_t abs_len = GetFullPathNameW(utf16_buf_norm.items, CIN_MAX_PATH, abs_buf, NULL);
+  setup_file_path_wchar_t(abs_buf, (int32_t *)&abs_len);
   if (abs_len == 0 || abs_len > CIN_MAX_PATH) {
     log_wmessage(LOG_ERROR, L"Pattern '%ls' full path '%ls' is empty or too long (max=%d)",
                  pattern, abs_buf, CIN_MAX_PATH);
@@ -2401,9 +2791,9 @@ static inline void setup_pattern(const char *pattern, Tag_Pattern_Items *tag_pat
     log_last_error("Failed to match pattern '%ls'", utf16_buf_norm.items);
     return;
   }
-  static const DWORD file_mask = FILE_ATTRIBUTE_DIRECTORY |
-                                 FILE_ATTRIBUTE_REPARSE_POINT |
-                                 FILE_ATTRIBUTE_DEVICE;
+  static const uint32_t file_mask = FILE_ATTRIBUTE_DIRECTORY |
+                                    FILE_ATTRIBUTE_REPARSE_POINT |
+                                    FILE_ATTRIBUTE_DEVICE;
   do {
     if (data.dwFileAttributes & file_mask) {
       continue; // skip directories
@@ -2432,31 +2822,84 @@ static inline void setup_pattern(const char *pattern, Tag_Pattern_Items *tag_pat
     log_last_error("Failed to find next file");
   }
   FindClose(search);
+#else
+  char new_pattern[CIN_MAX_PATH];
+  setup_file_path(new_pattern, pattern, CIN_MAX_PATH);
+  pattern = new_pattern;
+  static const int32_t GLOB_FLAGS = GLOB_NOSORT;
+  glob_t matches = {0};
+  const int32_t result = glob(new_pattern, GLOB_FLAGS, NULL, &matches);
+  if (result != 0) {
+    if (result == GLOB_NOMATCH) {
+      log_message(LOG_ERROR, "Found no results for pattern '%s'", new_pattern);
+    } else {
+      log_last_error("Failed to match pattern '%s'", new_pattern);
+    }
+    globfree(&matches);
+    return;
+  }
+  struct stat statbuf;
+  const size_t n = matches.gl_pathc;
+  char file_buf[CIN_MAX_PATH];
+  for (size_t i = 0; i < n; ++i) {
+    const char *file = matches.gl_pathv[i];
+    if (lstat(file, &statbuf) >= 0 && S_ISREG(statbuf.st_mode)) {
+      const size_t len = strlen(file) + 1;
+      memcpy(file_buf, file, len);
+      utf8_norm(file_buf);
+      const table_key_pos tail_offset = array_bytes(&docs);
+      const int32_t tail_doc = (int32_t)tail_offset;
+      docs_push((uint8_t *)file_buf, (int32_t)len);
+      Table_Key key = {.strings = docs.items, .pos = tail_offset, .len = (table_key_len)len};
+      table_value dup_doc = table_insert(&arena_console, &pat_table, &key, tail_doc);
+      if (dup_doc >= 0) {
+        docs_pop((int32_t)len);
+        if (tag_pattern_items) array_push(&arena_console, tag_pattern_items, (int32_t)dup_doc);
+      } else {
+        if (tag_pattern_items) array_push(&arena_console, tag_pattern_items, tail_doc);
+      }
+    }
+  }
+  globfree(&matches);
+#endif
 }
 
-static inline void setup_url(const char *url, Tag_Url_Items *tag_url_items) {
+static inline void setup_url(char *url, Tag_Url_Items *tag_url_items) {
+#ifdef _WIN32
   const int32_t len_utf16 = utf8_to_utf16_raw(url);
-  assert(len_utf16);
-  const int32_t len_utf8 = utf16_to_utf8(utf16_buf_raw.items);
+  assert(len_utf16 > 0);
+  const int32_t len = utf16_to_utf8(utf16_buf_raw.items);
+  uint8_t *doc = utf8_buf.items;
+#else
+  const int32_t len = (int32_t)strlen(url) + 1;
+  uint8_t *doc = (uint8_t *)url;
+#endif
+  assert(len > 0);
   const table_key_pos tail_offset = array_bytes(&docs);
   const int32_t tail_doc = (int32_t)tail_offset;
-  docs_push(utf8_buf.items, len_utf8);
-  Table_Key key = {.strings = docs.items, .pos = tail_offset, .len = (table_key_len)len_utf8};
+  docs_push(doc, len);
+  Table_Key key = {.strings = docs.items, .pos = tail_offset, .len = (table_key_len)len};
   table_value dup_doc = table_insert(&arena_console, &url_table, &key, tail_doc);
   if (dup_doc >= 0) {
-    docs_pop(len_utf8);
+    docs_pop(len);
     if (tag_url_items) array_push(&arena_console, tag_url_items, (int32_t)dup_doc);
   } else {
     if (tag_url_items) array_push(&arena_console, tag_url_items, tail_doc);
   }
 }
 
-static inline void setup_tag(const char *tag, Tag_Items *tag_items) {
+static inline void setup_tag(char *tag, Tag_Items *tag_items) {
+#ifdef _WIN32
   const int32_t len_utf16 = utf8_to_utf16_norm(tag);
-  assert(len_utf16);
-  const int32_t len_utf8 = utf16_to_utf8(utf16_buf_norm.items);
-  assert(len_utf8);
-  radix_insert(tag_tree, utf8_buf.items, (size_t)len_utf8, tag_items);
+  assert(len_utf16 > 0);
+  const int32_t len = utf16_to_utf8(utf16_buf_norm.items);
+  uint8_t *name = utf8_buf.items;
+#else
+  const int32_t len = utf8_norm(tag) + 1;
+  uint8_t *name = (uint8_t *)tag;
+#endif
+  assert(len > 0);
+  radix_insert(tag_tree, name, (size_t)len, tag_items);
 }
 
 static inline bool setup_chat(const char *geometry, uint32_t len, Cin_Layout *layout) {
@@ -2487,10 +2930,10 @@ static inline bool setup_chat(const char *geometry, uint32_t len, Cin_Layout *la
   cin_getnum(&p, &y);
   if (*p && !isspace(*p)) return false;
   if (!positive) y = -y;
-  layout->chat_rect.right = (LONG)width;
-  layout->chat_rect.bottom = (LONG)height;
-  layout->chat_rect.left = (LONG)x;
-  layout->chat_rect.top = (LONG)y;
+  layout->chat_rect.right = (int32_t)width;
+  layout->chat_rect.bottom = (int32_t)height;
+  layout->chat_rect.left = (int32_t)x;
+  layout->chat_rect.top = (int32_t)y;
   return true;
 }
 
@@ -2502,33 +2945,51 @@ static inline void setup_screen(const char *geometry, Cin_Layout *layout) {
   array_push(&arena_console, layout, screen);
 }
 
-static inline void setup_layout(const char *name, Cin_Layout *layout) {
+static inline void setup_layout(char *name, Cin_Layout *layout) {
+#ifdef _WIN32
   const int32_t len_utf16 = utf8_to_utf16_norm(name);
   assert(len_utf16 > 1);
-  const int32_t len_utf8 = utf16_to_utf8(utf16_buf_norm.items);
-  assert(len_utf8 > 1);
-  const uint32_t len_utf8_u32 = (uint32_t)len_utf8;
+  const uint32_t len = (uint32_t)utf16_to_utf8(utf16_buf_norm.items);
+  uint8_t *layout_name = utf8_buf.items;
+#else
+  const uint32_t len = (uint32_t)utf8_norm(name) + 1;
+  uint8_t *layout_name = (uint8_t *)name;
+#endif
+  assert(len > 0);
   layout->name_offset = layout_strings.count;
-  layout->name_len = len_utf8_u32;
-  array_extend(&arena_console, &layout_strings, utf8_buf.items, len_utf8_u32);
-  radix_insert(layout_tree, utf8_buf.items, len_utf8_u32, layout);
+  layout->name_len = len;
+  array_extend(&arena_console, &layout_strings, layout_name, len);
+  radix_insert(layout_tree, layout_name, len, layout);
 }
 
-static inline void setup_macro(const char *name, Cin_Macro *macro, bool startup) {
+static inline void setup_macro(char *name, Cin_Macro *macro, bool startup) {
+#ifdef _WIN32
   const int32_t len_utf16 = utf8_to_utf16_norm(name);
   assert(len_utf16 > 1);
   const int32_t len_utf8 = utf16_to_utf8(utf16_buf_norm.items);
   assert(len_utf8 > 1);
-  const uint32_t len_utf8_u32 = (uint32_t)len_utf8;
-  radix_insert(macro_tree, utf8_buf.items, len_utf8_u32, macro);
+  radix_insert(macro_tree, utf8_buf.items, (uint32_t)len_utf8, macro);
+#else
+  const int32_t len = utf8_norm(name) + 1;
+  assert(len > 0);
+  radix_insert(macro_tree, (uint8_t *)name, (uint32_t)len, macro);
+#endif
   if (startup) array_push(&arena_console, &startup_macros, macro);
 }
 
-static inline void setup_macro_command(const char *command, Cin_Macro *macro) {
-  const int32_t len = utf8_to_utf16_norm(command);
+static inline void setup_macro_command(char *command, Cin_Macro *macro) {
+#ifdef _WIN32
+  const int32_t len_utf16 = utf8_to_utf16_norm(command);
+  assert(len_utf16 > 1);
+  const int32_t len = utf16_to_utf8(utf16_buf_norm.items);
   assert(len > 1);
   const uint32_t len_u32 = (uint32_t)len;
-  array_wextend(&arena_console, macro, utf16_buf_norm.items, len_u32);
+  array_extend(&arena_console, macro, utf8_buf.items, len_u32);
+#else
+  const int32_t len = utf8_norm(command) + 1;
+  assert(len > 1);
+  array_extend(&arena_console, macro, command, (uint32_t)len);
+#endif
 }
 
 #define FOREACH_PART(str, part)                                                     \
@@ -2677,7 +3138,7 @@ static bool init_config(const char *filename) {
   if (array_bytes(&docs) == CIN_ARENA_MAX) {
     // extremely rare case where we exceed INT_MAX by 1 byte,
     // instead of trying to fix it we force a crash
-    wwritef(L"Cinema crashed receiving too many file paths (exceeding %d bytes)", INT_MAX);
+    cin_writef("Cinema crashed receiving too many file paths (exceeding %d bytes)", INT_MAX);
     exit(1);
   }
   docs.bytes_mul32 = array_bytes(&docs) * (uint32_t)sizeof(int32_t);
@@ -2690,17 +3151,17 @@ static bool init_config(const char *filename) {
 static bool reinit_documents(void) {
   const int32_t d_bytes = (int32_t)array_bytes(&docs);
   if (d_bytes == 0) {
-    log_wmessage(LOG_ERROR, L"media library is empty");
+    log_message(LOG_ERROR, "media library is empty");
     return false;
   }
   const int32_t remainder = (int32_t)docs.bytes_capacity - d_bytes;
-#if defined(LIBSAIS_OPENMP)
+#ifdef LIBSAIS_OPENMP
   const int32_t result = libsais_gsa_omp(docs.items, docs.gsa, d_bytes, remainder, NULL, cin_system.threads);
 #else
   const int32_t result = libsais_gsa(docs.items, docs.gsa, d_bytes, remainder, NULL);
 #endif
   if (result != 0) {
-    log_message(LOG_ERROR, "Failed to build SA");
+    log_message(LOG_ERROR, "Failed to build SA with code %d", result);
     return false;
   }
   int32_t *tmp = arena_bump_T(&arena_docs, int32_t, (uint32_t)d_bytes);
@@ -2714,7 +3175,7 @@ static bool reinit_documents(void) {
       offset = i + 1;
     }
   }
-#if defined(CIN_OPENMP)
+#ifdef CIN_OPENMP
 #pragma omp parallel for if (d_bytes >= (1 << 19))
 #endif
   for (int32_t i = 0; i < d_bytes; ++i) {
@@ -2863,7 +3324,9 @@ typedef enum {
 } MPV_Packet;
 
 typedef struct Overlapped_Context {
+#ifdef _WIN32
   OVERLAPPED ovl;
+#endif
   MPV_Packet type;
 } Overlapped_Context;
 
@@ -2880,24 +3343,20 @@ typedef struct Read_Buffer {
   struct Read_Buffer *next;
 } Read_Buffer;
 
-typedef struct Console_Timer_Ctx {
-  PTP_TIMER timer;
-  LONGLONG millis;
-  bool (*f)(struct Console_Timer_Ctx *ctx);
-  cache_node_struct_members(Console_Timer_Ctx);
-} Console_Timer_Ctx;
-
 typedef struct Instance {
-  Overlapped_Context ovl_ctx;
-  HANDLE pipe;
   Read_Buffer *buf_head;
   Read_Buffer *buf_tail;
+#ifdef _WIN32
+  Overlapped_Context ovl_ctx;
+  HANDLE socket;
   STARTUPINFOW si;
   PROCESS_INFORMATION pi;
+#else
+  int32_t socket;
+#endif
   HWND window;
   RECT rect;
   Playlist *playlist;
-  Console_Timer_Ctx *timer;
   bool full_screen;
   bool autoplay_mpv;
   bool locked;
@@ -2910,15 +3369,19 @@ cache_define(Instance_Cache, Instance);
 static struct {
   Write_Cache writes;
   Instance_Cache instances;
+#ifdef _WIN32
   HANDLE iocp;
+#endif
 } cin_io = {0};
 
+#ifdef _WIN32
 static bool create_pipe(Instance *instance, const wchar_t *name) {
   // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilea
   // https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-client
   static const int FOUND_TIMEOUT = 20000;
   static const int UNFOUND_TIMEOUT = 20000;
   static const int UNFOUND_WAIT = 50;
+  log_wmessage(LOG_ERROR, L"creating pipe: %s", name);
   int unfound_duration = 0;
   HANDLE hPipe = INVALID_HANDLE_VALUE;
   for (;;) {
@@ -2934,7 +3397,7 @@ static bool create_pipe(Instance *instance, const wchar_t *name) {
         return false;
       }
       log_message(LOG_DEBUG, "Failed to find pipe. Trying again in %dms...", UNFOUND_WAIT);
-      Sleep(UNFOUND_WAIT);
+      cin_sleep(UNFOUND_WAIT);
     } else {
       // Unlikely error, try to resolve by waiting
       log_last_error("Could not connect to pipe - Waiting for %dms", FOUND_TIMEOUT);
@@ -2944,16 +3407,16 @@ static bool create_pipe(Instance *instance, const wchar_t *name) {
       }
     }
   }
-  instance->pipe = hPipe;
-  log_message(LOG_TRACE, "Successfully created pipe (HANDLE) %p", (void *)instance->pipe);
+  instance->socket = hPipe;
+  log_message(LOG_TRACE, "Successfully created pipe (HANDLE) %p", (void *)instance->socket);
   return true;
 }
 
 static bool overlap_read(Instance *instance) {
-  ZeroMemory(&instance->ovl_ctx.ovl, sizeof(OVERLAPPED));
+  memset(&instance->ovl_ctx.ovl, 0, sizeof(OVERLAPPED));
   char *start = instance->buf_tail->buf + instance->buf_tail->bytes;
-  const DWORD to_read = (DWORD)(sizeof(instance->buf_tail->buf) - instance->buf_tail->bytes);
-  if (instance->pipe && !ReadFile(instance->pipe, start, to_read, NULL, &instance->ovl_ctx.ovl)) {
+  const uint32_t to_read = (uint32_t)(sizeof(instance->buf_tail->buf) - instance->buf_tail->bytes);
+  if (instance->socket && !ReadFile(instance->socket, start, to_read, NULL, &instance->ovl_ctx.ovl)) {
     if (GetLastError() != ERROR_IO_PENDING) {
       log_last_error("Failed to initialize read");
       return false;
@@ -2962,8 +3425,9 @@ static bool overlap_read(Instance *instance) {
   // Read is queued for iocp
   return true;
 }
+#endif
 
-#define CIN_WRITE_CMD_LEFT "{async:true,request_id:%lld,command:[\"%s\""
+#define CIN_WRITE_CMD_LEFT "{async:true,request_id:%" PRId64 ",command:[\"%s\""
 #define CIN_WRITE_CMD_MID ",\"%s\""
 #define CIN_WRITE_CMD_RIGHT "]}\n"
 #define CIN_WRITE_CMD_0ARG (CIN_WRITE_CMD_LEFT CIN_WRITE_CMD_RIGHT)
@@ -2982,9 +3446,10 @@ static bool overlap_write(Instance *instance, MPV_Packet type, const char *cmd, 
   assert(bytes > 0);
   assert((size_t)bytes < sizeof(msg->buf) - 1);
   msg->bytes = (size_t)bytes;
-  log_message(LOG_DEBUG, "Writing message (PID %lu) (%zu bytes): %.*s",
-              instance->pi.dwProcessId, msg->bytes, msg->bytes - 1, msg->buf);
-  if (instance->pipe && !WriteFile(instance->pipe, msg->buf, (DWORD)msg->bytes, NULL, &msg->ovl_ctx.ovl)) {
+  log_message(LOG_DEBUG, "Writing message (%p) (%zu bytes): %.*s",
+              instance, msg->bytes, msg->bytes - 1, msg->buf);
+#ifdef _WIN32
+  if (instance->socket && !WriteFile(instance->socket, msg->buf, (DWORD)msg->bytes, NULL, &msg->ovl_ctx.ovl)) {
     switch (GetLastError()) {
     case ERROR_IO_PENDING:
       // iocp will free write
@@ -3003,9 +3468,19 @@ static bool overlap_write(Instance *instance, MPV_Packet type, const char *cmd, 
     assert(false);
     return false;
   }
+#else
+  const ssize_t write_result = write(instance->socket, msg->buf, msg->bytes);
+  if (write_result < 0) {
+    log_last_error("Failed to write to file descriptor %d", instance->socket);
+  } else if (write_result < (ssize_t)msg->bytes) {
+    log_message(LOG_ERROR, "Expected '%zu' bytes but received '%ld': %s", msg->bytes, bytes, msg->buf);
+  }
+#endif
   log_message(LOG_TRACE, "Write call completed immediately.");
   return true;
 }
+
+#ifdef _WIN32
 
 typedef struct Window_Data {
   union {
@@ -3019,7 +3494,7 @@ typedef struct Window_Data {
   HWND hwnd;
 } Window_Data;
 
-static BOOL CALLBACK enum_windows_proc_pid(HWND hwnd, LPARAM lParam) {
+static int32_t CALLBACK enum_windows_proc_pid(HWND hwnd, LPARAM lParam) {
   Window_Data *data = (Window_Data *)lParam;
   DWORD pid;
   GetWindowThreadProcessId(hwnd, &pid);
@@ -3030,13 +3505,13 @@ static BOOL CALLBACK enum_windows_proc_pid(HWND hwnd, LPARAM lParam) {
   return TRUE;
 }
 
-static HWND find_window_by_pid(DWORD pid) {
+static HWND find_window_by_pid(uint32_t pid) {
   Window_Data data = {.pid = pid, .hwnd = NULL};
   EnumWindows(enum_windows_proc_pid, (LPARAM)&data);
   return data.hwnd;
 }
 
-static BOOL CALLBACK enum_windows_proc_name(HWND hwnd, LPARAM lParam) {
+static int32_t CALLBACK enum_windows_proc_name(HWND hwnd, LPARAM lParam) {
   Window_Data *data = (Window_Data *)lParam;
   wchar_t *pattern = data->name;
   wchar_t query[MAX_CLASS_NAME];
@@ -3054,11 +3529,11 @@ static HWND find_window_by_name(wchar_t *name) {
   return data.hwnd;
 }
 
-static BOOL CALLBACK enum_windows_proc_console(HWND hwnd, LPARAM lParam) {
+static int32_t CALLBACK enum_windows_proc_console(HWND hwnd, LPARAM lParam) {
   Window_Data *data = (Window_Data *)lParam;
   DWORD pid;
   GetWindowThreadProcessId(hwnd, &pid);
-  for (DWORD i = 0; i < data->count; i++) {
+  for (uint32_t i = 0; i < data->count; i++) {
     if (pid == data->pids[i]) {
       if (IsWindowVisible(hwnd) && GetWindow(hwnd, GW_OWNER) == NULL) {
         data->hwnd = hwnd;
@@ -3083,6 +3558,199 @@ static HWND find_window_of_console(void) {
   EnumWindows(enum_windows_proc_console, (LPARAM)&data);
   array_free_items(&arena_iocp_thread, &pids);
   return data.hwnd;
+}
+#else
+typedef struct _XDisplay Display;
+typedef unsigned long XID;
+typedef XID Window;
+typedef XID Drawable;
+typedef int Status;
+typedef int Bool;
+typedef struct _XErrorEvent XErrorEvent;
+
+static_assert(sizeof(Window) == sizeof(HWND), "Changed types");
+
+typedef Display *(*fn_XOpenDisplay)(const char *);
+typedef int (*fn_XCloseDisplay)(Display *);
+typedef Window (*fn_XDefaultRootWindow)(Display *);
+typedef Status (*fn_XQueryTree)(Display *, Window, Window *, Window *, Window **, unsigned int *);
+typedef int (*fn_XFetchName)(Display *, Window, char **);
+typedef Status (*fn_XGetGeometry)(Display *, Drawable, Window *, int *, int *, unsigned int *, unsigned int *, unsigned int *, unsigned int *);
+typedef int (*fn_XMoveResizeWindow)(Display *, Window, int, int, unsigned int, unsigned int);
+typedef Bool (*fn_XTranslateCoordinates)(Display *, Window, Window, int, int, int *, int *, Window *);
+typedef int (*fn_XSetErrorHandler)(int (*handler)(Display *, XErrorEvent *));
+typedef int (*fn_XFlush)(Display *);
+typedef int (*fn_XSync)(Display *, Bool);
+typedef int (*fn_XFree)(void *);
+
+static void *pxlib;
+static Display *pxdisplay;
+
+static fn_XOpenDisplay pXOpenDisplay;
+static fn_XCloseDisplay pXCloseDisplay;
+static fn_XDefaultRootWindow pXDefaultRootWindow;
+static fn_XQueryTree pXQueryTree;
+static fn_XFetchName pXFetchName;
+static fn_XGetGeometry pXGetGeometry;
+static fn_XMoveResizeWindow pXMoveResizeWindow;
+static fn_XTranslateCoordinates pXTranslateCoordinates;
+static fn_XSetErrorHandler pXSetErrorHandler;
+static fn_XFlush pXFlush;
+static fn_XSync pXSync;
+static fn_XFree pXFree;
+
+static int xerror_handler(Display *d, XErrorEvent *e) {
+  (void)d;
+  (void)e;
+  return 0;
+}
+
+#define XLOAD(symbol)                                                      \
+  do {                                                                     \
+    assert(pxlib);                                                         \
+    *(void **)(&p##symbol) = dlsym(pxlib, #symbol);                        \
+    if (!p##symbol) {                                                      \
+      log_message(LOG_DEBUG, "Failed to load %s: %s", #symbol, dlerror()); \
+      return false;                                                        \
+    }                                                                      \
+  } while (0)
+
+static bool init_xlib(void) {
+  if (!(pxlib = dlopen("libX11.so.6", RTLD_LAZY)) &&
+      !(pxlib = dlopen("libX11.so", RTLD_LAZY))) {
+    log_last_error("Failed to dlopen X11");
+    return false;
+  }
+  XLOAD(XOpenDisplay);
+  XLOAD(XCloseDisplay);
+  XLOAD(XDefaultRootWindow);
+  XLOAD(XQueryTree);
+  XLOAD(XFetchName);
+  XLOAD(XGetGeometry);
+  XLOAD(XMoveResizeWindow);
+  XLOAD(XTranslateCoordinates);
+  XLOAD(XSetErrorHandler);
+  XLOAD(XFlush);
+  XLOAD(XSync);
+  XLOAD(XFree);
+  pxdisplay = pXOpenDisplay(NULL);
+  if (!pxdisplay) {
+    log_message(LOG_ERROR, "Failed to open default display");
+    return false;
+  }
+  pXSetErrorHandler(xerror_handler);
+  return true;
+}
+
+#undef XLOAD
+
+static Window find_window_by_name(Display *dsp, Window curr, const char *name) {
+  const size_t name_len = strlen(name);
+  array_struct(Window) queue = {0};
+  array_push(&arena_console, &queue, curr);
+  Window result = 0;
+  uint32_t i = 0;
+  while (i < queue.count) {
+    curr = queue.items[i++];
+    Window root;
+    Window parent;
+    Window *children = NULL;
+    uint32_t nchildren;
+    if (!pXQueryTree(dsp, curr, &root, &parent, &children, &nchildren)) {
+      log_last_error("Failed to query X11 window tree");
+    } else {
+      for (uint32_t j = 0; j < nchildren; ++j) {
+        Window child = children[j];
+        char *child_name = NULL;
+        pXFetchName(dsp, child, &child_name);
+        if (child_name) {
+          log_message(LOG_TRACE, "Named child window: %s", child_name);
+          const bool match = strncmp(child_name, name, name_len) == 0;
+          pXFree(child_name);
+          if (match) {
+            log_message(LOG_DEBUG, "Child window is a match: %s", name);
+            array_clear(&queue);
+            result = child;
+            break;
+          }
+        }
+        array_push(&arena_console, &queue, child);
+      }
+    }
+    if (children) pXFree(children);
+  }
+  array_free_items(&arena_console, &queue);
+  return result;
+}
+#endif
+
+static bool cin_iswindow(HWND window) {
+#ifdef _WIN32
+  return IsWindow(window);
+#else
+  if (!pxlib || !window) return false;
+  Window root;
+  int x, y;
+  unsigned int w, h, bw, d;
+  Status status = pXGetGeometry(pxdisplay, window, &root, &x, &y, &w, &h, &bw, &d);
+  return status != 0;
+#endif
+}
+
+static inline bool cin_isvisible(HWND window) {
+#ifdef _WIN32
+  return IsWindowVisible(window);
+#else
+  // NOTE: does not check window map state
+  return cin_iswindow(window);
+#endif
+}
+
+static int32_t cin_getwindow(HWND window, RECT *out_rect) {
+#ifdef _WIN32
+  return GetWindowRect(window, out_rect);
+#else
+  if (!pxlib || !window) return 0;
+  pXSetErrorHandler(xerror_handler);
+  Window root;
+  int x, y;
+  unsigned int w, h, bw, d;
+  Status status = pXGetGeometry(pxdisplay, window, &root, &x, &y, &w, &h, &bw, &d);
+  if (status) {
+    int screen_x, screen_y;
+    Window child;
+    status = pXTranslateCoordinates(pxdisplay, window, root, 0, 0, &screen_x, &screen_y, &child);
+    if (status) {
+      out_rect->left = screen_x - (int)bw;
+      out_rect->top = screen_y - (int)bw;
+      out_rect->right = screen_x + (int)w + (int)bw;
+      out_rect->bottom = screen_y + (int)h + (int)bw;
+    } else {
+      log_message(LOG_ERROR, "Failed to translate window geometry");
+    }
+  } else {
+    log_message(LOG_ERROR, "Failed to get window geometry");
+  }
+  pXFlush(pxdisplay);
+  pXSetErrorHandler(NULL);
+  return status;
+#endif
+}
+
+static int32_t cin_movewindow(HWND window, RECT rect) {
+  const int32_t x = (int32_t)rect.left;
+  const int32_t y = (int32_t)rect.top;
+  const int32_t cx = (int32_t)rect.right;
+  const int32_t cy = (int32_t)rect.bottom;
+#ifdef _WIN32
+  return SetWindowPos(window, HWND_TOPMOST, x, y, cx, cy, SWP_SHOWWINDOW);
+#else
+  assert(cx >= 0);
+  assert(cy >= 0);
+  int res = pXMoveResizeWindow(pxdisplay, window, x, y, (uint32_t)cx, (uint32_t)cy);
+  pXSync(pxdisplay, false);
+  return res;
+#endif
 }
 
 static inline void playlist_setup_shuffle(Playlist *playlist) {
@@ -3158,12 +3826,17 @@ static inline void playlist_play_core(Instance *instance, const char *arg) {
   }
 }
 
-static inline void playlist_play(Instance *instance) {
-  playlist_play_core(instance, NULL);
-}
-
 static inline void playlist_insert(Instance *instance) {
   playlist_play_core(instance, "insert-next");
+}
+
+static inline void playlist_play(Instance *instance) {
+  if (instance->autoplay_mpv) {
+    playlist_insert(instance);
+    overlap_write(instance, MPV_WRITE, "playlist-next", NULL, NULL);
+  } else {
+    playlist_play_core(instance, NULL);
+  }
 }
 
 #define CIN_MPVKEY_LEFT "\""
@@ -3175,13 +3848,23 @@ static inline void playlist_insert(Instance *instance) {
 #define CIN_MPVKEY_DATA CIN_MPVKEY("data")
 #define CIN_MPVKEY_REASON CIN_MPVKEY("reason")
 
+#ifndef _WIN32
+static int32_t listener_pipe[2];
+static pthread_mutex_t listener_lock = PTHREAD_MUTEX_INITIALIZER;
+static array_struct(struct pollfd) listener_pfds = {0};
+static array_struct(Instance *) listener_pfds_to_instances = {0};
+#endif
+
 static inline void mpv_kill(Instance *instance) {
   assert(instance->playlist);
   --instance->playlist->targets;
+#ifndef _WIN32
+  close(instance->socket);
+#endif
   Read_Buffer *buf_head = instance->buf_head;
   Read_Buffer *buf_tail = instance->buf_tail;
   Instance *next = instance->next;
-  ZeroMemory(instance, sizeof(Instance));
+  memset(instance, 0, sizeof(Instance));
   playlist_set_default(instance);
   instance->buf_head = buf_head;
   instance->buf_tail = buf_tail;
@@ -3194,37 +3877,25 @@ static size_t mpv_demand = 0;
 static inline void mpv_lock(void) {
   mpv_supply = 0;
   mpv_demand = 0;
+#ifdef _WIN32
   LockSetForegroundWindow(LSFW_LOCK);
-}
-
-static inline void mpv_restore_focus(void) {
-  if (!repl.window && (repl.viewport_bound || !(repl.window = GetConsoleWindow()))) {
-    // Since repl.window is set by calling GetForegroundWindow on launch,
-    // this branch is unlikely to be triggered.
-    static const size_t MPV_RESTORE_TRIES = 20;
-    static const DWORD MPV_RESTORE_DELAY = 100;
-    for (size_t i = 0; i < MPV_RESTORE_TRIES; ++i) {
-      repl.window = find_window_of_console();
-      if (repl.window) break;
-      else Sleep(MPV_RESTORE_DELAY);
-    }
-    assert(repl.window && "terminal window not found");
-  }
-  SetWindowPos(repl.window, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+#endif
 }
 
 static inline void mpv_unlock(void) {
+#ifdef _WIN32
   LockSetForegroundWindow(LSFW_UNLOCK);
+#endif
 }
 
 // NOTE: voidtools Everything supports pipe '|' as search separator and '"' for spaces
-#define CIN_CLIPBOARD_SEPARATOR L'|'
-#define CIN_CLIPBOARD_ENCLOSER L'"'
+#define CIN_CLIPBOARD_SEPARATOR '|'
+#define CIN_CLIPBOARD_ENCLOSER '"'
 
 static inline void iocp_parse(Instance *instance, const char *buf_start, size_t buf_offset) {
   const char *buf = buf_start + buf_offset;
   char *p = NULL;
-  if ((p = strstr(buf, CIN_MPVKEY_EVENT))) {
+  if ((p = (char *)strstr(buf, CIN_MPVKEY_EVENT))) {
     p += cin_strlen(CIN_MPVKEY_EVENT);
     assert(*p == '\"');
     ++p;
@@ -3241,10 +3912,8 @@ static inline void iocp_parse(Instance *instance, const char *buf_start, size_t 
       }
     } else if (CIN_MPVVAL(p, "file-loaded")) {
       if (instance->autoplay_mpv) playlist_insert(instance);
-    } else if (CIN_MPVVAL(p, "video-reconfig")) {
-      mpv_restore_focus();
     }
-  } else if ((p = strstr(buf, CIN_MPVKEY_REQUEST))) {
+  } else if ((p = (char *)strstr(buf, CIN_MPVKEY_REQUEST))) {
     p += cin_strlen(CIN_MPVKEY_REQUEST);
     assert(cin_isnum(*p));
     int64_t req_id = *p - '0';
@@ -3254,18 +3923,15 @@ static inline void iocp_parse(Instance *instance, const char *buf_start, size_t 
     assert(msg->bytes);
     log_message(LOG_DEBUG, "Recovered original write: %p (%zu bytes)", msg, msg->bytes);
     switch (msg->ovl_ctx.type) {
-    case MPV_LOADFILE:
-      // overlap_write(instance, MPV_WRITE, "playlist-next", NULL, NULL);
-      break;
     case MPV_WINDOW_ID: {
       if (++mpv_supply == mpv_demand) mpv_unlock();
-      char *data = strstr(buf, CIN_MPVKEY_DATA);
+      char *data = (char *)strstr(buf, CIN_MPVKEY_DATA);
       if (!data) {
         // NOTE: If the request was delivered before mpv managed to create
         // the window, it will return something like "error: property
         // unavailable": retry.
-        static const DWORD GET_WINDOW_DELAY = 200;
-        Sleep(GET_WINDOW_DELAY);
+        static const long GET_WINDOW_DELAY = 200;
+        cin_sleep(GET_WINDOW_DELAY);
         overlap_write(instance, MPV_WINDOW_ID, "get_property", "window-id", NULL);
         break;
       }
@@ -3274,35 +3940,29 @@ static inline void iocp_parse(Instance *instance, const char *buf_start, size_t 
       assert(cin_isnum(*data));
       intptr_t window_id = 0;
       for (; cin_isnum(*data); ++data) window_id = (window_id * 10) + *data - '0';
-      assert(IsWindow((HWND)window_id));
-      assert(IsWindowVisible((HWND)window_id));
+      assert(cin_iswindow((HWND)window_id));
+      assert(cin_isvisible((HWND)window_id));
       instance->window = (HWND)window_id;
-      GetWindowRect(instance->window, &instance->rect);
+      cin_getwindow(instance->window, &instance->rect);
     } break;
     case MPV_QUIT:
       mpv_kill(instance);
       break;
-    case MPV_SET_GEOMETRY:
-      mpv_restore_focus();
-      break;
     case MPV_GET_PATH: {
-      char *data = strstr(buf, CIN_MPVKEY_DATA);
+      char *data = (char *)strstr(buf, CIN_MPVKEY_DATA);
       assert(data);
       data += cin_strlen(CIN_MPVKEY_DATA);
       assert(*data == '"');
       ++data;
       char *tail = strchr(data, '"');
       assert(tail);
-      const int32_t len_utf8 = (int32_t)(tail - data);
-      const int32_t len = utf8_to_utf16_nraw(data, len_utf8);
-      assert(len > 0);
-      const uint32_t len_u32 = (uint32_t)len;
-      wchar_t *url_utf16 = utf16_buf_raw.items;
+      const int32_t len = (int32_t)(tail - data);
+      assert(len >= 0);
       array_push(&arena_iocp_thread, &clipboard, CIN_CLIPBOARD_ENCLOSER);
-      wchar_t prev = L'\0';
-      for (uint32_t i = 0; i < len_u32; ++i) {
-        const wchar_t curr = url_utf16[i];
-        if (prev != L'\\' || curr != L'\\') {
+      char prev = '\0';
+      for (uint32_t i = 0; i < (uint32_t)len; ++i) {
+        const char curr = data[i];
+        if (prev != '\\' || curr != '\\') {
           array_push(&arena_iocp_thread, &clipboard, curr);
         }
         prev = curr;
@@ -3312,23 +3972,28 @@ static inline void iocp_parse(Instance *instance, const char *buf_start, size_t 
       if (++clipboard.supply == clipboard.demand) {
         clipboard.supply = 0;
         clipboard.demand = 0;
-        if (clipboard.count) clipboard.items[clipboard.count - 1] = L'\0';
+        if (clipboard.count) clipboard.items[clipboard.count - 1] = '\0';
+        cin_write_safe(clipboard.items, clipboard.count - 1);
+#ifdef _WIN32
         if (!OpenClipboard(NULL)) {
           log_last_error("Failed to open clipboard");
           return;
         }
         EmptyClipboard();
-        HGLOBAL hglb = GlobalAlloc(GMEM_MOVEABLE, array_bytes(&clipboard));
+        const int32_t len_utf16 = utf8_to_utf16_nraw(clipboard.items, (int32_t)clipboard.count);
+        assert(len_utf16 > 0);
+        HGLOBAL hglb = GlobalAlloc(GMEM_MOVEABLE, array_bytes(&utf16_buf_raw));
         if (!hglb) {
           log_last_error("Failed to allocate global memory for clipboard");
           CloseClipboard();
           return;
         }
         LPWSTR lpwstr = GlobalLock(hglb);
-        wmemcpy(lpwstr, clipboard.items, clipboard.count);
+        wmemcpy(lpwstr, utf16_buf_raw.items, (size_t)len_utf16);
         GlobalUnlock(hglb);
         SetClipboardData(CF_UNICODETEXT, hglb);
         CloseClipboard();
+#endif
       }
     } break;
     default:
@@ -3338,6 +4003,62 @@ static inline void iocp_parse(Instance *instance, const char *buf_start, size_t 
   }
 }
 
+static inline void iocp_process(Instance *instance, size_t bytes) {
+  assert(!memchr(instance->buf_tail->buf, '\0', instance->buf_tail->bytes));
+  assert(sizeof(instance->buf_tail->buf) - instance->buf_tail->bytes >= bytes);
+  char *lf = memchr(instance->buf_tail->buf + instance->buf_tail->bytes, '\n', bytes);
+  instance->buf_tail->bytes += bytes;
+  if (lf) {
+    bool multi = instance->buf_tail != instance->buf_head;
+    assert((lf - instance->buf_tail->buf) >= 0);
+    size_t tail_pos = (size_t)(lf - instance->buf_tail->buf);
+    char *buf = instance->buf_head->buf;
+    size_t len = instance->buf_head->bytes;
+    if (multi) {
+      for (Read_Buffer *b = instance->buf_head->next; b; b = b->next) {
+        assert(!memchr(b->buf, '\0', b->bytes));
+        len += b->bytes;
+      }
+      char *contiguous_buf = arena_bump_T(&arena_iocp_thread, char, (uint32_t)len);
+      size_t offset = 0;
+      for (Read_Buffer *b = instance->buf_head; b != instance->buf_tail; b = b->next) {
+        assert(b);
+        memcpy(contiguous_buf + offset, b->buf, b->bytes);
+        offset += b->bytes;
+        b->bytes = 0;
+      }
+      memcpy(contiguous_buf + offset, instance->buf_tail, instance->buf_tail->bytes);
+      instance->buf_tail->bytes -= tail_pos;
+      instance->buf_tail->bytes -= 1;
+      tail_pos += offset;
+      buf = contiguous_buf;
+    }
+    size_t buf_offset = 0;
+    for (;;) {
+      *lf = '\0';
+      ++tail_pos;
+      log_message(LOG_DEBUG, "Message (%p): %.*s", instance, tail_pos, buf + buf_offset);
+      iocp_parse(instance, buf, buf_offset);
+      if (tail_pos >= len) break;
+      lf = memchr(buf + tail_pos, '\n', len - tail_pos);
+      if (!lf) break;
+      buf_offset = tail_pos;
+      assert((lf - buf) >= 0);
+      tail_pos = (size_t)(lf - buf);
+    }
+    const size_t remainder = tail_pos < len ? len - tail_pos : 0;
+    memcpy(instance->buf_head, buf + tail_pos, remainder);
+    instance->buf_head->bytes = remainder;
+    instance->buf_tail = instance->buf_head;
+    if (multi) arena_free_pos(&arena_iocp_thread, (uint8_t *)buf, (uint32_t)len);
+  } else {
+    if (instance->buf_tail->next) instance->buf_tail->next->bytes = 0;
+    else instance->buf_tail->next = arena_bump_T1(&arena_iocp_thread, Read_Buffer);
+    instance->buf_tail = instance->buf_tail->next;
+  }
+}
+
+#ifdef _WIN32
 static DWORD WINAPI iocp_listener(LPVOID lp_param) {
   HANDLE iocp = (HANDLE)lp_param;
   for (;;) {
@@ -3357,292 +4078,140 @@ static DWORD WINAPI iocp_listener(LPVOID lp_param) {
       }
     } else {
       if (bytes) {
-        assert(!memchr(instance->buf_tail->buf, '\0', instance->buf_tail->bytes));
-        assert(sizeof(instance->buf_tail->buf) - instance->buf_tail->bytes >= bytes);
-        char *lf = memchr(instance->buf_tail->buf + instance->buf_tail->bytes, '\n', bytes);
-        instance->buf_tail->bytes += bytes;
-        if (lf) {
-          bool multi = instance->buf_tail != instance->buf_head;
-          assert((lf - instance->buf_tail->buf) >= 0);
-          size_t tail_pos = (size_t)(lf - instance->buf_tail->buf);
-          char *buf = instance->buf_head->buf;
-          size_t len = instance->buf_head->bytes;
-          if (multi) {
-            for (Read_Buffer *b = instance->buf_head->next; b; b = b->next) {
-              assert(!memchr(b->buf, '\0', b->bytes));
-              len += b->bytes;
-            }
-            char *contiguous_buf = arena_bump_T(&arena_iocp_thread, char, (uint32_t)len);
-            size_t offset = 0;
-            for (Read_Buffer *b = instance->buf_head; b != instance->buf_tail; b = b->next) {
-              assert(b);
-              memcpy(contiguous_buf + offset, b->buf, b->bytes);
-              offset += b->bytes;
-              b->bytes = 0;
-            }
-            memcpy(contiguous_buf + offset, instance->buf_tail, instance->buf_tail->bytes);
-            instance->buf_tail->bytes -= tail_pos;
-            instance->buf_tail->bytes -= 1;
-            tail_pos += offset;
-            buf = contiguous_buf;
-          }
-          size_t buf_offset = 0;
-          for (;;) {
-            *lf = '\0';
-            ++tail_pos;
-            log_message(LOG_DEBUG, "Message (%p): %.*s", instance, tail_pos, buf + buf_offset);
-            iocp_parse(instance, buf, buf_offset);
-            if (tail_pos >= len) break;
-            lf = memchr(buf + tail_pos, '\n', len - tail_pos);
-            if (!lf) break;
-            buf_offset = tail_pos;
-            assert((lf - buf) >= 0);
-            tail_pos = (size_t)(lf - buf);
-          }
-          const size_t remainder = tail_pos < len ? len - tail_pos : 0;
-          memcpy(instance->buf_head, buf + tail_pos, remainder);
-          instance->buf_head->bytes = remainder;
-          instance->buf_tail = instance->buf_head;
-          if (multi) arena_free_pos(&arena_iocp_thread, (uint8_t *)buf, (uint32_t)len);
-        } else {
-          if (instance->buf_tail->next) instance->buf_tail->next->bytes = 0;
-          else instance->buf_tail->next = arena_bump_T1(&arena_iocp_thread, Read_Buffer);
-          instance->buf_tail = instance->buf_tail->next;
-        }
+        iocp_process(instance, (size_t)bytes);
       }
       overlap_read(instance);
     }
   }
   return 0;
 }
-
-static inline bool bounded_console(HANDLE console) {
-  assert(console);
-  SHORT prev_bot = 0;
-  SHORT next_bot = 0;
-  CONSOLE_CURSOR_INFO cursor_info = {0};
-  GetConsoleCursorInfo(console, &cursor_info);
-  const BOOL prev_vis = cursor_info.bVisible;
-  cursor_info.bVisible = false;
-  SetConsoleCursorInfo(console, &cursor_info);
-  CONSOLE_SCREEN_BUFFER_INFO info = {0};
-  GetConsoleScreenBufferInfo(console, &info);
-  prev_bot = info.srWindow.Bottom;
-  COORD prev_pos = info.dwCursorPosition;
-  COORD next_pos = {.X = 0, .Y = prev_bot + 1};
-  SetConsoleCursorPosition(console, next_pos);
-  GetConsoleScreenBufferInfo(console, &info);
-  SetConsoleCursorPosition(console, prev_pos);
-  cursor_info.bVisible = prev_vis;
-  SetConsoleCursorInfo(console, &cursor_info);
-  next_bot = info.srWindow.Bottom;
-  return prev_bot == next_bot;
+#else
+static void *mpv_listener(void *arg) {
+  (void)arg;
+  struct pollfd root_pfd = {.fd = listener_pipe[0], .events = POLLIN};
+  array_push(&arena_iocp_thread, &listener_pfds, root_pfd);
+  for (;;) {
+    const int32_t poll_result = poll(listener_pfds.items, (nfds_t)listener_pfds.count, -1);
+    if (poll_result == 0) {
+      log_message(LOG_ERROR, "Listener thread timed out polling");
+      assert(false);
+      break;
+    } else if (poll_result < 0) {
+      log_last_error("Listener thread failed poll");
+      assert(false);
+      break;
+    }
+    if (listener_pfds.items[0].revents & POLLIN) {
+      char _val;
+      read(listener_pipe[0], &_val, 1);
+      pthread_mutex_lock(&listener_lock);
+      const uint32_t next_index = listener_pfds.count - 1;
+      // main thread has added 1 or more instances
+      // map so next poll includes them
+      assert(listener_pfds_to_instances.count >= next_index);
+      Instance *instance = listener_pfds_to_instances.items[next_index];
+      assert(instance);
+      assert(instance->socket);
+      struct pollfd new_pfd = {.fd = instance->socket, .events = POLLIN};
+      array_push(&arena_iocp_thread, &listener_pfds, new_pfd);
+      pthread_mutex_unlock(&listener_lock);
+    }
+    const uint32_t nfds = listener_pfds.count;
+    int32_t w = -1;
+    for (uint32_t i = 1; i < nfds; ++i) {
+      struct pollfd pfd = listener_pfds.items[i];
+      Instance *instance = listener_pfds_to_instances.items[i - 1];
+      if (instance->socket) {
+        if (pfd.revents & POLLIN) {
+          char *start = instance->buf_tail->buf + instance->buf_tail->bytes;
+          const size_t to_read = sizeof(instance->buf_tail->buf) - instance->buf_tail->bytes;
+          const ssize_t bytes = read(pfd.fd, start, to_read);
+          if (bytes > 0) {
+            iocp_process(instance, (size_t)bytes);
+          } else {
+            // socket has been terminated, mpv likely closed manually
+          }
+        }
+        if (w >= 0) {
+          listener_pfds.items[w] = listener_pfds.items[i];
+          listener_pfds_to_instances.items[w - 1] = listener_pfds_to_instances.items[i - 1];
+          ++w;
+        }
+      } else {
+        if (w < 0) w = (int32_t)i;
+        --listener_pfds.count;
+        --listener_pfds_to_instances.count;
+      }
+    }
+  }
+  return 0;
 }
-
-#define viewport_warning L"Large inputs can cause minor scrollback issues in your console. " \
-                         "You can use vanilla cmd.exe (Command Prompt), "                    \
-                         "which works correctly." WCRLF
-
+#endif
 static inline bool init_repl(void) {
-  repl.window = GetForegroundWindow();
+#ifdef _WIN32
   if (!SetConsoleCP(CP_UTF8)) goto code_page;
   if (!SetConsoleOutputCP(CP_UTF8)) goto code_page;
   if ((repl.in = GetStdHandle(STD_INPUT_HANDLE)) == INVALID_HANDLE_VALUE) goto handle_in;
   if (!GetConsoleMode(repl.in, &repl.in_mode)) goto handle_in;
-  if (!SetConsoleMode(repl.in, repl.in_mode | ENABLE_PROCESSED_INPUT | ENABLE_WINDOW_INPUT)) goto handle_in;
+  DWORD new_in_mode = repl.in_mode;
+  new_in_mode &= ~(DWORD)ENABLE_LINE_INPUT;
+  new_in_mode &= ~(DWORD)ENABLE_ECHO_INPUT;
+  new_in_mode |= ENABLE_VIRTUAL_TERMINAL_INPUT;
+  if (!SetConsoleMode(repl.in, new_in_mode)) goto handle_in;
   if ((repl.out = GetStdHandle(STD_OUTPUT_HANDLE)) == INVALID_HANDLE_VALUE) goto handle_out;
-  repl.viewport_bound = bounded_console(repl.out);
+  if (!GetConsoleMode(repl.out, &repl.out_mode)) goto handle_out;
+  DWORD new_out_mode = repl.out_mode;
+  new_out_mode |= ENABLE_PROCESSED_OUTPUT;
+  new_out_mode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+  if (!SetConsoleMode(repl.out, new_out_mode)) goto handle_out;
+#else
+  tcgetattr(STDIN_FILENO, &repl.modes);
+  struct termios tmp = repl.modes;
+  tmp.c_lflag &= (tcflag_t)~ICANON;
+  tmp.c_lflag &= (tcflag_t)~ECHO;
+  tcsetattr(STDIN_FILENO, TCSANOW, &tmp);
+#endif
   if (!arena_chunk_init(&arena_console, CIN_ARENA_CAP)) goto memory;
   repl.msg = create_console_message();
   repl.msg_index = 0;
-  CONSOLE_SCREEN_BUFFER_INFO buffer_info;
-  if (!GetConsoleScreenBufferInfo_safe(repl.out, &buffer_info)) goto handle_out;
-  repl.dwSize_X = (DWORD)buffer_info.dwSize.X;
-  repl.home = (COORD){.X = PREFIX, .Y = buffer_info.dwCursorPosition.Y};
-  repl._filled = 0;
-  if (!GetConsoleCursorInfo(repl.out, &repl.cursor_info)) goto handle_out;
-  if (!WriteConsoleW(repl.out, PREFIX_STR, PREFIX_STRLEN, NULL, NULL)) goto handle_out;
+  term_get_info(&repl.cursor, &repl.size);
+  repl.cursor.X = HOME_X;
+  repl.home = repl.cursor;
+#ifdef _WIN32
   array_init(&arena_console, &wwrite_buf, CIN_MAX_PATH);
-  array_init(&arena_console, &write_buf, CIN_MAX_PATH);
-  array_init(&arena_console, &preview, CIN_MAX_PATH);
   array_init(&arena_console, &utf16_buf_raw, CIN_MAX_PATH);
   array_init(&arena_console, &utf16_buf_norm, CIN_MAX_PATH);
+#endif
+  array_init(&arena_console, &write_buf, CIN_MAX_PATH);
+  array_init(&arena_console, &preview, CIN_MAX_PATH);
   array_init(&arena_console, &utf8_buf, CIN_MAX_PATH_BYTES);
+  cin_swrite(PREFIX_STR);
   return true;
+#ifdef _WIN32
 code_page:
-  wswrite(L"Failed to modify console code page" WCRLF);
+  cin_swrite("Failed to modify console code page" CRLF);
   return false;
 handle_in:
-  wswrite(L"Failed to setup console input handle" WCRLF);
+  cin_swrite("Failed to setup console input handle" CRLF);
   return false;
 handle_out:
-  wswrite(L"Failed to setup console output handle" WCRLF);
+  cin_swrite("Failed to setup console output handle" CRLF);
+#endif
 memory:
-  wswrite(L"Failed to allocate memory for repl/console" WCRLF);
+  cin_swrite("Failed to allocate memory for repl/console" CRLF);
   return false;
-}
-
-static inline bool resize_console(Console_Timer_Ctx *ctx) {
-  (void)ctx;
-  static array_struct(CHAR_INFO) console_buffer = {0};
-  // NOTE: Windows cursor / display is not fully predictable. As such,
-  // we search for a unique token that marks the start of the input.
-  // There are probably scenarios where the token (printed by us) is
-  // no longer visible; if this is encountered, probably just fully
-  // redraw the console.
-  EnterCriticalSection(&log_lock);
-  hide_cursor();
-  CONSOLE_SCREEN_BUFFER_INFO buffer_info;
-  if (!GetConsoleScreenBufferInfo_safe(repl.out, &buffer_info)) {
-    log_last_error("Failed to read console output region");
-    goto cleanup;
-  }
-  assert(buffer_info.dwCursorPosition.Y < buffer_info.dwSize.Y - 1);
-  const DWORD buf_dwSize_X = (DWORD)buffer_info.dwSize.X;
-  if (buf_dwSize_X == repl.dwSize_X) goto cleanup;
-  const bool bottom_up = buf_dwSize_X > repl.dwSize_X;
-  COORD upper_cursor = buffer_info.dwCursorPosition;
-  DWORD upper_bound = cursor_to_index(buffer_info.dwCursorPosition, buf_dwSize_X);
-  COORD lower_cursor = {.X = 0, .Y = repl.home.Y};
-  DWORD lower_bound = cursor_to_index(lower_cursor, buf_dwSize_X);
-  assert(upper_bound > 0);
-  if (bottom_up && lower_bound >= upper_bound) {
-    lower_bound = upper_bound / 2;
-    lower_cursor = index_to_cursor(lower_bound, buf_dwSize_X);
-  }
-  SHORT rows = upper_cursor.Y - lower_cursor.Y + 1;
-  assert(rows > 0);
-  assert(rows <= SHRT_MAX);
-  const SHORT cols = (SHORT)buf_dwSize_X;
-  COORD buffer_size = {.X = cols, .Y = rows};
-  DWORD buffer_count = (DWORD)cols * (DWORD)rows;
-  array_resize(&arena_console, &console_buffer, buffer_count);
-  COORD region_start = {.X = 0, .Y = 0};
-  SMALL_RECT region = {
-      .Left = 0,
-      .Top = lower_cursor.Y,
-      .Right = cols - 1,
-      .Bottom = upper_cursor.Y};
-  if (!ReadConsoleOutputW(repl.out, console_buffer.items, buffer_size, region_start, &region)) {
-    log_last_error("Failed to read console output region");
-    goto cleanup;
-  }
-  bool match = false;
-  if (bottom_up) {
-    for (;;) {
-      for (SHORT i = 0; i < rows; ++i) {
-        const SHORT row = rows - 1 - i;
-        assert(row >= 0);
-        const DWORD head = (DWORD)row * buf_dwSize_X;
-        if (console_buffer.items[head].Char.UnicodeChar == PREFIX_TOKEN) {
-          repl.home.Y = lower_cursor.Y + row;
-          match = true;
-          goto outer;
-        }
-      }
-      if (lower_bound == 0) goto outer;
-      upper_bound = lower_bound;
-      upper_cursor = lower_cursor;
-      lower_bound /= 2;
-      lower_cursor = index_to_cursor(lower_bound, buf_dwSize_X);
-      rows = upper_cursor.Y - lower_cursor.Y + 1;
-      buffer_size.Y = rows;
-      buffer_count = (DWORD)cols * (DWORD)rows;
-      array_resize(&arena_console, &console_buffer, buffer_count);
-      region.Left = 0;
-      region.Top = lower_cursor.Y;
-      region.Right = cols - 1;
-      region.Bottom = upper_cursor.Y;
-      if (!ReadConsoleOutputW(repl.out, console_buffer.items, buffer_size, region_start, &region)) {
-        log_last_error("Failed to read console output region");
-        goto cleanup;
-      }
-    }
-  outer:;
-  } else {
-    for (DWORD i = 0; i < (DWORD)rows; ++i) {
-      if (console_buffer.items[i * buf_dwSize_X].Char.UnicodeChar == PREFIX_TOKEN) {
-        repl.home.Y = lower_cursor.Y + (SHORT)i;
-        match = true;
-        break;
-      }
-    }
-  }
-  assert(match && "Failed to find prefix token in console output. viewport_bound?");
-  const SHORT msg_shift = (SHORT)((repl.msg->count + PREFIX) / buf_dwSize_X);
-  preview.pos.Y = repl.home.Y + msg_shift + 1;
-  assert(preview.pos.X == 0);
-  if (preview.len > buf_dwSize_X) {
-    preview.pos.X = 0;
-    ++preview.pos.Y;
-    const DWORD leftover = preview.len - buf_dwSize_X;
-    FillConsoleOutputCharacterW(repl.out, CIN_SPACE, leftover, preview.pos, &repl._filled);
-    --preview.pos.Y;
-  }
-  repl.dwSize_X = buf_dwSize_X;
-  log_preview();
-cleanup:
-  show_cursor();
-  LeaveCriticalSection(&log_lock);
-  return false;
-}
-
-typedef enum {
-  CIN_TIMER_RESIZE,
-  _CIN_TIMER_END
-} Console_Timer_Type;
-
-static Console_Timer_Ctx *console_timers[_CIN_TIMER_END];
-static cache_struct(Console_Timer_Ctx) timer_cache = {0};
-
-static inline void reset_console_timer(Console_Timer_Ctx *ctx) {
-  LARGE_INTEGER t;
-  FILETIME ft;
-  // set union then read parts
-  t.QuadPart = ctx->millis * -10000LL;
-  ft.dwHighDateTime = (DWORD)t.HighPart;
-  ft.dwLowDateTime = (DWORD)t.LowPart;
-  SetThreadpoolTimer(ctx->timer, &ft, 0, 0);
-}
-
-static VOID CALLBACK console_timer_callback(PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_TIMER Timer) {
-  (void)Instance;
-  (void)Timer;
-  Console_Timer_Ctx *ctx = (Console_Timer_Ctx *)Context;
-  const bool restart = ctx->f(ctx);
-  if (restart) reset_console_timer(ctx);
-}
-
-static inline Console_Timer_Ctx *register_console_timer(bool (*f)(Console_Timer_Ctx *ctx), LONGLONG millis) {
-  Console_Timer_Ctx *ctx = NULL;
-  cache_get_zero(&arena_console, &timer_cache, ctx);
-  assert(ctx);
-  ctx->millis = millis;
-  ctx->f = f;
-  ctx->timer = CreateThreadpoolTimer(console_timer_callback, ctx, NULL);
-  if (ctx->timer == NULL) {
-    log_last_error("Failed to register console timer");
-    return NULL;
-  }
-  return ctx;
-}
-
-static inline bool init_timers(void) {
-  cache_init_core(&arena_console, &timer_cache, 1, true);
-  console_timers[CIN_TIMER_RESIZE] = register_console_timer(resize_console, 100LL);
-  if (!console_timers[CIN_TIMER_RESIZE]) return false;
-  return true;
 }
 
 #define COMMAND_NUMBERS_CAP 8
-#define COMMAND_ERROR_WMESSAGE L"ERROR: "
+#define COMMAND_ERROR_MESSAGE "ERROR: "
+#define COMMAND_ERROR_MESSAGE_LEN cin_strlen(COMMAND_ERROR_MESSAGE)
 
 typedef void (*cmd_validator)(void);
 typedef void (*cmd_executor)(void);
 
 array_define(Command_Numbers, size_t);
-array_define(Command_Help, wchar_t);
-array_define(Command_Targets, wchar_t);
+array_define(Command_Help, char);
+array_define(Command_Targets, char);
 
 static struct CommandContext {
   Patricia_Node *trie;
@@ -3651,78 +4220,82 @@ static struct CommandContext {
   Tag_Items *tag;
   cmd_executor executor;
   Command_Numbers numbers;
-  wchar_t *unicode;
+  char *unicode;
   Command_Targets targets;
   Command_Help help;
   Cin_Macro *macro;
 } cmd_ctx = {0};
 
-static inline void set_preview(bool success, const wchar_t *format, ...) {
+static inline void set_preview(bool success, const char *format, ...) {
   array_clear(&preview);
   if (!success) {
-    array_wsextend(&arena_console, &preview, COMMAND_ERROR_WMESSAGE);
+    array_extend(&arena_console, &preview, COMMAND_ERROR_MESSAGE, COMMAND_ERROR_MESSAGE_LEN);
   }
   const size_t start = preview.count;
   va_list args;
   va_list args_dup;
   va_start(args, format);
   va_copy(args_dup, args);
-  const int32_t len_i32 = _vscwprintf(format, args);
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wformat-nonliteral"
+  const int32_t len_i32 = vsnprintf(NULL, 0, format, args);
   assert(len_i32 >= 0);
   const uint32_t len = (uint32_t)len_i32;
   va_end(args);
   array_grow(&arena_console, &preview, len + 1);
-  _vsnwprintf_s(preview.items + start, preview.capacity, len, format, args_dup);
+  vsnprintf(preview.items + start, preview.capacity, format, args_dup);
+#pragma clang diagnostic pop
   va_end(args_dup);
 }
 
-#define CIN_SCREEN_SEPARATOR L", "
+#define CIN_SCREEN_SEPARATOR ", "
 #define CIN_SCREEN_SEPARATOR_LEN (sizeof(CIN_SCREEN_SEPARATOR) / sizeof(*CIN_SCREEN_SEPARATOR) - 1)
+#define FSTR_CIN_SCREEN "%zu" CIN_SCREEN_SEPARATOR
 
 static inline bool validate_screens(void) {
   const size_t n_count = cmd_ctx.numbers.count;
   const size_t screen_count = cmd_ctx.layout->count;
   if (n_count > screen_count) {
-    set_preview(false, L"layout only has %zu screens (%zu provided)", screen_count, n_count);
+    set_preview(false, "layout only has %zu screens (%zu provided)", screen_count, n_count);
     return false;
   }
   for (size_t i = 0; i < n_count; ++i) {
     const size_t screen_index = cmd_ctx.numbers.items[i] - 1;
     if (screen_index >= screen_count) {
-      set_preview(false, L"screen %zu not found, layout only has %zu screens",
+      set_preview(false, "screen %zu not found, layout only has %zu screens",
                   screen_index + 1, screen_count);
       return false;
     }
   }
   array_clear(&cmd_ctx.targets);
   if (!n_count) {
-    array_wsextend(&arena_console, &cmd_ctx.targets, L"(all screens)\0");
+    array_sextend(&arena_console, &cmd_ctx.targets, "(all screens)\0");
     for (size_t i = 0; i < cmd_ctx.layout->count; ++i) {
       array_push(&arena_console, &cmd_ctx.numbers, i + 1);
     }
   } else {
     if (n_count == 1) {
-      array_wsextend(&arena_console, &cmd_ctx.targets, L"(screen ");
+      array_sextend(&arena_console, &cmd_ctx.targets, "(screen ");
     } else {
-      array_wsextend(&arena_console, &cmd_ctx.targets, L"(screens ");
+      array_sextend(&arena_console, &cmd_ctx.targets, "(screens ");
     }
-    const wchar_t *v_str = L"%zu" CIN_SCREEN_SEPARATOR;
     for (size_t i = 0; i < n_count; ++i) {
       const size_t number = cmd_ctx.numbers.items[i];
-      const int32_t len_i32 = _scwprintf(v_str, number);
+      const int32_t len_i32 = snprintf(NULL, 0, FSTR_CIN_SCREEN, number);
       assert(len_i32);
       const uint32_t len = (uint32_t)len_i32 + 1;
       array_reserve(&arena_console, &cmd_ctx.targets, len);
-      swprintf(cmd_ctx.targets.items + cmd_ctx.targets.count, len, v_str, number);
+      snprintf(cmd_ctx.targets.items + cmd_ctx.targets.count, len, FSTR_CIN_SCREEN, number);
       cmd_ctx.targets.count += len - 1;
     }
     cmd_ctx.targets.count -= CIN_SCREEN_SEPARATOR_LEN;
-    array_push(&arena_console, &cmd_ctx.targets, L')');
-    cmd_ctx.targets.items[cmd_ctx.targets.count] = L'\0';
+    array_push(&arena_console, &cmd_ctx.targets, ')');
+    cmd_ctx.targets.items[cmd_ctx.targets.count] = '\0';
   }
   return true;
 }
 
+#ifdef _WIN32
 static wchar_t exe_path_mpv[CIN_MAX_PATH] = {0};
 static wchar_t exe_path_ytdlp[CIN_MAX_PATH] = {0};
 static wchar_t exe_path_chatterino[CIN_MAX_PATH] = {0};
@@ -3740,7 +4313,7 @@ static bool find_exe(const wchar_t *dir, const wchar_t *exe, wchar_t *buf) {
   wchar_t exe_expanded[CIN_MAX_PATH] = {0};
   for (size_t i = 0; paths[i]; ++i) {
     size_t buf_offset = 0;
-    DWORD path_len = ExpandEnvironmentStringsW(paths[i], exe_expanded, CIN_MAX_PATH);
+    uint32_t path_len = ExpandEnvironmentStringsW(paths[i], exe_expanded, CIN_MAX_PATH);
     assert(path_len > 1);
     if (path_len <= 1) continue;
     --path_len;
@@ -3754,7 +4327,7 @@ static bool find_exe(const wchar_t *dir, const wchar_t *exe, wchar_t *buf) {
     wmemcpy(buf + buf_offset, extension, cin_strlen(extension));
     buf_offset += cin_strlen(extension);
     buf[buf_offset] = L'\0';
-    const DWORD attrs = GetFileAttributesW(buf);
+    const uint32_t attrs = GetFileAttributesW(buf);
     if (attrs != INVALID_FILE_ATTRIBUTES) return true;
   }
   log_wmessage(LOG_ERROR, L"Failed to find executable '%s'. "
@@ -3770,88 +4343,146 @@ static bool init_executables(void) {
   find_exe(L"Chatterino", L"chatterino", exe_path_chatterino);
   return true;
 }
+#endif
 
 struct Chat {
-  STARTUPINFOW si;
-  PROCESS_INFORMATION pi;
   RECT rect;
   HWND window;
+#ifndef _WIN32
+  pid_t pid;
+#endif
 } chat = {0};
 
-static inline void chat_reposition(const Cin_Layout *layout) {
+static inline void chat_kill(void) {
+#ifdef _WIN32
+  PostMessageW(chat.window, WM_CLOSE, 0, 0);
+#else
+  if (chat.pid) kill(chat.pid, SIGTERM);
+#endif
+}
+
+static inline size_t chat_spawn(const Cin_Layout *layout) {
+#ifdef _WIN32
   RECT chat_rect = layout->chat_rect;
   const int32_t x = (int32_t)chat_rect.left;
   const int32_t y = (int32_t)chat_rect.top;
   const int32_t cx = (int32_t)chat_rect.right;
   const int32_t cy = (int32_t)chat_rect.bottom;
+  STARTUPINFOW si = {0};
+  PROCESS_INFORMATION pi = {0};
+  si.dwFlags = STARTF_USEPOSITION | STARTF_USESIZE | STARTF_USESHOWWINDOW;
+  si.wShowWindow = SW_NORMAL;
+  si.dwX = (uint32_t)x;
+  si.dwXSize = (uint32_t)cx;
+  si.dwY = (uint32_t)y;
+  si.dwYSize = (uint32_t)cy;
+  si.cb = sizeof(si);
+  // since STARTUPINFOW is ignored, manually reposition after
+  if (!CreateProcessW(exe_path_chatterino, L"chatterino", NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+    if (GetLastError() == ERROR_FILE_NOT_FOUND) {
+      log_last_error("Failed to find chatterino executable");
+    } else {
+      log_last_error("Failed to start chatterino executable even though it was found");
+    }
+  }
+  return pi.dwProcessId;
+#else
+  (void)layout;
+  signal(SIGCHLD, SIG_IGN);
+  pid_t pid = fork();
+  if (pid < 0) {
+    log_last_error("Failed to fork process");
+    return 0;
+  }
+  if (pid == 0) {
+    FILE *dev_null = fopen("/dev/null", "w");
+    dup2(fileno(dev_null), STDOUT_FILENO);
+    dup2(fileno(dev_null), STDERR_FILENO);
+    fclose(dev_null);
+    if (execlp("chatterino", "chatterino", NULL) < 0) {
+      log_last_error("Failed to start chatterino");
+      exit(1);
+    }
+    assert(false);
+  }
+  chat.pid = pid;
+  return (size_t)pid;
+#endif
+}
+
+static inline void chat_reposition(const Cin_Layout *layout) {
+  RECT chat_rect = layout->chat_rect;
   const bool should_show = chat_rect.bottom != LONG_MIN;
-  const bool is_showing = IsWindow(chat.window);
+  const bool is_showing = cin_iswindow(chat.window);
   if (should_show) {
     if (is_showing) {
-      SetWindowPos(chat.window, HWND_TOPMOST, x, y, cx, cy, SWP_SHOWWINDOW);
+      cin_movewindow(chat.window, chat_rect);
     } else {
-      STARTUPINFOW *si = &chat.si;
-      PROCESS_INFORMATION *pi = &chat.pi;
-      si->dwFlags = STARTF_USEPOSITION | STARTF_USESIZE | STARTF_USESHOWWINDOW;
-      si->wShowWindow = SW_NORMAL;
-      si->dwX = (DWORD)x;
-      si->dwXSize = (DWORD)cx;
-      si->dwY = (DWORD)y;
-      si->dwYSize = (DWORD)cy;
-      si->cb = sizeof(*si);
-      if (!CreateProcessW(exe_path_chatterino, L"chatterino", NULL, NULL, FALSE, 0, NULL, NULL, si, pi)) {
-        if (GetLastError() == ERROR_FILE_NOT_FOUND) {
-          log_last_error("Failed to find chatterino executable");
-        } else {
-          log_last_error("Failed to start chatterino executable even though it was found");
-        }
-      }
-      // since STARTUPINFOW is ignored, manually reposition
       static const size_t CHAT_REPOSITION_TRIES = 50;
-      static const DWORD CHAT_REPOSITION_DELAY = 40;
+      static const long CHAT_REPOSITION_DELAY = 200;
+      const size_t pid = chat_spawn(layout);
       for (size_t i = 0; i < CHAT_REPOSITION_TRIES; ++i) {
-        chat.window = find_window_by_pid(pi->dwProcessId);
-        if (IsWindowVisible(chat.window)) {
-          SetWindowPos(chat.window, HWND_TOPMOST, x, y, cx, cy, SWP_SHOWWINDOW);
+#ifdef _WIN32
+        chat.window = find_window_by_pid((uint32_t)pid);
+#else
+        (void)pid;
+        Window root = pXDefaultRootWindow(pxdisplay);
+        chat.window = find_window_by_name(pxdisplay, root, "Chatterino");
+#endif
+        if (cin_isvisible(chat.window)) {
+          cin_movewindow(chat.window, chat_rect);
           break;
         }
-        Sleep(CHAT_REPOSITION_DELAY);
+        cin_sleep(CHAT_REPOSITION_DELAY);
       }
     }
   } else if (is_showing) {
-    PostMessageW(chat.window, WM_CLOSE, 0, 0);
+    chat_kill();
   }
 }
 
-#define CIN_MPVCALL_START L"mpv --idle --config-dir=./ --input-ipc-server="
-#define CIN_MPVCALL_START_LEN cin_strlen(CIN_MPVCALL_START)
-#define CIN_MPVCALL_PIPE L"\\\\.\\pipe\\cinema_mpv_"
-#define CIN_MPVCALL_PIPE_LEN cin_strlen(CIN_MPVCALL_PIPE)
-#define CIN_MPVCALL (CIN_MPVCALL_START CIN_MPVCALL_PIPE)
-#define CIN_MPVCALL_LEN cin_strlen(CIN_MPVCALL)
+#define CIN_MPVCALL_PIPE_ROOT "cinema_mpv_"
 #define CIN_MPVCALL_DIGITS 19
-#define CIN_MPVCALL_GEOMETRY_LEN block_bytes(2)
-#define CIN_MPVCALL_BUF align_to_block(CIN_MPVCALL_LEN + CIN_MPVCALL_DIGITS + CIN_MPVCALL_GEOMETRY_LEN)
+#define CIN_MPVCALL_SERVER_LEN 64
+#define CIN_MPVCALL_GEOMETRY_LEN 128
+
+#ifdef _WIN32
+#define CIN_MPVCALL_PIPE "\\\\.\\pipe\\" CIN_MPVCALL_PIPE_ROOT
+#else
+#define CIN_MPVCALL_PIPE "/tmp/" CIN_MPVCALL_PIPE_ROOT
+#endif
 
 static void mpv_spawn(Instance *instance, size_t index) {
-  static wchar_t mpv_command[CIN_MPVCALL_BUF] = {CIN_MPVCALL};
+  char geometry_str[CIN_MPVCALL_GEOMETRY_LEN] = {"--geometry="};
+  char server_str[CIN_MPVCALL_SERVER_LEN] = {"--input-ipc-server=" CIN_MPVCALL_PIPE};
+  char *mpv_flags[] = {
+      "mpv",
+      "--idle",
+      "--config-dir=./",
+      server_str,
+      geometry_str,
+      NULL};
+  static_assert((sizeof(mpv_flags) / CIN_PTR) == 6, "expected 6 elements including sentinel");
   const bool extra = index == SIZE_MAX;
   if (extra) index = cmd_ctx.layout->count;
-  instance->ovl_ctx.type = MPV_READ;
-  const size_t right = CIN_MPVCALL_LEN + CIN_MPVCALL_DIGITS;
+  char *server_flag = mpv_flags[3];
+  assert(strstr(server_flag, "ipc-server") && "check flags");
+  const size_t server_buf_len = strlen(server_flag);
+  const size_t right = server_buf_len + CIN_MPVCALL_DIGITS;
   size_t left = right;
   size_t j = index;
   do {
-    mpv_command[left--] = L'0' + (j % 10);
+    server_flag[left--] = '0' + (j % 10);
     j /= 10;
   } while (j);
   const size_t digits = right - left++;
-  for (; j < digits; ++j) mpv_command[CIN_MPVCALL_LEN + j] = mpv_command[left + j];
+  const size_t start = server_buf_len;
+  for (; j < digits; ++j) server_flag[start + j] = server_flag[left + j];
   Cin_Screen screen = cmd_ctx.layout->items[extra ? 0 : index];
   if (extra) array_push(&arena_console, cmd_ctx.layout, screen);
   // screen.len actually includes null-terminator
   char *screen_utf8 = (char *)screen_strings.items + screen.offset;
-  const int32_t len = utf8_to_utf16_nraw(screen_utf8, (int32_t)screen.len);
+  const int32_t len = (int32_t)screen.len;
   if (len > (int32_t)CIN_MPVCALL_GEOMETRY_LEN) {
     char *layout_name = (char *)layout_strings.items + cmd_ctx.layout->name_offset;
     printf("Cinema crashed because the config value of screen %zu in layout '%s' is "
@@ -3860,13 +4491,29 @@ static void mpv_spawn(Instance *instance, size_t index) {
            screen_utf8, CIN_MPVCALL_GEOMETRY_LEN);
     exit(1);
   }
-  swprintf(mpv_command + CIN_MPVCALL_LEN + digits, CIN_MPVCALL_GEOMETRY_LEN, L" --geometry=%.*s",
-           len, utf16_buf_raw.items);
-  log_wmessage(LOG_DEBUG, L"Spawning instance: %s", mpv_command);
+  char *geometry_flag = mpv_flags[4];
+  assert(strstr(geometry_flag, "geometry") && "check flags");
+  const size_t geometry_buf_len = strlen(geometry_flag);
+  snprintf(geometry_flag + geometry_buf_len, (size_t)len, "%.*s", len, screen_utf8);
+  log_message(LOG_DEBUG, "Spawning instance: %s %s %s %s %s",
+              mpv_flags[0], mpv_flags[1], mpv_flags[2], mpv_flags[3], mpv_flags[4]);
+  char *socket_name = strchr(server_flag, '=');
+  assert(socket_name);
+  assert(socket_name + 1);
+  ++socket_name;
+#ifdef _WIN32
+  const int32_t mpv_buf_len = snprintf(NULL, 0, "%s %s %s %s %s",
+                                       mpv_flags[0], mpv_flags[1], mpv_flags[2], mpv_flags[3], mpv_flags[4]) +
+                              1;
+  char mpv_command[mpv_buf_len];
+  snprintf(mpv_command, (size_t)mpv_buf_len, "%s %s %s %s %s",
+           mpv_flags[0], mpv_flags[1], mpv_flags[2], mpv_flags[3], mpv_flags[4]);
+  utf8_to_utf16_raw(mpv_command);
+  wchar_t mpv_command_utf16[mpv_buf_len];
+  wmemcpy(mpv_command_utf16, utf16_buf_raw.items, (size_t)mpv_buf_len);
   STARTUPINFOW si = {0};
-  si.cb = sizeof(si);
   PROCESS_INFORMATION pi = {0};
-  if (!CreateProcessW(exe_path_mpv, mpv_command, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+  if (!CreateProcessW(exe_path_mpv, mpv_command_utf16, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
     if (GetLastError() == ERROR_FILE_NOT_FOUND) {
       log_last_error("Failed to find mpv executable");
     } else {
@@ -3876,15 +4523,63 @@ static void mpv_spawn(Instance *instance, size_t index) {
   }
   instance->si = si;
   instance->pi = pi;
-  mpv_command[CIN_MPVCALL_LEN + digits] = L'\0';
-  const bool ok_pipe = create_pipe(instance, mpv_command + CIN_MPVCALL_START_LEN);
+  const int32_t socket_name_len = utf8_to_utf16_raw(socket_name);
+  assert(socket_name_len);
+  wmemcpy(mpv_command_utf16, utf16_buf_raw.items, (size_t)socket_name_len);
+  const bool ok_pipe = create_pipe(instance, mpv_command_utf16);
   assert(ok_pipe);
-  const bool ok_iocp = CreateIoCompletionPort(instance->pipe, cin_io.iocp, (ULONG_PTR)instance, 0) != NULL;
+  instance->ovl_ctx.type = MPV_READ;
+  const bool ok_iocp = CreateIoCompletionPort(instance->socket, cin_io.iocp, (ULONG_PTR)instance, 0) != NULL;
   assert(ok_iocp);
   instance->buf_head = arena_bump_T1(&arena_io, Read_Buffer);
   instance->buf_tail = instance->buf_head;
   const bool ok_read = overlap_read(instance);
   assert(ok_read);
+#else
+  pid_t pid = fork();
+  if (pid < 0) {
+    log_last_error("Failed to fork process");
+    return;
+  }
+  if (pid == 0) {
+    signal(SIGCHLD, SIG_DFL);
+    FILE *dev_null = fopen("/dev/null", "w");
+    dup2(fileno(dev_null), STDOUT_FILENO);
+    dup2(fileno(dev_null), STDERR_FILENO);
+    fclose(dev_null);
+    if (execvp(mpv_flags[0], mpv_flags) < 0) {
+      log_last_error("Failed to start mpv");
+      exit(1);
+    }
+    assert(0);
+  }
+  struct sockaddr_un addr = {0};
+  addr.sun_family = AF_UNIX;
+  assert(strlen(socket_name) <= sizeof(addr.sun_path) - 1);
+  strncpy(addr.sun_path, socket_name, sizeof(addr.sun_path) - 1);
+  static const size_t MPV_SPAWN_TRIES = 20;
+  static const long MPV_SPAWN_DELAY = 100;
+  for (size_t i = 0; i < MPV_SPAWN_TRIES; ++i) {
+    const int32_t fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+      log_last_error("Socket creation failed, retrying in %ldms", MPV_SPAWN_DELAY);
+    } else if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+      log_last_error("Socket connection failed, retrying in %ldms", MPV_SPAWN_DELAY);
+      close(fd);
+    } else {
+      log_message(LOG_DEBUG, "Created socket %d", fd);
+      instance->socket = fd;
+      instance->buf_head = arena_bump_T1(&arena_io, Read_Buffer);
+      instance->buf_tail = instance->buf_head;
+      pthread_mutex_lock(&listener_lock);
+      array_push(&arena_console, &listener_pfds_to_instances, instance);
+      pthread_mutex_unlock(&listener_lock);
+      write(listener_pipe[1], "x", 1);
+      break;
+    }
+    cin_sleep(MPV_SPAWN_DELAY);
+  }
+#endif
   assert(instance->playlist);
   playlist_play(instance);
   overlap_write(instance, MPV_WINDOW_ID, "get_property", "window-id", NULL);
@@ -3902,6 +4597,7 @@ static inline bool init_mpv(void) {
   playlist_setup_shuffle(default_playlist);
   Instance *head_instance = cin_io.instances.head;
   playlist_set_default(head_instance);
+#ifdef _WIN32
   cin_io.iocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
   if (!cin_io.iocp) {
     log_last_error("Failed to create iocp");
@@ -3911,18 +4607,14 @@ static inline bool init_mpv(void) {
     log_last_error("Failed to create iocp listener");
     return false;
   }
-  return true;
-}
-
-static inline bool timer_autoplay(Console_Timer_Ctx *ctx) {
-  bool targets = false;
-  cache_foreach(&cin_io.instances, Instance, i, o) {
-    if (o->pipe && o->timer == ctx) {
-      targets = true;
-      playlist_play(o);
-    }
+#else
+  pipe(interrupt_pipe);
+  pipe(listener_pipe);
+  if (pthread_create(&listener_thread, NULL, mpv_listener, NULL) != 0) {
+    log_last_error("Failed to create listener thread");
+    return false;
   }
-  if (!targets) cache_put(&timer_cache, ctx);
+#endif
   return true;
 }
 
@@ -3933,14 +4625,14 @@ static inline bool timer_autoplay(Console_Timer_Ctx *ctx) {
     for (Instance *instance = cin_io.instances.head;            \
          _j <= _s && instance;                                  \
          instance = instance->next, ++_j)                       \
-      if (_j == _s && instance->pipe)
+      if (_j == _s && instance->socket)
 
 static void cmd_help_executor(void) {
-  wwrite_safe(cmd_ctx.help.items, (DWORD)cmd_ctx.help.count);
+  cin_write_safe(cmd_ctx.help.items, (uint32_t)cmd_ctx.help.count);
 }
 
 static void cmd_help_validator(void) {
-  set_preview(true, L"help (show a list of all commands)");
+  set_preview(true, "help (show a list of all commands)");
   cmd_ctx.executor = cmd_help_executor;
 }
 
@@ -3953,10 +4645,10 @@ static void cmd_layout_executor(void) {
   chat_reposition(layout);
   cache_foreach(&cin_io.instances, Instance, i, old) {
     if (screen >= next_count) {
-      if (old->pipe) overlap_write(old, MPV_QUIT, "quit", NULL, NULL);
-    } else if (old->pipe) {
+      if (old->socket) overlap_write(old, MPV_QUIT, "quit", NULL, NULL);
+    } else if (old->socket) {
       log_message(LOG_INFO, "i=%u, screen=%zu", i);
-      assert(IsWindow(old->window));
+      assert(cin_iswindow(old->window));
       const char *geometry = (char *)screen_strings.items + layout->items[screen].offset;
       overlap_write(old, MPV_SET_GEOMETRY, "set_property", "geometry", geometry);
       if (old->full_screen) {
@@ -3980,21 +4672,19 @@ static void cmd_layout_validator(void) {
   radix_v layout = NULL;
   const uint8_t *layout_name = NULL;
   if (cmd_ctx.unicode) {
-    const int32_t len = utf16_to_utf8(cmd_ctx.unicode);
-    layout = radix_query(layout_tree, utf8_buf.items, (size_t)len - 1, &layout_name);
+    const size_t len = strlen(cmd_ctx.unicode);
+    layout = radix_query(layout_tree, (uint8_t *)cmd_ctx.unicode, len, &layout_name);
     if (!layout) {
-      set_preview(false, L"layout does not exist: '%ls'", cmd_ctx.unicode);
+      set_preview(false, "layout does not exist: '%s'", cmd_ctx.unicode);
       return;
     }
-    utf8_to_utf16_raw((char *)layout_name);
     assert(layout);
     assert(layout_name);
-    set_preview(true, L"change layout to '%s'", utf16_buf_raw.items);
+    set_preview(true, "change layout to '%s'", (char *)layout_name);
   } else {
     Cin_Layout *curr = cmd_ctx.layout;
     char *curr_name = (char *)layout_strings.items + curr->name_offset;
-    utf8_to_utf16_nraw(curr_name, (int32_t)curr->name_len);
-    set_preview(true, L"reset layout '%s'", utf16_buf_raw.items);
+    set_preview(true, "reset layout '%s'", curr_name);
     layout = curr;
   }
   cmd_ctx.queued_layout = (Cin_Layout *)layout;
@@ -4015,13 +4705,13 @@ static void cmd_reroll_executor(void) {
 
 static void cmd_reroll_validator(void) {
   if (!validate_screens()) return;
-  set_preview(true, L"reroll %s", cmd_ctx.targets.items);
+  set_preview(true, "reroll %s", cmd_ctx.targets.items);
   cmd_ctx.executor = cmd_reroll_executor;
 }
 
-static cmd_validator parse_command(const wchar_t *command) {
+static cmd_validator parse_command(const char *command) {
   // Grammar rules:
-  // 1. First character must be either empty or in L'a'..L'z' (letter) or in L'1'..L'9' (digit)
+  // 1. First character must be either empty or in 'a'..'z' (letter) or in '1'..'9' (digit)
   // 2. Empty (whitespace*\0) is a command
   // 3. Letter must precede one of: 'letter', 'space', '\0';
   // 3a. 'letter' concatenates a string character
@@ -4037,21 +4727,21 @@ static cmd_validator parse_command(const wchar_t *command) {
   cmd_ctx.executor = NULL;
   array_clear(&cmd_ctx.numbers);
   cmd_ctx.unicode = NULL;
-  const wchar_t *p = command;
-  while (iswspace(*p)) ++p;
+  const char *p = command;
+  while (isspace(*p)) ++p;
   size_t number = 0;
   for (; *p; ++p) {
-    if (cin_wisnum_1based(*p)) {
+    if (cin_isnum_1based(*p)) {
       // 4a. build decimal number
       number *= 10;
-      number += *p - L'0';
+      number += (size_t)(*p - '0');
     } else if (*p == ' ') {
       if (number) {
         // 4c. push decimal number onto array
         array_push(&arena_console, &cmd_ctx.numbers, number);
       }
       number = 0;
-    } else if (cin_wisloweralpha(*p)) {
+    } else if (cin_isloweralpha(*p)) {
       // if numbers array empty and number, push
       if (number) {
         array_push(&arena_console, &cmd_ctx.numbers, number);
@@ -4061,8 +4751,8 @@ static cmd_validator parse_command(const wchar_t *command) {
     } else {
       const intptr_t pos = p - command;
       assert(pos >= 0);
-      set_preview(false, L"unexpected character '%c' at position %zd,"
-                         L" expected: alphanumeric, space, enter",
+      set_preview(false, "unexpected character '%c' at position %zd,"
+                         " expected: alphanumeric, space, enter",
                   *p, pos + 1);
       return NULL;
     }
@@ -4074,42 +4764,42 @@ static cmd_validator parse_command(const wchar_t *command) {
     }
     return cmd_reroll_validator;
   }
-  const wchar_t *start = p;
+  const char *start = p;
   ++p;
-  while (cin_wisloweralpha(*p)) ++p;
+  while (cin_isloweralpha(*p)) ++p;
   // 3/3a. letter+, command begins at start, ends at p
   if (!*p) {
     // 3c. possible command
     cmd_validator validator = patricia_query(cmd_ctx.trie, start);
     if (!validator) {
-      set_preview(false, L"'%s' is not a valid command", start);
+      set_preview(false, "'%s' is not a valid command", start);
     }
     return validator;
   }
-  if (*p != L' ') {
+  if (*p != ' ') {
     const intptr_t pos = p - command;
     assert(pos >= 0);
-    set_preview(false, L"unexpected character '%c' at position %zd,"
-                       L" expected: letter, space, enter",
+    set_preview(false, "unexpected character '%c' at position %zd,"
+                       " expected: letter, space, enter",
                 *p, pos + 1);
     return NULL;
   }
   // temporarily null-terminate
-  *(wchar_t *)p = L'\0';
+  *(char *)p = '\0';
   cmd_validator validator = patricia_query(cmd_ctx.trie, start);
   if (!validator) {
-    set_preview(false, L"'%s' is not a valid command", start);
+    set_preview(false, "'%s' is not a valid command", start);
   }
-  *(wchar_t *)p = L' ';
+  *(char *)p = ' ';
   ++p;
   // 5a. unicode starts at p ends at \0
-  cmd_ctx.unicode = (wchar_t *)p;
+  cmd_ctx.unicode = (char *)p;
   return validator;
 }
 
 static void update_preview(void) {
   array_reserve(&arena_console, repl.msg, 1);
-  repl.msg->items[repl.msg->count] = L'\0';
+  repl.msg->items[repl.msg->count] = '\0';
   cmd_validator validator_fn = parse_command(repl.msg->items);
   if (validator_fn) {
     validator_fn();
@@ -4127,13 +4817,13 @@ static void cmd_tag_executor(void) {
   Arena *arena1 = &arena_console;
   Arena *arena2 = &arena_docs;
   Arena *arena3 = &arena_io;
-#if defined(CIN_OPENMP)
+#ifdef CIN_OPENMP
 #pragma omp parallel
 #pragma omp single
 #endif
   {
     if (cmd_ctx.tag->directories) {
-#if defined(CIN_OPENMP)
+#ifdef CIN_OPENMP
 #pragma omp task priority(8)
 #endif
       {
@@ -4171,7 +4861,7 @@ static void cmd_tag_executor(void) {
       }
     }
     if (cmd_ctx.tag->pattern_items) {
-#if defined(CIN_OPENMP)
+#ifdef CIN_OPENMP
 #pragma omp task priority(4)
 #endif
       {
@@ -4180,7 +4870,7 @@ static void cmd_tag_executor(void) {
       }
     }
     if (cmd_ctx.tag->url_items) {
-#if defined(CIN_OPENMP)
+#ifdef CIN_OPENMP
 #pragma omp task priority(2)
 #endif
       {
@@ -4188,7 +4878,7 @@ static void cmd_tag_executor(void) {
         url_k = deduplicate_i32(arena3, urls->items, urls->count);
       }
     }
-#if defined(CIN_OPENMP)
+#ifdef CIN_OPENMP
 #pragma omp taskwait
 #endif
   }
@@ -4227,23 +4917,22 @@ static void cmd_tag_validator(void) {
   radix_v tag = NULL;
   const uint8_t *tag_name = NULL;
   if (cmd_ctx.unicode) {
-    const int32_t len = utf16_to_utf8(cmd_ctx.unicode);
-    tag = radix_query(tag_tree, utf8_buf.items, (size_t)len - 1, &tag_name);
+    const size_t len = strlen(cmd_ctx.unicode);
+    tag = radix_query(tag_tree, (uint8_t *)cmd_ctx.unicode, len, &tag_name);
     if (!tag) {
-      set_preview(false, L"tag does not exist: '%ls'", cmd_ctx.unicode);
+      set_preview(false, "tag does not exist: '%s'", cmd_ctx.unicode);
       return;
     }
   } else {
     tag = radix_query(tag_tree, (const uint8_t *)"", 0, &tag_name);
     if (!tag) {
-      set_preview(false, L"configuration does not contain any tags");
+      set_preview(false, "configuration does not contain any tags");
       return;
     }
   }
   assert(tag);
   assert(tag_name);
-  utf8_to_utf16_raw((char *)tag_name);
-  set_preview(true, L"tag '%s' %s", utf16_buf_raw.items, cmd_ctx.targets.items);
+  set_preview(true, "tag '%s' %s", (char *)tag_name, cmd_ctx.targets.items);
   cmd_ctx.tag = (Tag_Items *)tag;
   cmd_ctx.executor = cmd_tag_executor;
 }
@@ -4251,10 +4940,12 @@ static void cmd_tag_validator(void) {
 static void cmd_search_executor(void) {
   Playlist *playlist = &media.default_playlist;
   int32_t len = 0;
-  if (cmd_ctx.unicode && (len = (int32_t)wcslen(cmd_ctx.unicode))) {
-    setup_file_path(cmd_ctx.unicode, &len);
-    len = utf16_to_utf8(cmd_ctx.unicode);
-    uint8_t *pattern = utf8_buf.items;
+  if (cmd_ctx.unicode && (len = (int32_t)strlen(cmd_ctx.unicode))) {
+#ifdef _WIN32
+    setup_file_path_char(cmd_ctx.unicode, &len);
+#endif
+    ++len; // null-terminator
+    uint8_t *pattern = (uint8_t *)cmd_ctx.unicode;
     const table_key_len len_u32 = (table_key_len)len;
     log_message(LOG_DEBUG, "Search with pattern: '%s', len: %d", pattern, len);
     array_reserve(&arena_docs, &media.search_patterns, len_u32);
@@ -4297,14 +4988,14 @@ static void cmd_search_executor(void) {
 
 static void cmd_search_validator(void) {
   if (!validate_screens()) return;
-  set_preview(true, L"search '%s' %s", cmd_ctx.unicode ? cmd_ctx.unicode : L"", cmd_ctx.targets.items);
+  set_preview(true, "search '%s' %s", cmd_ctx.unicode ? cmd_ctx.unicode : "", cmd_ctx.targets.items);
   cmd_ctx.executor = cmd_search_executor;
 }
 
 static void cmd_hide_executor(void) {
   if (!cmd_ctx.unicode) return;
-  const int32_t len = utf16_to_utf8(cmd_ctx.unicode);
-  uint8_t *pattern = utf8_buf.items;
+  const size_t len = strlen(cmd_ctx.unicode) + 1;
+  uint8_t *pattern = (uint8_t *)cmd_ctx.unicode;
   if (len <= 1) return;
   const uint32_t len_u32 = (uint32_t)len;
   array_reserve(&arena_docs, &media.search_patterns, len_u32);
@@ -4318,7 +5009,7 @@ static void cmd_hide_executor(void) {
     assert(value);
     tmp_playlist = *(Playlist *)value;
   } else {
-    document_listing(pattern, len - 1, &tmp_playlist);
+    document_listing(pattern, (int32_t)len - 1, &tmp_playlist);
   }
   assert(&tmp_playlist);
   Hidden_Table *table = &media.hidden_table;
@@ -4390,16 +5081,16 @@ static void cmd_hide_executor(void) {
   cache_foreach(&cin_io.instances, Instance, i, o) {
     if (o->playlist && !o->playlist->from_tag) {
       playlist_set_default(o);
-      if (o->pipe) playlist_play(o);
+      if (o->socket) playlist_play(o);
     }
   }
 }
 
 static void cmd_hide_validator(void) {
   if (cmd_ctx.unicode && *cmd_ctx.unicode) {
-    set_preview(true, L"hide '%s'", cmd_ctx.unicode);
+    set_preview(true, "hide '%s'", cmd_ctx.unicode);
   } else {
-    set_preview(true, L"hide '' (nothing)");
+    set_preview(true, "hide '' (nothing)");
   }
   cmd_ctx.executor = cmd_hide_executor;
 }
@@ -4409,28 +5100,28 @@ static void cmd_idle_executor(void) {
 }
 
 static void cmd_idle_validator(void) {
-  set_preview(true, cin_idle ? L"allow commands to play media" : L"set screens to idle");
+  set_preview(true, cin_idle ? "allow commands to play media" : "set screens to idle");
   cmd_ctx.executor = cmd_idle_executor;
 }
 
 static void cmd_kill_executor(void) {
-  PostMessageW(chat.window, WM_CLOSE, 0, 0);
+  chat_kill();
   mpv_target_foreach(i, instance) {
-    log_message(LOG_DEBUG, "Closing PID=%lu", instance->pi.dwProcessId);
+    log_message(LOG_DEBUG, "Closing Window=%lu", instance->window);
     overlap_write(instance, MPV_QUIT, "quit", NULL, NULL);
   }
 }
 
 static void cmd_kill_validator(void) {
   if (!validate_screens()) return;
-  set_preview(true, L"kill  %s", cmd_ctx.targets.items);
+  set_preview(true, "kill  %s", cmd_ctx.targets.items);
   cmd_ctx.executor = cmd_kill_executor;
 }
 
 static void cmd_maximize_executor(void) {
   const size_t target = cmd_ctx.numbers.count ? cmd_ctx.numbers.items[0] - 1 : 0;
   cache_foreach(&cin_io.instances, Instance, i, instance) {
-    if (instance->pipe) {
+    if (instance->socket) {
       if (i == target) {
         instance->full_screen = !instance->full_screen;
         overlap_write(instance, MPV_WRITE, "cycle", "fullscreen", NULL);
@@ -4444,20 +5135,20 @@ static void cmd_maximize_executor(void) {
 static void cmd_maximize_validator(void) {
   const size_t n = cmd_ctx.numbers.count;
   if (n > 1) {
-    set_preview(false, L"maximize supports 1 screen, not %zu", n);
+    set_preview(false, "maximize supports 1 screen, not %zu", n);
     return;
   }
   size_t screen = 1;
   if (n) {
     const size_t target = cmd_ctx.numbers.items[0];
     if (target > cmd_ctx.layout->count) {
-      set_preview(false, L"cannot maximize screen %zu, layout only has %zu screens",
+      set_preview(false, "cannot maximize screen %zu, layout only has %zu screens",
                   target, cmd_ctx.layout->count);
       return;
     }
     screen = target;
   }
-  set_preview(true, L"maximize screen %zu", screen);
+  set_preview(true, "maximize screen %zu", screen);
   cmd_ctx.executor = cmd_maximize_executor;
 }
 
@@ -4469,48 +5160,52 @@ static void cmd_mute_executor(void) {
 
 static void cmd_mute_validator(void) {
   if (!validate_screens()) return;
-  set_preview(true, L"mute/unmute %s", cmd_ctx.targets.items);
+  set_preview(true, "mute/unmute %s", cmd_ctx.targets.items);
   cmd_ctx.executor = cmd_mute_executor;
 }
 
 static void cmd_autoplay_executor(void) {
-  wchar_t *p = cmd_ctx.unicode;
-  LONGLONG seconds = -1;
-  if (p && cin_wisnum(*p)) {
-    seconds = *p - L'0';
+  const char *duration = cmd_ctx.unicode;
+  char *p = cmd_ctx.unicode;
+  int64_t seconds = -1;
+  if (p && cin_isnum(*p)) {
+    seconds = *p - '0';
     ++p;
-    while (cin_wisnum(*p)) {
+    while (cin_isnum(*p)) {
       seconds *= 10;
-      seconds += *p - L'0';
+      seconds += *p - '0';
       ++p;
     }
+    if (*p) *p = '\0';
   }
   if (seconds > 0) {
-    const LONGLONG millis = seconds * 1000LL;
-    Console_Timer_Ctx *timer = register_console_timer(timer_autoplay, millis);
-    assert(timer);
-    bool targets = false;
     mpv_target_foreach(i, instance) {
-      targets = true;
-      instance->timer = timer;
-      if (instance->autoplay_mpv) overlap_write(instance, MPV_WRITE, "set_property", "loop", "inf");
-      instance->autoplay_mpv = false;
+      if (!instance->autoplay_mpv) {
+        overlap_write(instance, MPV_WRITE, "set_property", "loop", "no");
+        instance->autoplay_mpv = true;
+      }
+      overlap_write(instance, MPV_WRITE, "set_property", "length", duration);
+      overlap_write(instance, MPV_WRITE, "set_property", "image-display-duration", duration);
+      playlist_insert(instance);
     }
-    if (targets) reset_console_timer(timer);
-    else cache_put(&timer_cache, timer);
   } else if (seconds == 0) {
     mpv_target_foreach(i, instance) {
-      instance->timer = NULL;
-      if (instance->autoplay_mpv) overlap_write(instance, MPV_WRITE, "set_property", "loop", "inf");
+      if (instance->autoplay_mpv) {
+        overlap_write(instance, MPV_WRITE, "set_property", "loop", "inf");
+        overlap_write(instance, MPV_WRITE, "set_property", "length", "none");
+      }
       instance->autoplay_mpv = false;
     }
   } else {
     mpv_target_foreach(i, instance) {
-      instance->timer = NULL;
       if (!instance->autoplay_mpv) {
-        instance->autoplay_mpv = true;
         overlap_write(instance, MPV_WRITE, "set_property", "loop", "no");
+        instance->autoplay_mpv = true;
+      } else {
+        overlap_write(instance, MPV_WRITE, "set_property", "length", "none");
       }
+      // NOTE: default=5 https://mpv.io/manual/stable/#options-image-display-duration
+      overlap_write(instance, MPV_WRITE, "set_property", "image-display-duration", "5");
       playlist_insert(instance);
     }
   }
@@ -4518,27 +5213,27 @@ static void cmd_autoplay_executor(void) {
 
 static void cmd_autoplay_validator(void) {
   if (!validate_screens()) return;
-  LONGLONG seconds = -1;
+  int64_t seconds = -1;
   if (cmd_ctx.unicode) {
-    wchar_t *p = cmd_ctx.unicode;
-    if (cin_wisnum(*p)) {
-      seconds = *p - L'0';
+    char *p = cmd_ctx.unicode;
+    if (cin_isnum(*p)) {
+      seconds = *p - '0';
       ++p;
     }
-    while (cin_wisnum(*p)) {
+    while (cin_isnum(*p)) {
       seconds *= 10;
-      seconds += *p - L'0';
+      seconds += *p - '0';
       ++p;
     }
     if (*p) {
       const ptrdiff_t pos = p - cmd_ctx.unicode;
-      set_preview(false, L"unexpected character '%c' at position %lld in argument", *p, pos + 1);
+      set_preview(false, "unexpected character '%c' at position %lld in argument", *p, pos + 1);
       return;
     }
   }
-  if (seconds < 0) set_preview(true, L"autoplay when media ends %s", cmd_ctx.targets.items);
-  else if (seconds == 0) set_preview(true, L"turn off autoplay %s", cmd_ctx.targets.items);
-  else set_preview(true, L"autoplay with '%lld' second delay %s", seconds, cmd_ctx.targets.items);
+  if (seconds < 0) set_preview(true, "autoplay when media ends %s", cmd_ctx.targets.items);
+  else if (seconds == 0) set_preview(true, "turn off autoplay %s", cmd_ctx.targets.items);
+  else set_preview(true, "autoplay with '%lld' second delay %s", seconds, cmd_ctx.targets.items);
   cmd_ctx.executor = cmd_autoplay_executor;
 }
 
@@ -4546,7 +5241,6 @@ static void cmd_lock_executor(void) {
   mpv_target_foreach(i, instance) {
     instance->locked = !instance->locked;
     if (!instance->locked) playlist_play(instance);
-    instance->timer = NULL;
     if (instance->autoplay_mpv) overlap_write(instance, MPV_WRITE, "set_property", "loop", "inf");
     instance->autoplay_mpv = false;
   }
@@ -4554,11 +5248,12 @@ static void cmd_lock_executor(void) {
 
 static void cmd_lock_validator(void) {
   if (!validate_screens()) return;
-  set_preview(true, L"lock/unlock %s", cmd_ctx.targets.items);
+  set_preview(true, "lock/unlock %s", cmd_ctx.targets.items);
   cmd_ctx.executor = cmd_lock_executor;
 }
 
 #define CIN_CONF_FILENAME "cinema.conf"
+
 #define FSTR_RECT "%ldx%ld%+ld%+ld"
 #define FSTR_NAME "name = %s" CRLF
 #define FSTR_SCREEN "screen = %s" CRLF
@@ -4577,14 +5272,14 @@ static void cmd_store_executor(void) {
   } else {
     layout = arena_bump_T1(&arena_console, Cin_Layout);
     assert(cmd_ctx.unicode);
-    name = (char *)utf8_buf.items;
+    name = cmd_ctx.unicode;
     setup_layout(name, layout);
   }
   cmd_ctx.layout = layout;
   array_clear(&geometry_buf);
   cache_foreach(&cin_io.instances, Instance, i, instance) {
-    if (instance->pipe && IsWindow(instance->window)) {
-      GetWindowRect(instance->window, &instance->rect);
+    if (instance->socket && cin_iswindow(instance->window)) {
+      cin_getwindow(instance->window, &instance->rect);
       const int32_t bytes = snprintf(NULL, 0, FSTR_RECT, FSTR_RECT_ARGS(instance->rect)) + 1;
       assert(bytes > 1);
       const uint32_t bytes_u32 = (uint32_t)bytes;
@@ -4598,21 +5293,19 @@ static void cmd_store_executor(void) {
     }
   }
   if (geometry_buf.count > 0) geometry_buf.items[--geometry_buf.count] = '\0';
-  FILE *file = NULL;
-  int32_t err = 0;
   char *buf = NULL;
   uint32_t buf_bytes = 0;
-  const bool has_chat = IsWindow(chat.window);
+  const bool has_chat = cin_iswindow(chat.window);
   if (has_chat) {
-    GetWindowRect(chat.window, &chat.rect);
+    cin_getwindow(chat.window, &chat.rect);
     layout->chat_rect = chat.rect;
   }
   if (!try_overwrite) goto append;
   int32_t scope_line = layout->scope_line;
   const uint32_t name_len = layout->name_len - 1;
-  err = fopen_s(&file, CIN_CONF_FILENAME, "rb");
-  if (err) {
-    log_fopen_error(CIN_CONF_FILENAME, err);
+  FILE *file = fopen(CIN_CONF_FILENAME, "rb");
+  if (!file) {
+    log_last_error("Failed to open file '%s'", CIN_CONF_FILENAME);
   } else {
     fseek(file, 0, SEEK_END);
     assert(ftell(file) > 0);
@@ -4706,9 +5399,9 @@ static void cmd_store_executor(void) {
       *overwrite++ = '\n';
     }
     const size_t used_bytes = (size_t)(tail - buf);
-    err = fopen_s(&file, CIN_CONF_FILENAME, "wb");
-    if (err) {
-      log_fopen_error(CIN_CONF_FILENAME, err);
+    file = fopen(CIN_CONF_FILENAME, "wb");
+    if (!file) {
+      log_last_error("Failed to open file '%s'", CIN_CONF_FILENAME);
     } else {
       fwrite(buf, 1, used_bytes, file);
       fclose(file);
@@ -4731,9 +5424,9 @@ static void cmd_store_executor(void) {
 append:
   if (buf) arena_free_pos(&arena_console, (uint8_t *)buf, buf_bytes + 1U);
   scope_line = 2;
-  err = fopen_s(&file, CIN_CONF_FILENAME, "ab+");
-  if (err) {
-    log_fopen_error(CIN_CONF_FILENAME, err);
+  file = fopen(CIN_CONF_FILENAME, "ab+");
+  if (!file) {
+    log_last_error("Failed to open file '%s'", CIN_CONF_FILENAME);
   } else {
     rewind(file);
     int32_t c;
@@ -4755,21 +5448,19 @@ static void cmd_store_validator(void) {
   const uint8_t *layout_name = NULL;
   (void)cmd_ctx.unicode;
   if (cmd_ctx.unicode) {
-    const int32_t len = utf16_to_utf8(cmd_ctx.unicode);
-    layout = radix_query(layout_tree, utf8_buf.items, (size_t)len - 1, &layout_name);
+    const size_t len = strlen(cmd_ctx.unicode);
+    layout = radix_query(layout_tree, (uint8_t *)cmd_ctx.unicode, len, &layout_name);
     if (layout) {
-      utf8_to_utf16_raw((char *)layout_name);
       assert(layout);
       assert(layout_name);
-      set_preview(true, L"store layout '%s' (overwrite)", utf16_buf_raw.items);
+      set_preview(true, "store layout '%s' (overwrite)", (char *)layout_name);
     } else {
-      set_preview(true, L"store new layout: '%s'", cmd_ctx.unicode);
+      set_preview(true, "store new layout: '%s'", cmd_ctx.unicode);
     }
   } else {
     Cin_Layout *curr = cmd_ctx.layout;
     char *curr_name = (char *)layout_strings.items + curr->name_offset;
-    utf8_to_utf16_nraw(curr_name, (int32_t)curr->name_len);
-    set_preview(true, L"store layout '%s' (overwrite current)", utf16_buf_raw.items);
+    set_preview(true, "store layout '%s' (overwrite current)", curr_name);
     layout = curr;
   }
   cmd_ctx.queued_layout = (Cin_Layout *)layout;
@@ -4809,40 +5500,40 @@ static void cmd_swap_validator(void) {
   const size_t n = cmd_ctx.numbers.count;
   const size_t screen_count = cmd_ctx.layout->count;
   if (screen_count < 2) {
-    set_preview(false, L"swap requires a layout with at least 2 screens");
+    set_preview(false, "swap requires a layout with at least 2 screens");
     return;
   }
   switch (n) {
-  case 2:
+  case 2: {
     const size_t first = cmd_ctx.numbers.items[0];
     const size_t second = cmd_ctx.numbers.items[1];
     if (first == second) {
-      set_preview(false, L"swap needs 2 unique screens, not both %zu", first);
+      set_preview(false, "swap needs 2 unique screens, not both %zu", first);
       return;
     }
     if (first > screen_count || second > screen_count) {
-      set_preview(false, L"cannot swap screen %zu with %zu, layout only has %zu screens",
+      set_preview(false, "cannot swap screen %zu with %zu, layout only has %zu screens",
                   first, second, screen_count);
       return;
     }
-    break;
+  } break;
   case 1:
-    set_preview(false, L"swap misses another number: %zu ... swap", cmd_ctx.numbers.items[0]);
+    set_preview(false, "swap misses another number: %zu ... swap", cmd_ctx.numbers.items[0]);
     return;
-  case 0:
+  case 0: {
     if (cmd_ctx.layout->count != 2) {
-      set_preview(false, L"swap requires 2 numbers or a layout with 2 screens");
+      set_preview(false, "swap requires 2 numbers or a layout with 2 screens");
       return;
     }
     array_push(&arena_console, &cmd_ctx.numbers, 1);
     array_push(&arena_console, &cmd_ctx.numbers, 2);
-    break;
+  } break;
   default:
-    set_preview(false, L"swap must have 2 or 0 numbers, not %zu", n);
+    set_preview(false, "swap must have 2 or 0 numbers, not %zu", n);
     return;
   }
   cmd_ctx.executor = cmd_swap_executor;
-  set_preview(true, L"swap screen %zu with %zu", cmd_ctx.numbers.items[0], cmd_ctx.numbers.items[1]);
+  set_preview(true, "swap screen %zu with %zu", cmd_ctx.numbers.items[0], cmd_ctx.numbers.items[1]);
 }
 
 static void cmd_clear_executor(void) {
@@ -4854,15 +5545,15 @@ static void cmd_clear_executor(void) {
 
 static void cmd_clear_validator(void) {
   if (!validate_screens()) return;
-  set_preview(true, L"clear %s", cmd_ctx.targets.items);
+  set_preview(true, "clear %s", cmd_ctx.targets.items);
   cmd_ctx.executor = cmd_clear_executor;
 }
 
 static void cmd_macro_executor(void) {
   Cin_Macro *macro = cmd_ctx.macro;
   if (macro) {
-    const wchar_t *p = macro->items;
-    const wchar_t *tail = macro->items + macro->count - 1;
+    const char *p = macro->items;
+    const char *tail = macro->items + macro->count - 1;
     do {
       cmd_ctx.executor = NULL;
       cmd_validator validator_fn = parse_command(p);
@@ -4871,14 +5562,14 @@ static void cmd_macro_executor(void) {
         if (cmd_ctx.executor) {
           cmd_ctx.executor();
         } else {
-          log_wmessage(LOG_ERROR, L"Failed to validate macro command '%s': %s", p, preview.items);
+          log_message(LOG_ERROR, "Failed to validate macro command '%s': %s", p, preview.items);
           return;
         }
       } else {
-        log_wmessage(LOG_ERROR, L"Failed to parse macro command '%s': %s", p, preview.items);
+        log_message(LOG_ERROR, "Failed to parse macro command '%s': %s", p, preview.items);
         return;
       }
-    } while ((p = wmemchr(p, L'\0', (size_t)(tail - p))) && *++p);
+    } while ((p = memchr(p, '\0', (size_t)(tail - p))) && *++p);
   }
 }
 
@@ -4886,18 +5577,17 @@ static void cmd_macro_validator(void) {
   radix_v macro = NULL;
   const uint8_t *macro_name = NULL;
   if (cmd_ctx.unicode) {
-    const int32_t len = utf16_to_utf8(cmd_ctx.unicode);
-    macro = radix_query(macro_tree, utf8_buf.items, (size_t)len - 1, &macro_name);
+    const size_t len = strlen(cmd_ctx.unicode);
+    macro = radix_query(macro_tree, (uint8_t *)cmd_ctx.unicode, len, &macro_name);
     if (!macro) {
-      set_preview(false, L"macro does not exist: '%s'", cmd_ctx.unicode);
+      set_preview(false, "macro does not exist: '%s'", cmd_ctx.unicode);
       return;
     }
-    utf8_to_utf16_raw((char *)macro_name);
     assert(macro);
     assert(macro_name);
-    set_preview(true, L"execute macro '%s'", utf16_buf_raw.items);
+    set_preview(true, "execute macro '%s'", (char *)macro_name);
   } else {
-    set_preview(true, L"execute macro '' (nothing)");
+    set_preview(true, "execute macro '' (nothing)");
   }
   cmd_ctx.macro = (Cin_Macro *)macro;
   cmd_ctx.executor = cmd_macro_executor;
@@ -4910,10 +5600,9 @@ static void cmd_macro_validator(void) {
 static void cmd_twitch_executor(void) {
   if (!cmd_ctx.unicode || cin_idle) return;
   static char twitch_buf[TWITCH_BUF_SIZE] = {TWITCH_PREFIX};
-  const int32_t len = utf16_to_utf8(cmd_ctx.unicode);
-  assert(len >= 0);
-  const char *channel = (const char *)utf8_buf.items;
-  memcpy(twitch_buf + cin_strlen(TWITCH_PREFIX), channel, (size_t)len);
+  const size_t len = strlen(cmd_ctx.unicode) + 1;
+  const char *channel = (const char *)cmd_ctx.unicode;
+  memcpy(twitch_buf + cin_strlen(TWITCH_PREFIX), channel, len);
   mpv_target_foreach(i, instance) {
     overlap_write(instance, MPV_LOADFILE, "loadfile", twitch_buf, NULL);
   }
@@ -4921,11 +5610,11 @@ static void cmd_twitch_executor(void) {
 
 static void cmd_twitch_validator(void) {
   if (!validate_screens()) return;
-  if (cmd_ctx.unicode && wcslen(cmd_ctx.unicode) > TWITCH_CHANNEL_MAX_CHARS) {
-    set_preview(false, L"twitch channel name is too long (max is %d characters)", TWITCH_CHANNEL_MAX_CHARS);
+  if (cmd_ctx.unicode && strlen(cmd_ctx.unicode) > TWITCH_CHANNEL_MAX_CHARS) {
+    set_preview(false, "twitch channel name is too long (max is %d characters)", TWITCH_CHANNEL_MAX_CHARS);
     return;
   }
-  set_preview(true, L"" TWITCH_PREFIX "%s %s", cmd_ctx.unicode ? cmd_ctx.unicode : L"", cmd_ctx.targets.items);
+  set_preview(true, "" TWITCH_PREFIX "%s %s", cmd_ctx.unicode ? cmd_ctx.unicode : "", cmd_ctx.targets.items);
   cmd_ctx.executor = cmd_twitch_executor;
 }
 
@@ -4942,7 +5631,7 @@ static void cmd_copy_executor(void) {
 
 static void cmd_copy_validator(void) {
   if (!validate_screens()) return;
-  set_preview(true, L"copy to clipboard %s", cmd_ctx.targets.items);
+  set_preview(true, "copy to clipboard %s", cmd_ctx.targets.items);
   cmd_ctx.executor = cmd_copy_executor;
 }
 
@@ -4950,7 +5639,7 @@ static void cmd_extra_executor(void) {
   bool reuse = false;
   mpv_lock();
   cache_foreach(&cin_io.instances, Instance, i, old) {
-    if (!old->pipe) {
+    if (!old->socket) {
       // reuse if free instance available
       reuse = true;
       mpv_spawn(old, SIZE_MAX);
@@ -4965,7 +5654,7 @@ static void cmd_extra_executor(void) {
 }
 
 static void cmd_extra_validator(void) {
-  set_preview(true, L"add extra screen to layout");
+  set_preview(true, "add extra screen to layout");
   cmd_ctx.executor = cmd_extra_executor;
 }
 
@@ -4973,10 +5662,10 @@ static void cmd_chat_executor(void) {
   Cin_Layout *layout = cmd_ctx.layout;
   const bool layout_chat = layout->chat_rect.bottom != LONG_MIN;
   if (!layout_chat) {
-    const LONG default_width = 400;
-    const LONG default_height = 600;
-    const LONG default_x = 0;
-    const LONG default_y = 0;
+    const int32_t default_width = 400;
+    const int32_t default_height = 600;
+    const int32_t default_x = 0;
+    const int32_t default_y = 0;
     layout->chat_rect.right = default_width;
     layout->chat_rect.bottom = default_height;
     layout->chat_rect.left = default_x;
@@ -4988,8 +5677,8 @@ static void cmd_chat_executor(void) {
 }
 
 static void cmd_chat_validator(void) {
-  const bool is_showing = IsWindow(chat.window);
-  set_preview(true, L"%s chat", is_showing ? L"reposition" : L"show");
+  const bool is_showing = cin_iswindow(chat.window);
+  set_preview(true, "%s chat", is_showing ? "reposition" : "show");
   cmd_ctx.executor = cmd_chat_executor;
 }
 
@@ -5014,42 +5703,54 @@ static void cmd_list_executor(void) {
     array_pop(&output);
     output.items[output.count - 1] = '\0';
   }
-  const int32_t len = utf8_to_utf16_nraw(output.items, (int32_t)output.count);
-  assert(len);
-  wwrite_safe(utf16_buf_raw.items, (DWORD)len);
+  assert(output.count);
+  cin_write_safe(output.items, (uint32_t)output.count);
   array_free_items(&arena_console, &output);
 }
 
 static void cmd_list_validator(void) {
-  set_preview(true, L"list all tags");
+  set_preview(true, "list all tags");
   cmd_ctx.executor = cmd_list_executor;
 }
 
 static void cmd_quit_executor(void) {
-  PostMessageW(chat.window, WM_CLOSE, 0, 0);
+  chat_kill();
   cache_foreach(&cin_io.instances, Instance, i, instance) {
-    log_message(LOG_DEBUG, "Closing PID=%lu", instance->pi.dwProcessId);
+    log_message(LOG_DEBUG, "Closing Window=%lu", instance->window);
     overlap_write(instance, MPV_QUIT, "quit", NULL, NULL);
   }
   clear_preview(0);
+  cursor_curr();
   show_cursor();
+#ifdef _WIN32
+  SetConsoleMode(repl.in, repl.in_mode);
+  SetConsoleMode(repl.out, repl.out_mode);
+#else
+  tcsetattr(STDIN_FILENO, TCSANOW, &repl.modes);
+  if (pxlib) {
+    if (pxdisplay) {
+      pXCloseDisplay(pxdisplay);
+    }
+    dlclose(pxlib);
+  }
+#endif
   exit(1);
 }
 
 static void cmd_quit_validator(void) {
-  set_preview(true, L"quit (also closes screens)");
+  set_preview(true, "quit (also closes screens)");
   cmd_ctx.executor = cmd_quit_executor;
 }
 
-static inline void register_cmd(const wchar_t *name, const wchar_t *help, cmd_validator validator) {
-  assert(wmemchr(help, PREFIX_TOKEN, wcslen(help)) == NULL);
+#define FSTR_CMD CRLF "  %-10s %s"
+
+static inline void register_cmd(const char *name, const char *help, cmd_validator validator) {
   patricia_insert(cmd_ctx.trie, name, validator);
-  const wchar_t *v_str = WCRLF L"  %-10s %s";
-  const int32_t len_i32 = _scwprintf(v_str, name, help);
+  const int32_t len_i32 = snprintf(NULL, 0, FSTR_CMD, name, help);
   assert(len_i32);
   const uint32_t len = (uint32_t)len_i32 + 1;
   array_reserve(&arena_console, &cmd_ctx.help, len);
-  swprintf(cmd_ctx.help.items + cmd_ctx.help.count, len, v_str, name, help);
+  snprintf(cmd_ctx.help.items + cmd_ctx.help.count, len, FSTR_CMD, name, help);
   cmd_ctx.help.count += len - 1;
 }
 
@@ -5063,31 +5764,32 @@ static bool init_commands(void) {
   cmd_ctx.queued_layout = cmd_ctx.layout;
   cmd_ctx.trie = patricia_node(NULL, 0);
   array_init(&arena_console, &cmd_ctx.numbers, COMMAND_NUMBERS_CAP);
-  array_wsextend(&arena_console, &cmd_ctx.help,
-                 WCR L"Available commands:" WCRLF L"  "
-                     L"Note: optional arguments before/after in brackets []" WCRLF);
-  register_cmd(L"autoplay", L"Autoplay media [(1 2 ..) autoplay (seconds)]", cmd_autoplay_validator);
-  register_cmd(L"chat", L"Show chat (see store command)", cmd_chat_validator);
-  register_cmd(L"clear", L"Clear tag/term [(1 2 ..) clear]", cmd_clear_validator);
-  register_cmd(L"copy", L"Copy url(s) to clipboard [(1 2 ..) copy]", cmd_copy_validator);
-  register_cmd(L"extra", L"Adds an extra screen (see store command)", cmd_extra_validator);
-  register_cmd(L"help", L"Show all commands", cmd_help_validator);
-  register_cmd(L"hide", L"Hide media with term [hide term]", cmd_hide_validator);
-  register_cmd(L"idle", L"Make commands (not) play media [idle]", cmd_idle_validator);
-  register_cmd(L"kill", L"Kill screen(s) and chat [(1 2 ..) kill]", cmd_kill_validator);
-  register_cmd(L"layout", L"Change layout to name [layout (name)]", cmd_layout_validator);
-  register_cmd(L"list", L"Show all tags", cmd_list_validator);
-  register_cmd(L"lock", L"Lock/unlock screen contents [(1 2 ..) lock]", cmd_lock_validator);
-  register_cmd(L"macro", L"Execute macro [macro (name)]", cmd_macro_validator);
-  register_cmd(L"maximize", L"Maximize and close others [(1) maximize]", cmd_maximize_validator);
-  register_cmd(L"mute", L"Mute screen(s) [(1 2 ..) mute]", cmd_mute_validator);
-  register_cmd(L"quit", L"Close screens and quit Cinema", cmd_quit_validator);
-  register_cmd(L"reroll", L"Shuffle media [(1 2 ..) (reroll)]", cmd_reroll_validator);
-  register_cmd(L"search", L"Limit media to term [(1 2 ..) search (term)]", cmd_search_validator);
-  register_cmd(L"store", L"Store layout in cinema.conf [store (layout)]", cmd_store_validator);
-  register_cmd(L"swap", L"Swap screen contents [(1 2) swap]", cmd_swap_validator);
-  register_cmd(L"tag", L"Limit media to tag [(1 2 ..) tag (name)]", cmd_tag_validator);
-  register_cmd(L"twitch", L"Show channel [(1 2 ..) twitch (channel)]", cmd_twitch_validator);
+  const char *commands_note = CR "Available commands:" CRLF "  "
+                                 "Note: optional arguments before/after in brackets []" CRLF;
+  const uint32_t commands_note_len = (uint32_t)strlen(commands_note);
+  array_extend(&arena_console, &cmd_ctx.help, commands_note, commands_note_len);
+  register_cmd("autoplay", "Autoplay media [(1 2 ..) autoplay (seconds)]", cmd_autoplay_validator);
+  register_cmd("chat", "Show chat (see store command)", cmd_chat_validator);
+  register_cmd("clear", "Clear tag/term [(1 2 ..) clear]", cmd_clear_validator);
+  register_cmd("copy", "Copy url(s) to clipboard [(1 2 ..) copy]", cmd_copy_validator);
+  register_cmd("extra", "Adds an extra screen (see store command)", cmd_extra_validator);
+  register_cmd("help", "Show all commands", cmd_help_validator);
+  register_cmd("hide", "Hide media with term [hide term]", cmd_hide_validator);
+  register_cmd("idle", "Make commands (not) play media [idle]", cmd_idle_validator);
+  register_cmd("kill", "Kill screen(s) and chat [(1 2 ..) kill]", cmd_kill_validator);
+  register_cmd("layout", "Change layout to name [layout (name)]", cmd_layout_validator);
+  register_cmd("list", "Show all tags", cmd_list_validator);
+  register_cmd("lock", "Lock/unlock screen contents [(1 2 ..) lock]", cmd_lock_validator);
+  register_cmd("macro", "Execute macro [macro (name)]", cmd_macro_validator);
+  register_cmd("maximize", "Maximize and close others [(1) maximize]", cmd_maximize_validator);
+  register_cmd("mute", "Mute screen(s) [(1 2 ..) mute]", cmd_mute_validator);
+  register_cmd("quit", "Close screens and quit Cinema", cmd_quit_validator);
+  register_cmd("reroll", "Shuffle media [(1 2 ..) (reroll)]", cmd_reroll_validator);
+  register_cmd("search", "Limit media to term [(1 2 ..) search (term)]", cmd_search_validator);
+  register_cmd("store", "Store layout in cinema.conf [store (layout)]", cmd_store_validator);
+  register_cmd("swap", "Swap screen contents [(1 2) swap]", cmd_swap_validator);
+  register_cmd("tag", "Limit media to tag [(1 2 ..) tag (name)]", cmd_tag_validator);
+  register_cmd("twitch", "Show channel [(1 2 ..) twitch (channel)]", cmd_twitch_validator);
   return true;
 }
 
@@ -5098,290 +5800,477 @@ static void execute_startup_macros(void) {
   }
   array_clear(&cmd_ctx.numbers);
   cmd_reroll_validator();
-  set_preview(true, L"press enter to shuffle (h for help)");
-  set_preview_pos(repl.home.Y + 1);
+  set_preview(true, "press enter to shuffle (h for help)");
+  set_preview_row(repl.home.Y + 1);
   log_preview();
+}
+
+static inline int32_t term_read(uint8_t *buf, const int32_t n, bool peek) {
+  int32_t chars_read = 0;
+  assert(n > 0);
+#ifdef _WIN32
+  DWORD _read = 0;
+  if (!peek) {
+    if (ReadFile(repl.in, buf, (DWORD)n, &_read, NULL)) {
+      chars_read = (int32_t)_read;
+    } else {
+      log_last_error("Failed to read from terminal");
+    }
+  } else {
+    for (int32_t i = 0; i < n; ++i) {
+      DWORD code = WaitForSingleObject(repl.in, TERM_READ_WAIT_MS);
+      if (code != WAIT_OBJECT_0) break;
+      if (!ReadFile(repl.in, buf + i, 1, &_read, NULL)) {
+        log_last_error("Failed to read %d from terminal", n);
+        break;
+      }
+      if (!_read) break;
+      ++chars_read;
+    }
+  }
+#else
+  struct pollfd pfds[2] = {{.fd = STDIN_FILENO, .events = POLLIN},
+                           {.fd = interrupt_pipe[0], .events = POLLIN}};
+  if (!peek) {
+    for (;;) {
+      if (repl.in_buf.count) {
+        chars_read = min((int32_t)repl.in_buf.count, n);
+        memcpy(buf, repl.in_buf.items, (size_t)chars_read);
+        if ((int32_t)repl.in_buf.count > chars_read) {
+          size_t in_buf_remainder = repl.in_buf.count - (uint32_t)chars_read;
+          memmove(repl.in_buf.items, repl.in_buf.items + chars_read, in_buf_remainder);
+        }
+        repl.in_buf.count -= (uint32_t)chars_read;
+        break;
+      }
+      const int32_t poll_result = poll(pfds, 2, -1);
+      if (poll_result <= 0) {
+        log_last_error("Failed to peek");
+        break;
+      }
+      if (pfds[1].revents & POLLIN) {
+        term_get_cursor(&repl.cursor);
+        interrupt_finish();
+      }
+      if (pfds[0].revents & POLLIN) {
+        chars_read = (int32_t)read(STDIN_FILENO, buf, (size_t)n);
+        if (chars_read < 0) log_last_error("Failed to read %d from terminal", n);
+        break;
+      }
+    }
+  } else {
+    int32_t i = 0;
+    bool interrupt = false;
+    while (i < n) {
+      const int32_t poll_result = poll(pfds, 2, TERM_READ_WAIT_MS);
+      if (poll_result == 0) break;
+      if (poll_result < 0) {
+        log_last_error("Failed to peek");
+        break;
+      }
+      if (pfds[1].revents & POLLIN) interrupt = true;
+      if (pfds[0].revents & POLLIN && read(pfds[0].fd, buf + i, 1) > 0) {
+        ++chars_read;
+        ++i;
+      } else {
+        log_last_error("Failed to read peek");
+        break;
+      }
+    }
+    if (interrupt) {
+      term_get_cursor(&repl.cursor);
+      interrupt_finish();
+    }
+  }
+#endif
+  return chars_read;
+}
+
+static bool term_proc_sequence(const uint8_t *sequence, int32_t len) {
+  assert(len >= 0);
+  bool new_preview = true;
+  log_message(LOG_TRACE, "Terminal sequence (len %d): %.*s", len, len, sequence);
+  if (len == 0) {
+    // ESC
+    clear_full();
+    repl.msg_index = 0;
+    array_clear(repl.msg);
+  } else {
+    int32_t i = 0;
+    if (sequence[i] == TERM_LBRACKET) {
+      if (++i == len) goto fail;
+      switch (sequence[i]) {
+      case TERM_HOME:
+        if (++i != len) goto fail;
+        cursor_home();
+        repl.msg_index = 0;
+        new_preview = false;
+        break;
+      case TERM_END:
+        if (++i != len) goto fail;
+        repl.msg_index = repl.msg->count;
+        cursor_curr();
+        new_preview = false;
+        break;
+      case TERM_DELETE: {
+        if (++i == len) goto fail;
+        if (repl.msg_index == repl.msg->count) {
+          new_preview = false;
+          break;
+        }
+        bool control = sequence[i] == TERM_SEMICOLON;
+        if (control) i += 2;
+        if (sequence[i] != TERM_TILDE) goto fail;
+        if (++i != len) goto fail;
+        uint32_t right = repl.msg_index;
+        if (control) {
+          while (right < repl.msg->count && repl.msg->items[right] != TERM_SPACE) ++right;
+          while (right < repl.msg->count && repl.msg->items[++right] == TERM_SPACE) {
+          }
+        } else {
+          ++right;
+        }
+        const uint32_t leftover = repl.msg->count - right;
+        const uint32_t deleted = right - repl.msg_index;
+        repl.msg->count -= deleted;
+        if (leftover) {
+          memmove(&repl.msg->items[repl.msg_index], &repl.msg->items[right], leftover);
+          cin_write(repl.msg->items + repl.msg_index, leftover);
+          clear_tail(deleted, false);
+        } else {
+          clear_tail(deleted, true);
+        }
+        cursor_curr();
+      } break;
+      case TERM_UP: {
+        if (++i != len) goto fail;
+        if (!repl.msg->prev) {
+          new_preview = false;
+          break;
+        }
+        const uint32_t prev_count = repl.msg->count;
+        array_resize(&arena_console, repl.msg, repl.msg->prev->count);
+        memcpy(repl.msg->items, repl.msg->prev->items, repl.msg->prev->count);
+        repl.msg_index = repl.msg->count;
+        repl.msg->next = repl.msg->prev->next;
+        repl.msg->prev = repl.msg->prev->prev;
+        cursor_home();
+        cin_write(repl.msg->items, repl.msg->count);
+        if (repl.msg->count < prev_count) {
+          const uint32_t to_clear = prev_count - repl.msg->count;
+          clear_tail(to_clear, false);
+        }
+      } break;
+      case TERM_DOWN: {
+        if (++i != len) goto fail;
+        if (repl.msg->next) {
+          const uint32_t prev_count = repl.msg->count;
+          Console_Message *next = repl.msg->next;
+          array_resize(&arena_console, repl.msg, next->count);
+          memcpy(repl.msg->items, next->items, next->count);
+          repl.msg->prev = next->prev;
+          repl.msg->next = next->next;
+          repl.msg_index = repl.msg->count;
+          cursor_home();
+          cin_write(repl.msg->items, repl.msg->count);
+          if (repl.msg->count < prev_count) {
+            const uint32_t to_clear = prev_count - repl.msg->count;
+            clear_tail(to_clear, false);
+          }
+        } else {
+          clear_full();
+          repl.msg->prev = repl.msg_tail;
+          array_clear(repl.msg);
+          repl.msg_index = 0;
+        }
+      } break;
+      case TERM_PAGEUP: {
+        if (++i == len || sequence[i] != TERM_TILDE || ++i != len) goto fail;
+        if (!repl.msg->prev) {
+          new_preview = false;
+          break;
+        }
+        Console_Message *head = repl.msg->prev;
+        while (head->prev) head = head->prev;
+        const uint32_t prev_count = repl.msg->count;
+        array_resize(&arena_console, repl.msg, head->count);
+        memcpy(repl.msg->items, head->items, head->count);
+        repl.msg_index = repl.msg->count;
+        repl.msg->next = head->next;
+        cursor_home();
+        cin_write(repl.msg->items, repl.msg->count);
+        if (repl.msg->count < prev_count) {
+          const uint32_t to_clear = prev_count - repl.msg->count;
+          clear_tail(to_clear, false);
+        }
+      } break;
+      case TERM_PAGEDOWN: {
+        if (++i == len || sequence[i] != TERM_TILDE || ++i != len) goto fail;
+        if (repl.msg_tail) {
+          const uint32_t prev_count = repl.msg->count;
+          Console_Message *next = repl.msg_tail;
+          array_resize(&arena_console, repl.msg, next->count);
+          memcpy(repl.msg->items, next->items, next->count);
+          repl.msg->prev = next->prev;
+          repl.msg->next = next->next;
+          repl.msg_index = repl.msg->count;
+          cursor_home();
+          cin_write(repl.msg->items, repl.msg->count);
+          if (repl.msg->count < prev_count) {
+            const uint32_t to_clear = prev_count - repl.msg->count;
+            clear_tail(to_clear, false);
+          }
+        } else {
+          clear_full();
+          array_clear(repl.msg);
+          repl.msg_index = 0;
+        }
+      } break;
+      case TERM_LEFT:
+        if (++i != len) goto fail;
+        if (repl.msg_index) {
+          --repl.msg_index;
+          cursor_curr();
+        }
+        new_preview = false;
+        break;
+      case TERM_RIGHT:
+        if (++i != len) goto fail;
+        if (repl.msg_index < repl.msg->count) {
+          ++repl.msg_index;
+          cursor_curr();
+        }
+        new_preview = false;
+        break;
+      case TERM_DEFAULT:
+        // handle possible control arrow keys
+        if (++i == len || sequence[i] != TERM_SEMICOLON ||
+            ++i == len || sequence[i] != TERM_PAGEUP ||
+            ++i + 1 != len) goto fail;
+        if (sequence[i] == TERM_LEFT) {
+          if (repl.msg_index) {
+            --repl.msg_index;
+            while (repl.msg_index && repl.msg->items[repl.msg_index] == TERM_SPACE) --repl.msg_index;
+            while (repl.msg_index && repl.msg->items[repl.msg_index - 1] != TERM_SPACE) --repl.msg_index;
+            cursor_curr();
+          }
+          new_preview = false;
+        } else if (sequence[i] == TERM_RIGHT) {
+          if (repl.msg_index < repl.msg->count) {
+            while (repl.msg_index < repl.msg->count && repl.msg->items[repl.msg_index] != TERM_SPACE) ++repl.msg_index;
+            while (repl.msg_index < repl.msg->count && repl.msg->items[++repl.msg_index] == TERM_SPACE) {
+            }
+            cursor_curr();
+          }
+          new_preview = false;
+        } else {
+          goto fail;
+        }
+        break;
+      default:
+        goto fail;
+        break;
+      }
+    }
+  }
+  return new_preview;
+fail:
+  new_preview = false;
+  log_message(LOG_DEBUG, "Terminal sequence incomplete or not supported: %.*s",
+              len, (char *)sequence);
+  return new_preview;
+}
+
+static bool term_proc_unicode(const uint8_t *unicode, int32_t len) {
+  assert(len > 0);
+  log_message(LOG_DEBUG, "Unicode input (len %d): %.*s", len, len, unicode);
+  if (len == 1) {
+    log_message(LOG_ERROR, "Failed to parse unicode");
+    return false;
+  }
+  if (len == 3 && !memcmp(unicode, TERM_REPLACEMENT, 3)) {
+    log_message(LOG_ERROR, "This unicode character is not supported");
+    return false;
+  }
+  const uint32_t len_u32 = (uint32_t)len;
+  array_splice(&arena_console, repl.msg, repl.msg_index, unicode, len_u32);
+  cin_write(repl.msg->items + repl.msg_index, repl.msg->count - repl.msg_index);
+  repl.msg_index += len_u32;
+  return true;
+}
+
+static bool term_proc_char(char byte) {
+  assert(byte);
+  log_message(LOG_TRACE, "Char input: %02hhx", byte);
+  bool new_preview = true;
+  switch (byte) {
+  case TERM_TAB:
+  case TERM_LINEFEED:
+  case TERM_RETURN: {
+    clear_full();
+    assert(repl.msg->items);
+    uint32_t i = repl.msg->count;
+    while (i && isspace(repl.msg->items[i - 1])) --i;
+    const bool empty = !i;
+    const bool dup = !empty && repl.msg_tail && repl.msg->count == repl.msg_tail->count &&
+                     !strncmp(repl.msg->items, repl.msg_tail->items, repl.msg->count);
+    if (empty || dup) {
+      if (repl.msg_tail) repl.msg->prev = repl.msg_tail;
+      repl.msg->next = NULL;
+      repl.msg_index = 0;
+      array_clear(repl.msg);
+    } else {
+      // commit to history
+      if (repl.msg_tail) {
+        repl.msg_tail->next = repl.msg;
+        repl.msg->prev = repl.msg_tail;
+      }
+      repl.msg->next = NULL;
+      repl.msg_tail = repl.msg;
+      repl.msg = create_console_message();
+      repl.msg->prev = repl.msg_tail;
+      repl.msg_index = 0;
+      array_clear(repl.msg);
+    }
+    if (cmd_ctx.executor) {
+      cmd_ctx.executor();
+    }
+  } break;
+  case TERM_BACK_CTRL:
+  case TERM_BACK: {
+    if (!repl.msg_index) {
+      new_preview = false;
+      break;
+    }
+    uint32_t left = repl.msg_index - 1;
+    if (byte == TERM_BACK_CTRL) {
+      while (left && repl.msg->items[left] == TERM_SPACE) --left;
+      while (left && repl.msg->items[left - 1] != TERM_SPACE) --left;
+    }
+    if (repl.msg_index < repl.msg->count) {
+      memmove(&repl.msg->items[left], &repl.msg->items[repl.msg_index], repl.msg->count - repl.msg_index);
+    }
+    const uint32_t deleted = repl.msg_index - left;
+    repl.msg->count -= deleted;
+    repl.msg_index = left;
+    const uint32_t leftover = repl.msg->count - repl.msg_index;
+    const COORD curr = curr_cursor();
+    term_set_cursor(curr);
+    if (leftover) {
+      cin_write(repl.msg->items + repl.msg_index, leftover);
+      const COORD new_curr = index_to_cursor_repl(repl.msg_index + leftover);
+      term_clear(new_curr, deleted, false, false);
+      term_set_cursor(curr);
+    } else {
+      term_clear(curr, deleted, false, false);
+    }
+  } break;
+  default:
+    if (!byte) {
+      new_preview = false;
+      break;
+    }
+    byte = cin_lower(byte);
+    array_insert(&arena_console, repl.msg, repl.msg_index, byte);
+    cin_write(repl.msg->items + repl.msg_index, repl.msg->count - repl.msg_index);
+    ++repl.msg_index;
+    if (repl.msg_index != repl.msg->count) cursor_curr();
+    break;
+  }
+  return new_preview;
 }
 
 int main(int argc, char **argv) {
   (void)argc;
   (void)argv;
-#if !defined(_WIN32)
-  printf("Error: Your operating system is not supported, Windows-only currently.\n");
-  return 1;
-#endif
   if (!init_os()) exit(1);
   if (!init_repl()) exit(1);
+#ifdef _WIN32
   if (!InitializeCriticalSectionAndSpinCount(&log_lock, 0)) exit(1);
+#endif
   if (!init_config(CIN_CONF_FILENAME)) exit(1);
   if (!init_commands()) exit(1);
+#ifdef _WIN32
   if (!init_executables()) exit(1);
+// on linux we run the exes without searching
+#endif
   if (!init_documents()) exit(1);
-  if (!init_timers()) exit(1);
   if (!init_mpv()) exit(1);
+#ifndef _WIN32
+  if (!init_xlib()) pxlib = NULL;
+#endif
   execute_startup_macros();
-  Console_Message *msg_tail = NULL;
   for (;;) {
     show_cursor();
-    INPUT_RECORD input;
-    DWORD read;
-    if (!ReadConsoleInputW(repl.in, &input, 1, &read)) {
-      log_last_error("Failed to read console input");
+    uint8_t byte;
+    if (!term_read(&byte, 1, false)) {
       break;
     }
-    wchar_t c = input.Event.KeyEvent.uChar.UnicodeChar;
-    const wchar_t vk = input.Event.KeyEvent.wVirtualKeyCode;
-    if (!input.Event.KeyEvent.bKeyDown && (!c || vk != VK_MENU)) continue;
-    switch (input.EventType) {
-    case KEY_EVENT:
-      hide_cursor();
-      break;
-    case WINDOW_BUFFER_SIZE_EVENT:
-      reset_console_timer(console_timers[CIN_TIMER_RESIZE]);
-      continue;
-    default:
-      continue;
+    hide_cursor();
+    const COORD size_change = term_get_size(&repl.size);
+    if (size_change.X) {
+      lock_logs();
+      term_get_cursor(&repl.cursor);
+      const uint32_t curr_index = cursor_to_index(repl.cursor, (uint32_t)repl.size.X);
+      const uint32_t i = curr_index > repl.msg_index ? curr_index - repl.msg_index : curr_index;
+      const short new_home_y = index_y(i, (uint32_t)repl.size.X);
+      repl.home.Y = new_home_y;
+      unlock_logs();
+    } else if (size_change.Y < 0) {
+      repl.home.Y = min(repl.home.Y, repl.size.Y - 1);
     }
-    switch (vk) {
-    case VK_TAB:
-    case VK_RETURN: {
-      clear_full();
-      cursor_home();
-      assert(repl.msg->items);
-      DWORD i = repl.msg->count;
-      while (i && iswspace(repl.msg->items[i - 1])) --i;
-      const bool empty = !i;
-      const bool dup = !empty && msg_tail && repl.msg->count == msg_tail->count &&
-                       !wcsncmp(repl.msg->items, msg_tail->items, repl.msg->count);
-      if (empty || dup) {
-        if (msg_tail) repl.msg->prev = msg_tail;
-        repl.msg->next = NULL;
-        repl.msg_index = 0;
-        array_clear(repl.msg);
-      } else {
-        // commit to history
-        if (msg_tail) {
-          msg_tail->next = repl.msg;
-          repl.msg->prev = msg_tail;
-        }
-        repl.msg->next = NULL;
-        msg_tail = repl.msg;
-        repl.msg = create_console_message();
-        repl.msg->prev = msg_tail;
-        repl.msg_index = 0;
-        array_clear(repl.msg);
+    bool new_preview = true;
+    if (byte == TERM_ESC) {
+      uint8_t term_sequence[TERM_SEQUENCE_MAX];
+      const int32_t len = term_read(term_sequence, sizeof(term_sequence), true);
+      new_preview = term_proc_sequence(term_sequence, len);
+    } else if ((byte & 0x80) != 0) {
+      int32_t bytes = 1;
+      if ((byte & 0xE0) == 0xC0) bytes = 2;
+      else if ((byte & 0xF0) == 0xE0) bytes = 3;
+      else if ((byte & 0xF8) == 0xF0) bytes = 4;
+      uint8_t unicode[4] = {byte};
+      const int32_t len = term_read(unicode + 1, bytes - 1, false);
+      new_preview = term_proc_unicode(unicode, len + 1);
+    } else {
+      new_preview = term_proc_char((char)byte);
+    }
+    if (!new_preview) continue;
+    short tail_row = index_y_repl(repl.msg->count);
+    tail_row = min(tail_row, repl.size.Y);
+    const short preview_row = min(tail_row + 1, repl.size.Y);
+    const short preview_shift = preview_row - preview.pos.Y;
+    if (tail_row == repl.size.Y) {
+      const short tail_col = index_x_repl(repl.msg->count);
+      if (tail_col != 0) {
+        // clear preview and make space for new line
+        const short leftover = (short)preview.len - tail_col;
+        term_set_cursor((COORD){.X = tail_col, .Y = tail_row});
+        cin_writef(CSI "%hdX\n", leftover);
+        --repl.home.Y;
       }
-      if (cmd_ctx.executor) {
-        cmd_ctx.executor();
-      }
-    } break;
-    case VK_ESCAPE: {
-      clear_full();
-      cursor_home();
-      repl.msg_index = 0;
-      array_clear(repl.msg);
-    } break;
-    case VK_HOME:
-      cursor_home();
-      repl.msg_index = 0;
-      continue;
-    case VK_END:
-      repl.msg_index = repl.msg->count;
       cursor_curr();
-      continue;
-    case VK_BACK: {
-      if (!repl.msg_index) continue;
-      DWORD left = repl.msg_index - 1;
-      if (ctrl_on(&input)) {
-        while (left && repl.msg->items[left] == CIN_SPACE) --left;
-        while (left && repl.msg->items[left - 1] != CIN_SPACE) --left;
-      }
-      if (repl.msg_index < repl.msg->count) {
-        wmemmove(&repl.msg->items[left], &repl.msg->items[repl.msg_index], repl.msg->count - repl.msg_index);
-      }
-      const DWORD deleted = repl.msg_index - left;
-      repl.msg->count -= deleted;
-      repl.msg_index = left;
+    } else if (preview_shift < 0) {
+      // went up preview_shift rows
+      clear_preview(0);
       cursor_curr();
-      const DWORD leftover = repl.msg->count - repl.msg_index;
-      clear_tail(deleted);
-      if (leftover) {
-        wwrite(repl.msg->items + repl.msg_index, leftover);
-        cursor_curr();
-      }
-    } break;
-    case VK_DELETE: {
-      if (repl.msg_index == repl.msg->count) continue;
-      DWORD right = repl.msg_index;
-      if (ctrl_on(&input)) {
-        while (right < repl.msg->count && repl.msg->items[right] != CIN_SPACE) ++right;
-        while (right < repl.msg->count && repl.msg->items[++right] == CIN_SPACE);
-      } else {
-        ++right;
-      }
-      const DWORD leftover = repl.msg->count - right;
-      const DWORD deleted = right - repl.msg_index;
-      repl.msg->count -= deleted;
-      clear_tail(deleted);
-      if (leftover) {
-        wmemmove(&repl.msg->items[repl.msg_index], &repl.msg->items[right], leftover);
-        wwrite(repl.msg->items + repl.msg_index, leftover);
-        cursor_curr();
-      }
-    } break;
-    case VK_UP: {
-      if (!repl.msg->prev) continue;
-      const DWORD prev_count = repl.msg->count;
-      array_resize(&arena_console, repl.msg, repl.msg->prev->count);
-      wmemcpy(repl.msg->items, repl.msg->prev->items, repl.msg->prev->count);
-      repl.msg_index = repl.msg->count;
-      repl.msg->next = repl.msg->prev->next;
-      repl.msg->prev = repl.msg->prev->prev;
-      if (repl.msg->count < prev_count) clear_tail(prev_count - repl.msg->count);
-      cursor_home();
-      wwrite(repl.msg->items, repl.msg->count);
-    } break;
-    case VK_DOWN: {
-      if (repl.msg->next) {
-        const DWORD prev_count = repl.msg->count;
-        repl.msg->capacity = repl.msg->next->capacity;
-        repl.msg->count = repl.msg->next->count;
-        wmemcpy(repl.msg->items, repl.msg->next->items, repl.msg->next->count);
-        if (repl.msg->count < prev_count) clear_tail(prev_count - repl.msg->count);
-        cursor_home();
-        wwrite(repl.msg->items, repl.msg->count);
-        repl.msg->prev = repl.msg->next->prev;
-        repl.msg->next = repl.msg->next->next;
-        repl.msg_index = repl.msg->count;
-      } else {
-        clear_full();
-        cursor_home();
-        repl.msg->prev = msg_tail;
-        array_clear(repl.msg);
-        repl.msg_index = 0;
-      }
-    } break;
-    case VK_PRIOR: {
-      if (!repl.msg->prev) continue;
-      Console_Message *head = repl.msg->prev;
-      while (head->prev) head = head->prev;
-      const DWORD prev_count = repl.msg->count;
-      array_resize(&arena_console, repl.msg, head->count);
-      wmemcpy(repl.msg->items, head->items, head->count);
-      repl.msg_index = repl.msg->count;
-      repl.msg->next = head->next;
-      if (repl.msg->count < prev_count) clear_tail(prev_count - repl.msg->count);
-      cursor_home();
-      wwrite(repl.msg->items, repl.msg->count);
-    } break;
-    case VK_NEXT: {
-      if (msg_tail) {
-        const DWORD prev_count = repl.msg->count;
-        repl.msg->capacity = msg_tail->capacity;
-        repl.msg->count = msg_tail->count;
-        wmemcpy(repl.msg->items, msg_tail->items, msg_tail->count);
-        if (repl.msg->count < prev_count) clear_tail(prev_count - repl.msg->count);
-        cursor_home();
-        wwrite(repl.msg->items, repl.msg->count);
-        repl.msg->prev = msg_tail->prev;
-        repl.msg->next = msg_tail->next;
-        repl.msg_index = repl.msg->count;
-      } else {
-        clear_full();
-        cursor_home();
-        array_clear(repl.msg);
-        repl.msg_index = 0;
-      }
-    } break;
-    case VK_LEFT:
-      if (repl.msg_index) {
-        --repl.msg_index;
-        if (ctrl_on(&input)) {
-          while (repl.msg_index && repl.msg->items[repl.msg_index] == CIN_SPACE) --repl.msg_index;
-          while (repl.msg_index && repl.msg->items[repl.msg_index - 1] != CIN_SPACE) --repl.msg_index;
-        }
-        cursor_curr();
-      }
-      continue;
-    case VK_RIGHT:
-      if (repl.msg_index < repl.msg->count) {
-        if (ctrl_on(&input)) {
-          while (repl.msg_index < repl.msg->count && repl.msg->items[repl.msg_index] != CIN_SPACE) ++repl.msg_index;
-          while (repl.msg_index < repl.msg->count && repl.msg->items[++repl.msg_index] == CIN_SPACE);
-        } else {
-          ++repl.msg_index;
-        }
-        cursor_curr();
-      }
-      continue;
-    default:
-      if (!c || c == PREFIX_TOKEN) continue;
-      // NOTE: When a surrogate is encountered, build a grapheme cluster.
-      // This ensures that, not only do we store the wchar_t properly, we also
-      // print it accurately as it arrives - the console normally appends a space
-      // after every single surrogate, so a pair will be 4 cells (now 2).
-      // Unfortunately, surrogate pairs still corrupt cursor positioning, which
-      // you could try to alleviate by tracking cells.
-      static wchar_t surrogates[4] = {0};
-      static wchar_t surrogate_count = 0;
-      assert(surrogate_count < 4);
-      if (surrogate_count == 3) {
-        // completed grapheme cluster
-        // overwrite first written pair
-        assert(IS_LOW_SURROGATE(c));
-        surrogates[surrogate_count] = c;
-        array_wsplice(&arena_console, repl.msg, repl.msg_index, surrogates + 2, 2);
-        repl.msg_index -= 2;
-        cursor_curr();
-        wwrite(repl.msg->items + repl.msg_index, repl.msg->count - repl.msg_index);
-        repl.msg_index += 4;
-        cursor_curr();
-        surrogate_count = 0;
-      } else if (surrogate_count == 1) {
-        // pair might be completed, write just in case
-        assert(IS_LOW_SURROGATE(c));
-        surrogates[surrogate_count++] = c;
-        array_wsplice(&arena_console, repl.msg, repl.msg_index, surrogates, 2);
-        wwrite(repl.msg->items + repl.msg_index, repl.msg->count - repl.msg_index);
-        repl.msg_index += 2;
-        cursor_curr();
-      } else {
-        if (IS_HIGH_SURROGATE(c)) {
-          surrogates[surrogate_count++] = c;
-          continue;
-        } else {
-          assert(!IS_LOW_SURROGATE(c));
-          c = cin_wlower(c);
-          array_winsert(&arena_console, repl.msg, repl.msg_index, c);
-          wwrite(repl.msg->items + repl.msg_index, repl.msg->count - repl.msg_index);
-          ++repl.msg_index;
-          cursor_curr();
-          surrogate_count = 0;
-        }
-      }
-      log_wmessage(LOG_TRACE, L"char=%hu (%lc), v=%hu (%lc), pressed=%d, ctrl=%d",
-                   c, c, vk, vk ? vk : L' ', input.Event.KeyEvent.bKeyDown, ctrl_on(&input));
-      break;
-    }
-    const SHORT preview_offset = (SHORT)((repl.msg->count + PREFIX) / repl.dwSize_X) + 1;
-    const SHORT preview_line = repl.home.Y + preview_offset;
-    const SHORT y_diff = preview_line - preview.pos.Y;
-    if (y_diff < 0) {
-      clear_preview((SHORT)(repl.dwSize_X - preview.len));
-    } else if (y_diff == 1) {
-      const DWORD tail_x = (repl.msg->count + PREFIX) % repl.dwSize_X;
-      if (preview.len > tail_x) {
-        clear_preview((SHORT)tail_x);
+    } else if (preview_shift == 1) {
+      // went down 1 row
+      const short preview_col = index_x_repl(repl.msg->count);
+      if ((short)preview.len > preview_col) {
+        clear_preview(preview_col);
       }
     }
-    set_preview_pos(preview_line);
-    clear_preview(0);
+    const uint32_t prev_len = preview.len;
+    set_preview_row(preview_row);
     update_preview();
     log_preview();
-  }
-  if (!SetConsoleMode(repl.in, repl.in_mode)) {
-    log_last_error("Failed to reset in console mode");
-    return 1;
+    if (preview_shift == 0 && prev_len > preview.len) {
+      const uint32_t leftover = prev_len - preview.len;
+      const COORD clear_pos = {.X = (short)preview.len, .Y = preview_row};
+      term_clear(clear_pos, leftover, true, false);
+      cursor_curr();
+    }
   }
   return 0;
 }

@@ -27,9 +27,9 @@ Please use the [issue tracker](https://github.com/marm00/cinema/issues) here on 
 
 ## Compilation
 
-Windows only for now. Make sure you have [Build Tools for Visual Studio](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2026) (select 'Desktop development with C++' when prompted) and [LLVM](https://github.com/llvm/llvm-project/releases/latest). The [RAD Debugger](https://github.com/EpicGamesExt/raddebugger) is recommended for development.
+**Windows:** Make sure you have [Build Tools for Visual Studio](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2026) (select 'Desktop development with C++' when prompted) and [LLVM](https://github.com/llvm/llvm-project/releases/latest). The [RAD Debugger](https://github.com/EpicGamesExt/raddebugger) is recommended for development.
 
-Run `build.bat`. It builds in debug mode with openmp enabled by default. For the release version, run `build release`. To disable openmp, run `build nomp`. To enable address sanitizer, run `build asan`. Specify the log level with `build log_[X]` where [X] is one of *trace*, *debug* (default for debug builds), *info*, *warning* (default for release builds), *error*, descending in frequency. You will get cinema.exe, which accepts no arguments.
+Run `build.bat` (Windows) or `build.sh` (Linux). It builds in debug mode with openmp enabled by default. For the release version, run `build release`. To disable openmp, run `build nomp`. To enable address sanitizer, run `build asan`. Specify the log level with `build log_[X]` where [X] is one of *trace*, *debug* (default for debug builds), *info*, *warning* (default for release builds), *error*, descending in frequency. You will get an exectuable that accepts no arguments.
 
 ## Contributing
 
