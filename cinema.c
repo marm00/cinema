@@ -221,7 +221,6 @@ static_assert(sizeof(Arena_Block) == CIN_PTR, "should just hold a pointer");
 #define CIN_ARENA_HEADER align(sizeof(Arena_Chunk), CIN_ARENA_MIN)
 
 static inline Arena_Chunk *arena_chunk_init(Arena *arena, uint32_t bytes) {
-  // TODO: separate commit/reserve steps (especially for linux)
   assert(arena);
   assert(cin_system.page_size <= CIN_ARENA_MAX);
   const size_t dwSize = align(bytes, cin_system.page_size);
