@@ -1342,6 +1342,9 @@ static pthread_mutex_t log_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static inline void rewrite_post_log(void) {
   const COORD prev = repl.home;
+#ifdef _WIN32
+  term_get_cursor(&repl.cursor);
+#else
   if (pthread_equal(pthread_self(), listener_thread)) {
     unlock_logs();
     interrupt_start();
@@ -1349,6 +1352,7 @@ static inline void rewrite_post_log(void) {
   } else {
     term_get_cursor(&repl.cursor);
   }
+#endif
   const COORD next = repl.cursor;
   const short line_shift = next.Y - prev.Y;
   assert(line_shift >= 0);
