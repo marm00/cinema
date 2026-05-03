@@ -26,9 +26,9 @@ llvm-rc cinema.rc -fo cinema.res
 
 if "%release%"=="1" (
     echo [release build]
-    clang cinema.c libsais.c cinema.res -std=c11 -O2 -DNDEBUG %omp% %log_level% -flto=thin -fuse-ld=lld-link -o cinema.exe
+    clang cinema.c third_party\libsais.c cinema.res -std=c11 -O2 -DNDEBUG %omp% %log_level% -flto=thin -fuse-ld=lld-link -o cinema.exe
 ) else (
     if "!log_level!"=="" set log_level=-DLOG_LEVEL=3 && echo [logs: debug]
     echo [debug build]
-    clang cinema.c libsais.c cinema.res -std=c11 -g -gcodeview %omp% %warn% !log_level! -fuse-ld=lld-link -Wl,/DEBUG -Wl,/PDB:cinema.pdb -o cinema.exe
+    clang cinema.c third_party\libsais.c cinema.res -std=c11 -g -gcodeview %omp% %warn% !log_level! -fuse-ld=lld-link -Wl,/DEBUG -Wl,/PDB:cinema.pdb -o cinema.exe
 )
