@@ -31,6 +31,8 @@
     array_struct_members(T);  \
   } name
 
+#define CIN_ARRAY_SIZE (sizeof(array_struct(void)))
+
 #define array_init_core(arena, a, n, zero)                          \
   do {                                                              \
     Arena_Slice _slice = {0};                                       \

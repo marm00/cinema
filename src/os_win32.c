@@ -6,6 +6,21 @@
 #include <stdlib.h>
 #include <windows.h>
 
+// https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
+// A path can have 248 "characters" (260 - 12 = 248)
+// with 12 reserved for 8.3 file name.
+// This refers to a WCHAR sequence (UTF-16 code units),
+// i.e., wchar_t, such that max bytes = (248 * 2) = 496
+// of UTF-16 data or (260 * 2) = 520 upper bound
+// This is different from the full storage since
+// a surrogate pair character can hold 2 wchar_t or
+// (260 * 2 * 2) = 1040 bytes, exceeding the bound
+// if many/all characters need 2 code units
+// The cFileName from winapi uses a wchar_t buffer of
+// 260 (MAX_PATH) so surrogate pairs get truncated
+#define CIN_MAX_PATH MAX_PATH
+#define CIN_MAX_PATH_BYTES (MAX_PATH * 4)
+
 struct Cin_System cin_system = {
     .page_size = 4096,
     .alloc_type = MEM_RESERVE | MEM_COMMIT,

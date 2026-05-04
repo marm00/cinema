@@ -1,0 +1,88 @@
+#ifdef _WIN32
+#include "console_win32.c"
+#else
+#include "console_posix.c"
+#endif
+
+Arena arena_console = {0};
+UTF8_Buffer utf8_buf = {0};
+UTF8_Buffer_Char write_buf = {0};
+struct REPL repl = {0};
+struct Console_Preview preview = {0};
+
+void cin_swrite(const char *str) {
+  assert(strlen(str) <= SIZE_MAX && "Corrupted string");
+  const size_t len = strlen(str);
+  cin_write(str, (uint32_t)len);
+}
+
+void PRINTF_ATTR(1, 2) cin_writef(const char *format, ...) {
+  va_list args;
+  va_list args_dup;
+  va_start(args, format);
+  va_copy(args_dup, args);
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wformat-nonliteral"
+  const int32_t len_i32 = vsnprintf(NULL, 0, format, args);
+  assert(len_i32 >= 0);
+  const uint32_t len = (uint32_t)len_i32;
+  va_end(args);
+  array_resize(&arena_console, &write_buf, len + 1);
+  vsnprintf(write_buf.items, len + 1, format, args_dup);
+#pragma clang diagnostic pop
+  va_end(args_dup);
+  cin_write(write_buf.items, len);
+}
+
+void PRINTF_ATTR(1, 0) cin_vwritef(const char *format, va_list args) {
+  va_list args_dup;
+  va_copy(args_dup, args);
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wformat-nonliteral"
+  const int32_t len_i32 = vsnprintf(NULL, 0, format, args_dup);
+  assert(len_i32 >= 0);
+  const uint32_t len = (uint32_t)len_i32;
+  va_end(args_dup);
+  array_resize(&arena_console, &write_buf, len + 1);
+  vsnprintf(write_buf.items, len + 1, format, args);
+#pragma clang diagnostic pop
+  cin_write(write_buf.items, len);
+}
+
+COORD term_get_size(COORD *size) {
+  COORD size_change = {0};
+  const short prev_x = size->X;
+  const short prev_y = size->Y;
+#ifdef _WIN32
+  CONSOLE_SCREEN_BUFFER_INFO info;
+  GetConsoleScreenBufferInfo(repl.out, &info);
+  size->X = info.srWindow.Right - info.srWindow.Left + 1;
+  size->Y = info.srWindow.Bottom - info.srWindow.Top + 1;
+#else
+  struct winsize ws;
+  ioctl(STDIN_FILENO, TIOCGWINSZ, &ws);
+  size->X = (short)ws.ws_col;
+  size->Y = (short)ws.ws_row;
+#endif
+  size_change.X = size->X - prev_x;
+  size_change.Y = size->Y - prev_y;
+  return size_change;
+}
+
+void term_clear(COORD pos, uint32_t cells, bool set_before, bool set_after) {
+  assert(cells < SHRT_MAX);
+  if (set_before) term_set_cursor(pos);
+  short n = (short)cells;
+  const short max_removed = repl.size.X - pos.X;
+  short removed = min(n, max_removed);
+  cin_writef(CSI "%hdX", removed);
+  if (n > removed) {
+    for (n -= removed; n > 0; n -= removed) {
+      cin_writef(CSI "1E" CSI "%hdX", n);
+      removed = min(n, repl.size.X);
+    }
+    term_set_cursor(pos);
+  } else if (set_after) {
+    term_set_cursor(pos);
+  }
+}
