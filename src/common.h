@@ -1,6 +1,12 @@
 #ifndef CIN_COMMON_H
 #define CIN_COMMON_H
 
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <time.h>
+#endif
+
 #include "os.h"
 #include <assert.h>
 #include <limits.h>
@@ -46,6 +52,77 @@ static inline uint32_t rand_between(uint32_t min, uint32_t max) {
   do os_random(&random);
   while (random >= upper);
   return min + (random % range);
+}
+
+static inline int32_t lcps_from(const uint8_t *a, const uint8_t *b, int32_t start) {
+  a += start;
+  b += start;
+  int32_t matching = start;
+  while (*a && *b && *(a++) == *(b++)) ++matching;
+  return matching;
+}
+
+static inline int32_t lcps(const uint8_t *a, const uint8_t *b) {
+  return lcps_from(a, b, 0);
+}
+
+static inline bool cin_isloweralpha(char c) {
+  return c <= 'z' && c >= 'a';
+}
+
+static inline char cin_lower(char c) {
+  // NOTE: Might want to use LCMapString on Windows
+  return (char)tolower(c);
+}
+
+static inline bool cin_lower_isalpha(char *out) {
+  *out = cin_lower(*out);
+  return cin_isloweralpha(*out);
+}
+
+static inline bool cin_isnum(char c) {
+  return c <= '9' && c >= '0';
+}
+
+static inline bool cin_isnum_1based(char c) {
+  return c <= '9' && c >= '1';
+}
+
+static inline bool cin_wisloweralpha(wchar_t c) {
+  return c <= L'z' && c >= L'a';
+}
+
+static inline bool cin_wisnum(wchar_t c) {
+  return c <= L'9' && c >= L'0';
+}
+
+static inline bool cin_wisnum_1based(wchar_t c) {
+  return c <= L'9' && c >= L'1';
+}
+
+static inline void cin_getnum(const char **p, int64_t *out) {
+  *out = 0;
+  while (cin_isnum(**p)) {
+    *out *= 10;
+    *out += **p - '0';
+    ++*p;
+  }
+}
+
+static inline bool cin_iscontinuatioon(char c) {
+  return ((uint8_t)c & 0xC0) == 0x80;
+}
+
+static inline void cin_sleep(long millis) {
+#ifdef _WIN32
+  Sleep((DWORD)millis);
+#else
+  ssize_t nanos = millis * 1000 * 1000;
+  struct timespec duration = {
+      .tv_sec = nanos / (1000 * 1000 * 1000),
+      .tv_nsec = nanos % (1000 * 1000 * 1000)};
+  nanosleep(&duration, 0);
+#endif
 }
 
 #endif

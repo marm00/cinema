@@ -4,9 +4,6 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#define CIN_MAX_PATH PATH_MAX
-#define CIN_MAX_PATH_BYTES CIN_MAX_PATH
-
 typedef struct COORD {
   short X;
   short Y;

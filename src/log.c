@@ -1,5 +1,8 @@
 #include "log.h"
 
+const Cin_Log_Level GLOBAL_LOG_LEVEL = LOG_LEVEL;
+const char *LOG_LEVELS[LOG_TRACE + 1] = {"ERROR", "WARNING", "INFO", "DEBUG", "TRACE"};
+
 #ifdef _WIN32
 #include "log_win32.c"
 #else

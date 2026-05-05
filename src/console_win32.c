@@ -2,12 +2,11 @@
 
 #include "console.h"
 
-array_define(UTF16_Buffer, wchar_t);
-static UTF16_Buffer utf16_buf_raw = {0};
-static UTF16_Buffer utf16_buf_norm = {0};
+UTF16_Buffer utf16_buf_raw = {0};
+UTF16_Buffer utf16_buf_norm = {0};
 static UTF16_Buffer wwrite_buf = {0};
 
-static inline int32_t utf16_to_utf8(const wchar_t *wstr) {
+int32_t utf16_to_utf8(const wchar_t *wstr) {
   // https://learn.microsoft.com/en-us/windows/win32/api/stringapiset/nf-stringapiset-widechartomultibyte
   assert(utf8_buf.items);
   assert(wstr);
@@ -19,7 +18,7 @@ static inline int32_t utf16_to_utf8(const wchar_t *wstr) {
   return WideCharToMultiByte(CP_UTF8, 0, wstr, -1, (char *)utf8_buf.items, n_bytes, NULL, NULL);
 }
 
-static inline int32_t utf8_to_utf16_raw(const char *str) {
+int32_t utf8_to_utf16_raw(const char *str) {
   // https://learn.microsoft.com/en-us/windows/win32/api/stringapiset/nf-stringapiset-multibytetowidechar
   assert(utf16_buf_raw.items);
   assert(str);
@@ -31,7 +30,7 @@ static inline int32_t utf8_to_utf16_raw(const char *str) {
   return MultiByteToWideChar(CP_UTF8, 0, str, -1, utf16_buf_raw.items, n_chars);
 }
 
-static inline int32_t utf8_to_utf16_nraw(const char *str, int32_t len) {
+int32_t utf8_to_utf16_nraw(const char *str, int32_t len) {
   assert(utf16_buf_raw.items);
   assert(str);
   // process len bytes, with n_chars not including null terminator
@@ -41,7 +40,7 @@ static inline int32_t utf8_to_utf16_nraw(const char *str, int32_t len) {
   return MultiByteToWideChar(CP_UTF8, 0, str, len, utf16_buf_raw.items, n_chars);
 }
 
-static inline int32_t utf16_norm(const wchar_t *str) {
+int32_t utf16_norm(const wchar_t *str) {
   // n_chars represents the possibly updated wchar_t count needed
   const int32_t n_chars = LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE,
                                         str, -1, NULL, 0, NULL, NULL, 0);
@@ -51,7 +50,7 @@ static inline int32_t utf16_norm(const wchar_t *str) {
                        -1, utf16_buf_norm.items, n_chars, NULL, NULL, 0);
 }
 
-static inline int32_t utf8_to_utf16_norm(const char *str) {
+int32_t utf8_to_utf16_norm(const char *str) {
   const int32_t len = utf8_to_utf16_raw(str);
   assert(len);
   return utf16_norm(utf16_buf_raw.items);
@@ -65,17 +64,17 @@ void cin_write(const char *str, uint32_t len) {
   WriteConsoleW(repl.out, utf16_str, (uint32_t)len_i32, NULL, NULL);
 }
 
-static inline void cin_wwrite(const wchar_t *str, uint32_t len) {
+void cin_wwrite(const wchar_t *str, uint32_t len) {
   WriteConsoleW(repl.out, str, len, NULL, NULL);
 }
 
-static inline void cin_wswrite(const wchar_t *str) {
+void cin_wswrite(const wchar_t *str) {
   assert(wcslen(str) <= SIZE_MAX && "Corrupted string");
   const size_t len = wcslen(str);
   WriteConsoleW(repl.out, str, (uint32_t)len, NULL, NULL);
 }
 
-static void cin_wwritef(const wchar_t *format, ...) {
+void cin_wwritef(const wchar_t *format, ...) {
   va_list args;
   va_list args_dup;
   va_start(args, format);

@@ -13,7 +13,7 @@ void unlock_logs(void) {
   LeaveCriticalSection(&log_lock);
 }
 
-static void log_wmessage(Cin_Log_Level level, const wchar_t *wmessage, ...) {
+void log_wmessage(Cin_Log_Level level, const wchar_t *wmessage, ...) {
   if (level > GLOBAL_LOG_LEVEL) {
     return;
   }

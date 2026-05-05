@@ -251,7 +251,6 @@
   } while (0)
 
 #ifdef _WIN32
-
 #include <wchar.h>
 
 #define array_wextend(arena, a, new_items, n)           \
