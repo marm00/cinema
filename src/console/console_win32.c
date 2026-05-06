@@ -1,6 +1,7 @@
 #include <windows.h>
 
 #include "console.h"
+#include "console_win32.h"
 
 UTF16_Buffer utf16_buf_raw = {0};
 UTF16_Buffer utf16_buf_norm = {0};
@@ -107,4 +108,17 @@ bool term_get_cursor(COORD *cursor) {
   cursor->X = info.dwCursorPosition.X - info.srWindow.Left;
   cursor->Y = info.dwCursorPosition.Y - info.srWindow.Top + 1;
   return true;
+}
+
+COORD term_get_size(COORD *size) {
+  COORD size_change = {0};
+  const short prev_x = size->X;
+  const short prev_y = size->Y;
+  CONSOLE_SCREEN_BUFFER_INFO info;
+  GetConsoleScreenBufferInfo(repl.out, &info);
+  size->X = info.srWindow.Right - info.srWindow.Left + 1;
+  size->Y = info.srWindow.Bottom - info.srWindow.Top + 1;
+  size_change.X = size->X - prev_x;
+  size_change.Y = size->Y - prev_y;
+  return size_change;
 }

@@ -7,10 +7,11 @@
 #include <time.h>
 #endif
 
-#include "os.h"
 #include <assert.h>
 #include <limits.h>
 #include <stdint.h>
+
+#include "os/os.h"
 
 #define min(a, b) (((a) < (b)) ? (a) : (b))
 #define max(a, b) (((a) > (b)) ? (a) : (b))
@@ -111,18 +112,6 @@ static inline void cin_getnum(const char **p, int64_t *out) {
 
 static inline bool cin_iscontinuatioon(char c) {
   return ((uint8_t)c & 0xC0) == 0x80;
-}
-
-static inline void cin_sleep(long millis) {
-#ifdef _WIN32
-  Sleep((DWORD)millis);
-#else
-  ssize_t nanos = millis * 1000 * 1000;
-  struct timespec duration = {
-      .tv_sec = nanos / (1000 * 1000 * 1000),
-      .tv_nsec = nanos % (1000 * 1000 * 1000)};
-  nanosleep(&duration, 0);
-#endif
 }
 
 #endif

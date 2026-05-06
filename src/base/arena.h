@@ -6,8 +6,8 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "common.h"
-#include "os.h"
+#include "core.h"
+#include "os/os.h"
 
 #define CIN_ARENA_MIN_K 3U
 #define CIN_ARENA_MAX_K 31U

@@ -1,6 +1,7 @@
 #include <windows.h>
 
 #include "console.h"
+#include "console_win32.h"
 #include "log.h"
 
 static CRITICAL_SECTION log_lock;

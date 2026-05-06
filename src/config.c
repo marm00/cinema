@@ -1,10 +1,14 @@
 #include <string.h>
 
 #include "config.h"
-#include "console.h"
-#include "log.h"
+#include "console/console.h"
+#include "console/log.h"
 
-#include "../third_party/libsais.h"
+#ifdef _WIN32
+#include "console/console_win32.h"
+#endif
+
+#include "third_party/libsais.h"
 
 Arena arena_docs = {0};
 struct Conf_Parser conf_parser = {0};

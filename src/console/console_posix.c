@@ -4,6 +4,7 @@
 #include <sys/types.h>
 #include <termios.h>
 #include <unistd.h>
+#include <pthread.h>
 
 #include "console.h"
 
@@ -36,4 +37,17 @@ bool term_get_cursor(COORD *cursor) {
   }
   assert(ok && "Failed to get new cursor position");
   return ok;
+}
+
+COORD term_get_size(COORD *size) {
+  COORD size_change = {0};
+  const short prev_x = size->X;
+  const short prev_y = size->Y;
+  struct winsize ws;
+  ioctl(STDIN_FILENO, TIOCGWINSZ, &ws);
+  size->X = (short)ws.ws_col;
+  size->Y = (short)ws.ws_row;
+  size_change.X = size->X - prev_x;
+  size_change.Y = size->Y - prev_y;
+  return size_change;
 }

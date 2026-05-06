@@ -54,16 +54,19 @@
 #include <unistd.h>
 #endif
 
-#include "src/arena.h"
-#include "src/array.h"
-#include "src/cache.h"
-#include "src/common.h"
+#include "src/base/arena.h"
+#include "src/base/array.h"
+#include "src/base/cache.h"
+#include "src/base/core.h"
+#include "src/base/patricia.c"
+#include "src/base/radix.c"
+#include "src/base/table.c"
 #include "src/config.c"
-#include "src/console.c"
-#include "src/log.c"
-#include "src/misc.c"
-#include "src/os.c"
+#include "src/console/console.c"
+#include "src/console/log.c"
+#include "src/os/os.c"
 
+#include "src/third_party/libsais.c"
 
 #ifdef CIN_OPENMP
 #include <omp.h>
@@ -160,7 +163,7 @@ static bool create_pipe(Instance *instance, const wchar_t *name) {
         return false;
       }
       log_message(LOG_DEBUG, "Failed to find pipe. Trying again in %dms...", UNFOUND_WAIT);
-      cin_sleep(UNFOUND_WAIT);
+      os_sleep(UNFOUND_WAIT);
     } else {
       // Unlikely error, try to resolve by waiting
       log_last_error("Could not connect to pipe - Waiting for %dms", FOUND_TIMEOUT);
@@ -694,7 +697,7 @@ static inline void iocp_parse(Instance *instance, const char *buf_start, size_t 
         // the window, it will return something like "error: property
         // unavailable": retry.
         static const long GET_WINDOW_DELAY = 200;
-        cin_sleep(GET_WINDOW_DELAY);
+        os_sleep(GET_WINDOW_DELAY);
         overlap_write(instance, MPV_WINDOW_ID, "get_property", "window-id", NULL);
         break;
       }
@@ -976,7 +979,7 @@ array_define(Command_Numbers, size_t);
 array_define(Command_Help, char);
 array_define(Command_Targets, char);
 
-static struct CommandContext {
+static struct Command_Context {
   Patricia_Node *trie;
   Cin_Layout *layout;
   Cin_Layout *queued_layout;
@@ -1196,7 +1199,7 @@ static inline void chat_reposition(const Cin_Layout *layout) {
           cin_movewindow(chat.window, chat_rect);
           break;
         }
-        cin_sleep(CHAT_REPOSITION_DELAY);
+        os_sleep(CHAT_REPOSITION_DELAY);
       }
     }
   } else if (is_showing) {
@@ -1340,7 +1343,7 @@ static void mpv_spawn(Instance *instance, size_t index) {
       write(listener_pipe[1], "x", 1);
       break;
     }
-    cin_sleep(MPV_SPAWN_DELAY);
+    os_sleep(MPV_SPAWN_DELAY);
   }
 #endif
   assert(instance->playlist);

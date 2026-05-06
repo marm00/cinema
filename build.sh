@@ -33,9 +33,9 @@ compiler="${CC:-clang}"
 
 if [ "$release" = "1" ]; then
     echo "[release build]"
-    $compiler cinema.c libsais.c -std=c11 -O2 -DNDEBUG $omp $log_level -D_GNU_SOURCE -flto=thin -o cinema
+    $compiler cinema.c -std=c11 -O2 -DNDEBUG $omp $log_level -I./src/ -D_GNU_SOURCE -flto=thin -o cinema
 else
     [ -z "$log_level" ] && log_level="-DLOG_LEVEL=3" && echo "[logs: debug]"
     echo "[debug build]"
-    $compiler cinema.c libsais.c -std=c11 -g $omp $warn $log_level -D_GNU_SOURCE -o cinema
+    $compiler cinema.c -std=c11 -g $omp $warn $log_level -I./src/ -D_GNU_SOURCE -o cinema
 fi

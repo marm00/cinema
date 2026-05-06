@@ -49,26 +49,6 @@ void PRINTF_ATTR(1, 0) cin_vwritef(const char *format, va_list args) {
   cin_write(write_buf.items, len);
 }
 
-COORD term_get_size(COORD *size) {
-  COORD size_change = {0};
-  const short prev_x = size->X;
-  const short prev_y = size->Y;
-#ifdef _WIN32
-  CONSOLE_SCREEN_BUFFER_INFO info;
-  GetConsoleScreenBufferInfo(repl.out, &info);
-  size->X = info.srWindow.Right - info.srWindow.Left + 1;
-  size->Y = info.srWindow.Bottom - info.srWindow.Top + 1;
-#else
-  struct winsize ws;
-  ioctl(STDIN_FILENO, TIOCGWINSZ, &ws);
-  size->X = (short)ws.ws_col;
-  size->Y = (short)ws.ws_row;
-#endif
-  size_change.X = size->X - prev_x;
-  size_change.Y = size->Y - prev_y;
-  return size_change;
-}
-
 void term_clear(COORD pos, uint32_t cells, bool set_before, bool set_after) {
   assert(cells < SHRT_MAX);
   if (set_before) term_set_cursor(pos);

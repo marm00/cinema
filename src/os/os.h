@@ -13,6 +13,7 @@ extern struct Cin_System {
 void *os_alloc(size_t bytes);
 bool init_os(void);
 void os_random(uint32_t *out);
+void os_sleep(long millis);
 
 #ifdef _WIN32
 // https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation

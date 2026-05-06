@@ -1,7 +1,6 @@
 #ifndef CIN_LOG_H
 #define CIN_LOG_H
 
-#include "console.h"
 #include <stdint.h>
 
 typedef enum {
@@ -30,17 +29,5 @@ void log_last_error(const char *message, ...);
 #ifdef _WIN32
 void log_wmessage(Cin_Log_Level level, const wchar_t *wmessage, ...);
 #endif
-
-#define CIN_STRERROR_BYTES 95
-
-static inline void log_fopen_error(const char *filename, int32_t err) {
-#ifdef _WIN32
-  char err_buf[CIN_STRERROR_BYTES];
-  strerror_s(err_buf, CIN_STRERROR_BYTES, err);
-#else
-  char *err_buf = strerror(err);
-#endif
-  log_message(LOG_ERROR, "Failed to open file '%s': %s", filename, err_buf);
-}
 
 #endif

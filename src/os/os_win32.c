@@ -52,3 +52,7 @@ void os_random(uint32_t *out) {
   rand_s(&random);
   *out = random;
 }
+
+void os_sleep(long millis) {
+  Sleep((DWORD)millis);
+}

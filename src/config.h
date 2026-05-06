@@ -4,12 +4,14 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "arena.h"
-#include "array.h"
-#include "cache.h"
-#include "log.h"
-#include "misc.h"
-#include "os.h"
+#include "base/arena.h"
+#include "base/array.h"
+#include "base/cache.h"
+#include "base/radix.h"
+#include "base/table.h"
+#include "console/console.h"
+#include "console/log.h"
+#include "os/os.h"
 
 extern Arena arena_docs;
 

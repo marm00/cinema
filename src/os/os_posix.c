@@ -56,3 +56,11 @@ void os_random(uint32_t *out) {
   fclose(f);
   *out = random;
 }
+
+void os_sleep(long millis) {
+  ssize_t nanos = millis * 1000 * 1000;
+  struct timespec duration = {
+      .tv_sec = nanos / (1000 * 1000 * 1000),
+      .tv_nsec = nanos % (1000 * 1000 * 1000)};
+  nanosleep(&duration, 0);
+}

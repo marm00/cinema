@@ -1,13 +1,13 @@
 #ifndef CIN_ARRAY_H
 #define CIN_ARRAY_H
 
-#include "arena.h"
-#include "common.h"
-
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+
+#include "arena.h"
+#include "core.h"
 
 #define array_struct_members(T) \
   T *items;                     \

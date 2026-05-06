@@ -12,8 +12,8 @@
 #include <limits.h>
 #include <stdint.h>
 
-#include "arena.h"
-#include "array.h"
+#include "base/arena.h"
+#include "base/array.h"
 
 extern Arena arena_console;
 array_define(UTF8_Buffer, uint8_t);
@@ -66,32 +66,17 @@ extern struct Console_Preview {
 #define PRINTF_ATTR(fmt, arg)
 #endif
 
+void cin_write(const char *str, uint32_t len);
+void cin_swrite(const char *str);
+void PRINTF_ATTR(1, 2) cin_writef(const char *format, ...);
+void PRINTF_ATTR(1, 0) cin_vwritef(const char *format, va_list args);
+
 static inline int32_t utf8_norm(char *str) {
   // does not include null-terminator in return value length
   int32_t len = 0;
   for (; *str; ++len, ++str) *str = (char)tolower(*str);
   return len;
 }
-
-void cin_write(const char *str, uint32_t len);
-void cin_swrite(const char *str);
-void PRINTF_ATTR(1, 2) cin_writef(const char *format, ...);
-void PRINTF_ATTR(1, 0) cin_vwritef(const char *format, va_list args);
-
-#ifdef _WIN32
-array_define(UTF16_Buffer, wchar_t);
-extern UTF16_Buffer utf16_buf_raw;
-extern UTF16_Buffer utf16_buf_norm;
-int32_t utf16_to_utf8(const wchar_t *wstr);
-int32_t utf8_to_utf16_raw(const char *str);
-int32_t utf8_to_utf16_nraw(const char *str, int32_t len);
-int32_t utf16_norm(const wchar_t *str);
-int32_t utf8_to_utf16_norm(const char *str);
-void cin_wwrite(const wchar_t *str, uint32_t len);
-void cin_wswrite(const wchar_t *str);
-void cin_wwritef(const wchar_t *format, ...);
-void cin_wvwritef(const wchar_t *format, va_list args);
-#endif
 
 #define HOME_X 2
 #define CSI "\x1b["

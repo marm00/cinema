@@ -2,7 +2,7 @@
 #define CIN_CACHE_H
 
 #include "arena.h"
-#include "common.h"
+#include "core.h"
 
 #include <assert.h>
 #include <stdint.h>
