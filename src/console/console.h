@@ -196,29 +196,7 @@ static inline void write_preview(void) {
              preview.pos.Y, preview.len, preview.items);
 }
 
-#define TERM_ESC 0x1b
-#define TERM_LBRACKET 0x5b
-#define TERM_HOME 0x48
-#define TERM_END 0x46
-#define TERM_DELETE 0x33
-#define TERM_TILDE 0x7e
-#define TERM_SEMICOLON 0x3b
-#define TERM_UP 0x41
-#define TERM_DOWN 0x42
-#define TERM_PAGEUP 0x35
-#define TERM_PAGEDOWN 0x36
-#define TERM_LEFT 0x44
-#define TERM_RIGHT 0x43
-#define TERM_DEFAULT 0x31
-#define TERM_TAB 0x09
-#define TERM_RETURN 0x0d
-#define TERM_LINEFEED 0x0a
-#define TERM_BACK 0x7f
-#define TERM_BACK_CTRL 0x08
-#define TERM_SPACE 0x20
-#define TERM_CURSOR_POS 0x52
-#define TERM_REPLACEMENT "\xEF\xBF\xBD"
-#define TERM_SEQUENCE_MAX 8
-#define TERM_READ_WAIT_MS 5
+bool init_repl_internal(void);
+bool init_repl(void);
 
 #endif

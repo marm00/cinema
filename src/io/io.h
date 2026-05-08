@@ -7,7 +7,7 @@
 
 #include "base/cache.h"
 #include "base/core.h"
-#include "config.h"
+#include "config/config.h"
 
 extern Arena arena_io;
 extern Arena arena_iocp_thread;
@@ -91,5 +91,95 @@ bool overlap_read(Instance *instance);
 
 bool internal_write(Instance *instance, Overlapped_Write *msg, int32_t bytes);
 bool overlap_write(Instance *instance, MPV_Packet type, const char *cmd, const char *arg1, const char *arg2);
+
+extern bool cin_idle;
+
+void playlist_setup_shuffle(Playlist *playlist);
+void playlist_shuffle(Playlist *playlist);
+void playlist_set(Instance *instance, Playlist *playlist);
+void playlist_set_default(Instance *instance);
+void playlist_play_core(Instance *instance, const char *arg);
+void playlist_insert(Instance *instance);
+void playlist_play(Instance *instance);
+
+#define CIN_MPVKEY_LEFT "\""
+#define CIN_MPVKEY_RIGHT "\":"
+#define CIN_MPVKEY(str) (CIN_MPVKEY_LEFT str CIN_MPVKEY_RIGHT)
+#define CIN_MPVVAL(buf, lit) (strncmp((buf), (lit), cin_strlen((lit))) == 0)
+
+extern size_t mpv_supply;
+extern size_t mpv_demand;
+
+void mpv_kill(Instance *instance);
+void mpv_lock(void);
+void mpv_unlock(void);
+
+// NOTE: voidtools Everything supports pipe '|' as search separator and '"' for spaces
+#define CIN_CLIPBOARD_SEPARATOR '|'
+#define CIN_CLIPBOARD_ENCLOSER '"'
+
+void copy_clipboard(void);
+
+void iocp_parse(Instance *instance, const char *buf_start, size_t buf_offset);
+void iocp_process(Instance *instance, size_t bytes);
+bool iocp_start(void);
+
+#define CIN_MPVCALL_PIPE_ROOT "cinema_mpv_"
+#define CIN_MPVCALL_DIGITS 19
+#define CIN_MPVCALL_SERVER_LEN 64
+#define CIN_MPVCALL_GEOMETRY_LEN 128
+
+#ifdef _WIN32
+#define CIN_MPVCALL_PIPE "\\\\.\\pipe\\" CIN_MPVCALL_PIPE_ROOT
+#else
+#define CIN_MPVCALL_PIPE "/tmp/" CIN_MPVCALL_PIPE_ROOT
+#endif
+
+bool init_mpv(void);
+void mpv_spawn_internal(Instance *instance, char *mpv_flags[], char *socket_name);
+void mpv_spawn(Instance *instance, size_t index);
+
+extern struct Chat {
+  RECT rect;
+  HWND window;
+#ifndef _WIN32
+  pid_t pid;
+#endif
+} chat;
+
+void chat_kill(void);
+size_t chat_spawn(const Cin_Layout *layout);
+HWND chat_get_window(size_t pid, char *name);
+void chat_reposition(const Cin_Layout *layout);
+
+#define TERM_ESC 0x1b
+#define TERM_LBRACKET 0x5b
+#define TERM_HOME 0x48
+#define TERM_END 0x46
+#define TERM_DELETE 0x33
+#define TERM_TILDE 0x7e
+#define TERM_SEMICOLON 0x3b
+#define TERM_UP 0x41
+#define TERM_DOWN 0x42
+#define TERM_PAGEUP 0x35
+#define TERM_PAGEDOWN 0x36
+#define TERM_LEFT 0x44
+#define TERM_RIGHT 0x43
+#define TERM_DEFAULT 0x31
+#define TERM_TAB 0x09
+#define TERM_RETURN 0x0d
+#define TERM_LINEFEED 0x0a
+#define TERM_BACK 0x7f
+#define TERM_BACK_CTRL 0x08
+#define TERM_SPACE 0x20
+#define TERM_CURSOR_POS 0x52
+#define TERM_REPLACEMENT "\xEF\xBF\xBD"
+#define TERM_SEQUENCE_MAX 8
+#define TERM_READ_WAIT_MS 5
+
+int32_t term_read(uint8_t *buf, const int32_t n, bool peek);
+bool term_proc_sequence(const uint8_t *sequence, int32_t len);
+bool term_proc_unicode(const uint8_t *unicode, int32_t len);
+bool term_proc_char(char byte);
 
 #endif

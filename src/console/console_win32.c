@@ -122,3 +122,34 @@ COORD term_get_size(COORD *size) {
   size_change.Y = size->Y - prev_y;
   return size_change;
 }
+
+bool init_repl_internal(void) {
+  if (!SetConsoleCP(CP_UTF8)) goto code_page;
+  if (!SetConsoleOutputCP(CP_UTF8)) goto code_page;
+  if ((repl.in = GetStdHandle(STD_INPUT_HANDLE)) == INVALID_HANDLE_VALUE) goto handle_in;
+  if (!GetConsoleMode(repl.in, &repl.in_mode)) goto handle_in;
+  DWORD new_in_mode = repl.in_mode;
+  new_in_mode &= ~(DWORD)ENABLE_LINE_INPUT;
+  new_in_mode &= ~(DWORD)ENABLE_ECHO_INPUT;
+  new_in_mode |= ENABLE_VIRTUAL_TERMINAL_INPUT;
+  if (!SetConsoleMode(repl.in, new_in_mode)) goto handle_in;
+  if ((repl.out = GetStdHandle(STD_OUTPUT_HANDLE)) == INVALID_HANDLE_VALUE) goto handle_out;
+  if (!GetConsoleMode(repl.out, &repl.out_mode)) goto handle_out;
+  DWORD new_out_mode = repl.out_mode;
+  new_out_mode |= ENABLE_PROCESSED_OUTPUT;
+  new_out_mode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+  if (!SetConsoleMode(repl.out, new_out_mode)) goto handle_out;
+  array_init(&arena_console, &wwrite_buf, CIN_MAX_PATH);
+  array_init(&arena_console, &utf16_buf_raw, CIN_MAX_PATH);
+  array_init(&arena_console, &utf16_buf_norm, CIN_MAX_PATH);
+  return true;
+code_page:
+  cin_swrite("Failed to modify console code page" CRLF);
+  return false;
+handle_in:
+  cin_swrite("Failed to setup console input handle" CRLF);
+  return false;
+handle_out:
+  cin_swrite("Failed to setup console output handle" CRLF);
+  return false;
+}

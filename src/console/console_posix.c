@@ -1,10 +1,10 @@
+#include <pthread.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/types.h>
 #include <termios.h>
 #include <unistd.h>
-#include <pthread.h>
 
 #include "console.h"
 
@@ -50,4 +50,13 @@ COORD term_get_size(COORD *size) {
   size_change.X = size->X - prev_x;
   size_change.Y = size->Y - prev_y;
   return size_change;
+}
+
+bool init_repl_internal(void) {
+  tcgetattr(STDIN_FILENO, &repl.modes);
+  struct termios tmp = repl.modes;
+  tmp.c_lflag &= (tcflag_t)~ICANON;
+  tmp.c_lflag &= (tcflag_t)~ECHO;
+  tcsetattr(STDIN_FILENO, TCSANOW, &tmp);
+  return true;
 }

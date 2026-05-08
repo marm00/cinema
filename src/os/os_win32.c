@@ -1,10 +1,15 @@
 #define _CRT_RAND_S
 #define _CRT_SECURE_NO_DEPRECATE
 
-#include "os.h"
+#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <windows.h>
+
+#include "base/core.h"
+#include "console/log.h"
+#include "os.h"
+#include "os_win32.h"
 
 struct Cin_System cin_system = {
     .page_size = 4096,
@@ -55,4 +60,52 @@ void os_random(uint32_t *out) {
 
 void os_sleep(long millis) {
   Sleep((DWORD)millis);
+}
+
+wchar_t exe_path_mpv[CIN_MAX_PATH] = {0};
+wchar_t exe_path_ytdlp[CIN_MAX_PATH] = {0};
+wchar_t exe_path_chatterino[CIN_MAX_PATH] = {0};
+
+bool find_exe(const wchar_t *dir, const wchar_t *exe, wchar_t *buf) {
+  const wchar_t extension[] = L".exe";
+  if (SearchPathW(NULL, exe, extension, CIN_MAX_PATH, buf, NULL)) return true;
+  const wchar_t *paths[] = {
+      L"C:\\Program Files\\",
+      L"C:\\Program Files (x86)\\",
+      L"%LOCALAPPDATA%\\Programs\\",
+      NULL};
+  const size_t dir_len = wcslen(dir);
+  const size_t exe_len = wcslen(exe);
+  wchar_t exe_expanded[CIN_MAX_PATH] = {0};
+  for (size_t i = 0; paths[i]; ++i) {
+    size_t buf_offset = 0;
+    uint32_t path_len = ExpandEnvironmentStringsW(paths[i], exe_expanded, CIN_MAX_PATH);
+    assert(path_len > 1);
+    if (path_len <= 1) continue;
+    --path_len;
+    wmemcpy(buf + buf_offset, exe_expanded, path_len);
+    buf_offset += path_len;
+    wmemcpy(buf + buf_offset, dir, dir_len);
+    buf_offset += dir_len;
+    buf[buf_offset++] = L'\\';
+    wmemcpy(buf + buf_offset, exe, exe_len);
+    buf_offset += exe_len;
+    wmemcpy(buf + buf_offset, extension, cin_strlen(extension));
+    buf_offset += cin_strlen(extension);
+    buf[buf_offset] = L'\0';
+    const uint32_t attrs = GetFileAttributesW(buf);
+    if (attrs != INVALID_FILE_ATTRIBUTES) return true;
+  }
+  log_wmessage(LOG_ERROR, L"Failed to find executable '%s'. "
+                          L"Please install it in a standard directory or add it to your environment variables.",
+               exe);
+  wmemset(buf, L'\0', CIN_MAX_PATH);
+  return false;
+}
+
+bool init_executables(void) {
+  if (!find_exe(L"mpv", L"mpv", exe_path_mpv)) return false;
+  if (!find_exe(L"mpv", L"yt-dlp", exe_path_ytdlp)) return false;
+  find_exe(L"Chatterino", L"chatterino", exe_path_chatterino);
+  return true;
 }

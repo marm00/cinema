@@ -56,15 +56,15 @@
 
 #define array_free_items(arena, a)                                                        \
   if ((a)->items) arena_free_pow2((arena), &(Arena_Slice){.items = (uint8_t *)(a)->items, \
-                                                          .k = (a)->bytes_capacity_k,     \
-                                                          .size = 0})
+                                                          .size = 0,                      \
+                                                          .k = (a)->bytes_capacity_k})
 
-#define array_free(arena, a)                                          \
-  do {                                                                \
-    array_free_items((arena), (a));                                   \
-    arena_free_pow1((arena), &(Arena_Slice){.items = (uint8_t *)(a),  \
-                                            .k = 0,                   \
-                                            .size = CIN_ARRAY_SIZE}); \
+#define array_free(arena, a)                                         \
+  do {                                                               \
+    array_free_items((arena), (a));                                  \
+    arena_free_pow1((arena), &(Arena_Slice){.items = (uint8_t *)(a), \
+                                            .size = CIN_ARRAY_SIZE,  \
+                                            .k = 0});                \
   } while (0)
 
 #define array_ensure_capacity_core(arena, a, total, zero)                         \

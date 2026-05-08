@@ -66,3 +66,21 @@ void term_clear(COORD pos, uint32_t cells, bool set_before, bool set_after) {
     term_set_cursor(pos);
   }
 }
+
+bool init_repl() {
+  if (!init_repl_internal()) return false;
+  if (!arena_chunk_init(&arena_console, CIN_ARENA_CAP)) goto memory;
+  repl.msg = create_console_message();
+  repl.msg_index = 0;
+  term_get_info(&repl.cursor, &repl.size);
+  repl.cursor.X = HOME_X;
+  repl.home = repl.cursor;
+  array_init(&arena_console, &write_buf, CIN_MAX_PATH);
+  array_init(&arena_console, &preview, CIN_MAX_PATH);
+  array_init(&arena_console, &utf8_buf, CIN_MAX_PATH_BYTES);
+  cin_swrite(PREFIX_STR);
+  return true;
+memory:
+  cin_swrite("Failed to allocate memory for repl/console" CRLF);
+  return false;
+}
