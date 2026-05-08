@@ -116,13 +116,13 @@ void log_last_error(const char *message, ...) {
     return;
   }
   // remove trailing \r\n
-  char *str = (char *)buffer;
-  const size_t len = strlen(str);
+  wchar_t *str = (wchar_t *)buffer;
+  const size_t len = wcslen(str);
   assert(len >= 2);
-  assert(str[len - 1] == '\n');
-  assert(str[len - 2] == '\r');
-  str[len - 1] = '\0';
-  str[len - 2] = '\0';
+  assert(str[len - 1] == L'\n');
+  assert(str[len - 2] == L'\r');
+  str[len - 1] = L'\0';
+  str[len - 2] = L'\0';
 #else
   const size_t code = (size_t)errno;
   char *buffer = strerror((int32_t)code);
@@ -137,7 +137,11 @@ void log_last_error(const char *message, ...) {
   cin_vwritef(message, args);
 #pragma clang diagnostic pop
   va_end(args);
+#ifdef _WIN32
+  cin_wwritef(L" - Code %lu: %s", code, (wchar_t *)buffer);
+#else
   cin_writef(" - Code %lu: %s", code, (char *)buffer);
+#endif
   rewrite_post_log();
 #ifdef _WIN32
   LocalFree(buffer);
