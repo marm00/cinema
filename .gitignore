@@ -1,12 +1,3 @@
-cinema.exe
-cinema.exp
-cinema.ilk
-cinema.lib
-cinema.pdb
-cinema.rdi
-cinema.res
-mpv.exe
-yt-dlp.exe
+/build/*
 .proj
 .vscode
-/cinema*

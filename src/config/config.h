@@ -82,7 +82,7 @@ static inline Conf_Scope *conf_scope(void) {
 }
 
 static inline void conf_enter_scope(Conf_Scope_Type type) {
-  Conf_Scope scope = {};
+  Conf_Scope scope = {0};
   scope.type = type;
   scope.line = conf_parser.line;
   array_push(&arena_console, &conf_parser.scopes, scope);

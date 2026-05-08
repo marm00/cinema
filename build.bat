@@ -19,16 +19,35 @@ if "%log_info%"=="1" set log_level=%log_level% -DLOG_LEVEL=2 && echo [logs: info
 if "%log_debug%"=="1" set log_level=%log_level% -DLOG_LEVEL=3 && echo [logs: debug]
 if "%log_trace%"=="1" set log_level=%log_level% -DLOG_LEVEL=4 && echo [logs: trace]
 
-set warn= -Wall -Wextra -Wpedantic -Wstrict-prototypes -Wmissing-prototypes -Wconversion -Wsign-conversion -Wshadow -Wformat=2 -Wno-unused-function
-if "%asan%"=="1" set warn=%warn% -fsanitize=address && echo [address sanitizer]
+set config=debug
+if "%release%"=="1" set config=release
+if "%asan%"=="1" set config=%config%-asan
+if "%parallel%"=="0" set config=%config%-nomp
+set build=build\%config%
+if not exist %build% mkdir %build%
 
-llvm-rc cinema.rc -fo cinema.res
+set warn= -Wall -Wextra -Wpedantic -Wstrict-prototypes -Wmissing-prototypes -Wconversion -Wsign-conversion -Wshadow -Wformat=2 -Wno-unused-function
+if "%asan%"=="1" set sanitize= -fsanitize=address && echo [address sanitizer]
+if "%asan%"=="0" set sanitize=
+
+if not exist %build%\libsais.o (
+    echo [building libsais]
+    clang -O3 -fopenmp -DLIBSAIS_OPENMP -DNDEBUG %sanitize% -c src\third_party\libsais.c -o %build%\libsais.o
+)
 
 if "%release%"=="1" (
     echo [release build]
-    clang cinema.c cinema.res -std=c11 -O2 -DNDEBUG %omp% %log_level% -I.\src\ -flto=thin -fuse-ld=lld-link -o cinema.exe
+    set debug_info=
+    clang -std=c11 -O2 -DNDEBUG %omp% %sanitize% %log_level% -I.\src\ -flto=thin -c cinema.c -o %build%\cinema.o
 ) else (
     if "!log_level!"=="" set log_level=-DLOG_LEVEL=3 && echo [logs: debug]
     echo [debug build]
-    clang cinema.c cinema.res -std=c11 -g -gcodeview %omp% %warn% !log_level! -I.\src\ -fuse-ld=lld-link -Wl,/DEBUG -Wl,/PDB:cinema.pdb -o cinema.exe
+    set debug_info= -Wl,/DEBUG -Wl,/PDB:%build%\cinema.pdb
+    clang -std=c11 -g -gcodeview %omp% %warn% %sanitize% !log_level! -I.\src\ -c cinema.c -o %build%\cinema.o
 )
+
+llvm-rc cinema.rc -fo %build%\cinema.res
+clang -fuse-ld=lld-link %omp% %sanitize% %debug_info% -o %build%\cinema.exe %build%\cinema.o %build%\libsais.o %build%\cinema.res
+
+copy /y %build%\cinema.exe build\cinema.exe >nul
+if "%debug%"=="1" copy /y %build%\cinema.pdb build\cinema.pdb >nul

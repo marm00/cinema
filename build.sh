@@ -26,16 +26,31 @@ log_level=""
 [ "$log_debug" = "1" ]   && log_level="$log_level -DLOG_LEVEL=3" && echo "[logs: debug]"
 [ "$log_trace" = "1" ]   && log_level="$log_level -DLOG_LEVEL=4" && echo "[logs: trace]"
 
+config=debug
+[ "$release" = "1" ] && config=release
+[ "$asan" = "1" ] && config="${config}-asan"
+[ "$parallel" = "0" ] && config="${config}-nomp"
+build=build/$config
+mkdir -p "$build"
+
 warn="-Wall -Wextra -Wpedantic -Wstrict-prototypes -Wmissing-prototypes -Wconversion -Wsign-conversion -Wshadow -Wformat=2 -Wno-unused-function"
-[ "$asan" = "1" ] && warn="$warn -fsanitize=address" && echo "[address sanitizer]"
+sanitize=""
+[ "$asan" = "1" ] && sanitize="-fsanitize=address" && echo "[address sanitizer]"
 
 compiler="${CC:-clang}"
 
+if [ ! -f "$build/libsais.o" ]; then
+    echo "[building libsais]"
+    $compiler -O3 -fopenmp -DLIBSAIS_OPENMP -DNDEBUG $sanitize -c src/third_party/libsais.c -o "$build/libsais.o"
+fi
+
 if [ "$release" = "1" ]; then
     echo "[release build]"
-    $compiler cinema.c -std=c11 -O2 -DNDEBUG $omp $log_level -I./src/ -D_GNU_SOURCE -flto=thin -o cinema
+    $compiler cinema.c "$build/libsais.o" -std=c11 -O2 -DNDEBUG $omp $sanitize $log_level -I./src/ -D_GNU_SOURCE -flto=thin -o "$build/cinema"
 else
     [ -z "$log_level" ] && log_level="-DLOG_LEVEL=3" && echo "[logs: debug]"
     echo "[debug build]"
-    $compiler cinema.c -std=c11 -g $omp $warn $log_level -I./src/ -D_GNU_SOURCE -o cinema
+    $compiler cinema.c "$build/libsais.o" -std=c11 -g $omp $sanitize $log_level -I./src/ -D_GNU_SOURCE -o "$build/cinema"
 fi
+
+cp -f "$build/cinema" build/cinema

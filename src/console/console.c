@@ -67,9 +67,9 @@ void term_clear(COORD pos, uint32_t cells, bool set_before, bool set_after) {
   }
 }
 
-bool init_repl() {
-  if (!init_repl_internal()) return false;
+bool init_repl(void) {
   if (!arena_chunk_init(&arena_console, CIN_ARENA_CAP)) goto memory;
+  if (!init_repl_internal()) return false;
   repl.msg = create_console_message();
   repl.msg_index = 0;
   term_get_info(&repl.cursor, &repl.size);

@@ -9,7 +9,7 @@ bool create_pipe(Instance *instance, const wchar_t *name) {
   static const int FOUND_TIMEOUT = 20000;
   static const int UNFOUND_TIMEOUT = 20000;
   static const int UNFOUND_WAIT = 50;
-  log_wmessage(LOG_ERROR, L"creating pipe: %s", name);
+  log_wmessage(LOG_DEBUG, L"Creating pipe: %s", name);
   int unfound_duration = 0;
   HANDLE hPipe = INVALID_HANDLE_VALUE;
   for (;;) {
@@ -55,6 +55,7 @@ bool overlap_read(Instance *instance) {
 }
 
 bool internal_write(Instance *instance, Overlapped_Write *msg, int32_t bytes) {
+  (void)bytes;
   bool ok = true;
   if (instance->socket && !WriteFile(instance->socket, msg->buf, (DWORD)msg->bytes, NULL, &msg->ovl_ctx.ovl)) {
     switch (GetLastError()) {
@@ -78,7 +79,7 @@ bool internal_write(Instance *instance, Overlapped_Write *msg, int32_t bytes) {
   return ok;
 }
 
-void copy_clipoard(void) {
+void copy_clipboard(void) {
   if (!OpenClipboard(NULL)) {
     log_last_error("Failed to open clipboard");
     return;

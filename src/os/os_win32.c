@@ -1,7 +1,5 @@
-#define _CRT_RAND_S
-#define _CRT_SECURE_NO_DEPRECATE
-
 #include <assert.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <windows.h>
@@ -10,6 +8,10 @@
 #include "console/log.h"
 #include "os.h"
 #include "os_win32.h"
+
+#ifdef CIN_OPENMP
+#include <omp.h>
+#endif
 
 struct Cin_System cin_system = {
     .page_size = 4096,

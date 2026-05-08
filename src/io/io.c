@@ -2,7 +2,6 @@
 #include "config/command.h"
 #include "os/window.h"
 
-
 #ifdef _WIN32
 #include "io_win32.c"
 #else

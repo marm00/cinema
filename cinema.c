@@ -18,6 +18,11 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+#ifdef _WIN32
+#define _CRT_RAND_S
+#define _CRT_SECURE_NO_DEPRECATE
+#endif
+
 #include <assert.h>
 #include <inttypes.h>
 #include <stdbool.h>
@@ -72,8 +77,6 @@
 #ifdef CIN_OPENMP
 #include <omp.h>
 #endif
-
-#include "src/third_party/libsais.c"
 
 static void cmd_help_executor(void) {
   cin_write_safe(cmd_ctx.help.items, (uint32_t)cmd_ctx.help.count);
