@@ -1,5 +1,7 @@
 @echo off
 setlocal enabledelayedexpansion
+cd /D "%~dp0"
+:restart
 
 for %%a in (%*) do set "%%~a=1"
 
@@ -38,15 +40,15 @@ if not exist %build%\libsais.o (
 if "%release%"=="1" (
     echo [release build]
     set debug_info=
-    clang -std=c11 -O2 -DNDEBUG %omp% %sanitize% %log_level% -I.\src\ -flto=thin -c cinema.c -o %build%\cinema.o
+    clang -std=c11 -O2 -DNDEBUG %omp% %sanitize% %log_level% -I.\src\ -flto=thin -c src\cinema.c -o %build%\cinema.o
 ) else (
     if "!log_level!"=="" set log_level=-DLOG_LEVEL=3 && echo [logs: debug]
     echo [debug build]
     set debug_info= -Wl,/DEBUG -Wl,/PDB:%build%\cinema.pdb
-    clang -std=c11 -g -gcodeview %omp% %warn% %sanitize% !log_level! -I.\src\ -c cinema.c -o %build%\cinema.o
+    clang -std=c11 -g -gcodeview %omp% %warn% %sanitize% !log_level! -I.\src\ -c src\cinema.c -o %build%\cinema.o
 )
 
-llvm-rc cinema.rc -fo %build%\cinema.res
+llvm-rc src\cinema.rc -fo %build%\cinema.res
 clang -fuse-ld=lld-link %omp% %sanitize% %debug_info% -o %build%\cinema.exe %build%\cinema.o %build%\libsais.o %build%\cinema.res
 
 copy /y %build%\cinema.exe build\cinema.exe >nul

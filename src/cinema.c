@@ -59,20 +59,20 @@
 #include <unistd.h>
 #endif
 
-#include "src/base/arena.h"
-#include "src/base/array.h"
-#include "src/base/cache.h"
-#include "src/base/core.h"
-#include "src/base/patricia.c"
-#include "src/base/radix.c"
-#include "src/base/table.c"
-#include "src/config/command.c"
-#include "src/config/config.c"
-#include "src/console/console.c"
-#include "src/console/log.c"
-#include "src/io/io.c"
-#include "src/os/os.c"
-#include "src/os/window.c"
+#include "base/arena.h"
+#include "base/array.h"
+#include "base/cache.h"
+#include "base/core.h"
+#include "base/patricia.c"
+#include "base/radix.c"
+#include "base/table.c"
+#include "config/command.c"
+#include "config/config.c"
+#include "console/console.c"
+#include "console/log.c"
+#include "io/io.c"
+#include "os/os.c"
+#include "os/window.c"
 
 #ifdef CIN_OPENMP
 #include <omp.h>

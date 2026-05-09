@@ -1,5 +1,6 @@
 #!/bin/sh
 set -e
+cd "$(dirname "$0")"
 
 for arg in "$@"; do
     eval "${arg}=1"
@@ -46,11 +47,11 @@ fi
 
 if [ "$release" = "1" ]; then
     echo "[release build]"
-    $compiler cinema.c "$build/libsais.o" -std=c11 -O2 -DNDEBUG $omp $sanitize $log_level -I./src/ -D_GNU_SOURCE -flto=thin -o "$build/cinema"
+    $compiler src/cinema.c "$build/libsais.o" -std=c11 -O2 -DNDEBUG $omp $sanitize $log_level -I./src/ -D_GNU_SOURCE -flto=thin -o "$build/cinema"
 else
     [ -z "$log_level" ] && log_level="-DLOG_LEVEL=3" && echo "[logs: debug]"
     echo "[debug build]"
-    $compiler cinema.c "$build/libsais.o" -std=c11 -g $omp $sanitize $log_level -I./src/ -D_GNU_SOURCE -o "$build/cinema"
+    $compiler src/cinema.c "$build/libsais.o" -std=c11 -g $omp $sanitize $log_level -I./src/ -D_GNU_SOURCE -o "$build/cinema"
 fi
 
 cp -f "$build/cinema" build/cinema
