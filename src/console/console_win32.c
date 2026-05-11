@@ -105,7 +105,7 @@ void cin_wvwritef(const wchar_t *format, va_list args) {
 bool term_get_cursor(COORD *cursor) {
   CONSOLE_SCREEN_BUFFER_INFO info;
   GetConsoleScreenBufferInfo(repl.out, &info);
-  cursor->X = info.dwCursorPosition.X - info.srWindow.Left;
+  cursor->X = info.dwCursorPosition.X - info.srWindow.Left + 1;
   cursor->Y = info.dwCursorPosition.Y - info.srWindow.Top + 1;
   return true;
 }
