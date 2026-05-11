@@ -4,6 +4,8 @@
 #ifdef _WIN32
 #include <windows.h>
 #else
+#include "sys/types.h"
+#include <ctype.h>
 #include <time.h>
 #endif
 
@@ -113,5 +115,21 @@ static inline void cin_getnum(const char **p, int64_t *out) {
 static inline bool cin_iscontinuatioon(char c) {
   return ((uint8_t)c & 0xC0) == 0x80;
 }
+
+#ifndef _WIN32
+typedef struct COORD {
+  short X;
+  short Y;
+} COORD;
+
+typedef struct RECT {
+  ssize_t right;
+  ssize_t bottom;
+  ssize_t left;
+  ssize_t top;
+} RECT;
+
+typedef unsigned long HWND;
+#endif
 
 #endif

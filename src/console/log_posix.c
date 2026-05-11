@@ -1,4 +1,5 @@
 #include <pthread.h>
+#include <stdbool.h>
 #include <unistd.h>
 
 #include "log.h"

@@ -2,6 +2,7 @@
 #define CIN_OS_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 extern struct Cin_System {

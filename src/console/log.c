@@ -1,3 +1,6 @@
+#include <assert.h>
+
+#include "console.h"
 #include "log.h"
 
 const Cin_Log_Level GLOBAL_LOG_LEVEL = LOG_LEVEL;
@@ -7,6 +10,7 @@ const char *LOG_LEVELS[LOG_TRACE + 1] = {"ERROR", "WARNING", "INFO", "DEBUG", "T
 #include "log_win32.c"
 #else
 #include "log_posix.c"
+#include <errno.h>
 #endif
 
 void log_preview(void) {

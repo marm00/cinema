@@ -23,8 +23,14 @@
 #define _CRT_SECURE_NO_DEPRECATE
 #endif
 
+#ifdef CIN_OPENMP
+#include <omp.h>
+#endif
+
 #include <assert.h>
 #include <inttypes.h>
+#include <limits.h>
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -46,13 +52,13 @@
 #include <pthread.h>
 #include <pwd.h>
 #include <signal.h>
-#include <stdarg.h>
 #include <stddef.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/param.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <sys/un.h>
 #include <termios.h>
 #include <time.h>
@@ -74,9 +80,7 @@
 #include "os/os.c"
 #include "os/window.c"
 
-#ifdef CIN_OPENMP
-#include <omp.h>
-#endif
+#include "third_party/libsais.h"
 
 static void cmd_help_executor(void) {
   cin_write_safe(cmd_ctx.help.items, (uint32_t)cmd_ctx.help.count);

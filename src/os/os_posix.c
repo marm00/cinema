@@ -1,10 +1,13 @@
+#include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <sys/mman.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "os.h"
-#include "os_posix.h"
 
 struct Cin_System cin_system = {
     .page_size = 4096,
@@ -19,7 +22,9 @@ void *os_alloc(size_t bytes) {
     // https://kernel.googlesource.com/pub/scm/linux/kernel/git/nico/archive/+/v0.97/include/linux/errno.h
     exit(1);
   }
+#ifdef MADV_HUGEPAGE
   madvise(chunk, bytes, MADV_HUGEPAGE);
+#endif
   return chunk;
 }
 

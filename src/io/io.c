@@ -125,13 +125,6 @@ void playlist_play(Instance *instance) {
 #define CIN_MPVKEY_DATA CIN_MPVKEY("data")
 #define CIN_MPVKEY_REASON CIN_MPVKEY("reason")
 
-#ifndef _WIN32
-static int32_t listener_pipe[2];
-static pthread_mutex_t listener_lock = PTHREAD_MUTEX_INITIALIZER;
-static array_struct(struct pollfd) listener_pfds = {0};
-static array_struct(Instance *) listener_pfds_to_instances = {0};
-#endif
-
 size_t mpv_supply = 0;
 size_t mpv_demand = 0;
 

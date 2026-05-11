@@ -1,3 +1,5 @@
+#include "console.h"
+
 #ifdef _WIN32
 #include "console_win32.c"
 #else

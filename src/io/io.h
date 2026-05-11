@@ -1,6 +1,8 @@
 #ifndef CIN_IO_H
 #define CIN_IO_H
 
+#include <inttypes.h>
+
 #ifdef _WIN32
 #include <windows.h>
 #endif

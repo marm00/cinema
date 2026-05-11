@@ -1,12 +1,19 @@
 #include <pthread.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/types.h>
 #include <termios.h>
 #include <unistd.h>
 
 #include "console.h"
+#include "io/io.h"
+
+void cin_write(const char *str, uint32_t len) {
+  write(STDOUT_FILENO, str, len);
+}
 
 bool term_get_cursor(COORD *cursor) {
   bool ok = true;

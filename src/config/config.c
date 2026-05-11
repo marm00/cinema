@@ -6,6 +6,13 @@
 
 #ifdef _WIN32
 #include "console/console_win32.h"
+#else
+#include <dirent.h>
+#include <errno.h>
+#include <glob.h>
+#include <pwd.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #endif
 
 #include "third_party/libsais.h"
@@ -734,7 +741,7 @@ void setup_macro(char *name, Cin_Macro *macro, bool startup) {
 #else
   const int32_t len = utf8_norm(name) + 1;
   assert(len > 0);
-  radix_insert(macro_tree, (uint8_t *)name, (uint32_t)len, macro);
+  radix_insert(&arena_console, macro_tree, (uint8_t *)name, (uint32_t)len, macro);
 #endif
   if (startup) array_push(&arena_console, &startup_macros, macro);
 }

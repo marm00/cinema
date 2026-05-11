@@ -10,6 +10,7 @@
 
 #include <assert.h>
 #include <limits.h>
+#include <stdarg.h>
 #include <stdint.h>
 
 #include "base/arena.h"
@@ -145,7 +146,7 @@ static inline void show_cursor(void) {
 }
 
 static inline void term_set_cursor(COORD coord) {
-  cin_writef(CSI "%hd;%hdH", coord.Y, coord.X + 1);
+  cin_writef(CSI "%d;%dH", coord.Y, coord.X + 1);
 }
 
 bool term_get_cursor(COORD *corsor);

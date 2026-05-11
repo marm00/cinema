@@ -1,11 +1,14 @@
+#include <poll.h>
+#include <signal.h>
 #include <stdbool.h>
+#include <sys/socket.h>
 #include <sys/types.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #include "base/array.h"
 #include "console/log_posix.h"
 #include "io.h"
-#include "os/os_posix.h"
 #include "os/window_posix.h"
 
 static int32_t listener_pipe[2];
@@ -20,6 +23,7 @@ bool internal_write(Instance *instance, Overlapped_Write *msg, int32_t bytes) {
   } else if (write_result < (ssize_t)msg->bytes) {
     log_message(LOG_ERROR, "Expected '%zu' bytes but received '%ld': %s", msg->bytes, bytes, msg->buf);
   }
+  return true;
 }
 
 void copy_clipboard(void) { /* */ }

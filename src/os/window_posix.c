@@ -1,7 +1,6 @@
 #include "window_posix.h"
 #include "base/array.h"
 #include "console/console.h"
-#include "os/os_posix.h"
 #include "window.h"
 
 bool cin_iswindow(HWND window) {
