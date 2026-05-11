@@ -3,6 +3,21 @@
 #include "console/console.h"
 #include "window.h"
 
+void *pxlib = 0;
+Display *pxdisplay = 0;
+fn_XOpenDisplay pXOpenDisplay = 0;
+fn_XCloseDisplay pXCloseDisplay = 0;
+fn_XDefaultRootWindow pXDefaultRootWindow = 0;
+fn_XQueryTree pXQueryTree = 0;
+fn_XFetchName pXFetchName = 0;
+fn_XGetGeometry pXGetGeometry = 0;
+fn_XMoveResizeWindow pXMoveResizeWindow = 0;
+fn_XTranslateCoordinates pXTranslateCoordinates = 0;
+fn_XSetErrorHandler pXSetErrorHandler = 0;
+fn_XFlush pXFlush = 0;
+fn_XSync pXSync = 0;
+fn_XFree pXFree = 0;
+
 bool cin_iswindow(HWND window) {
   if (!pxlib || !window) return false;
   Window root;

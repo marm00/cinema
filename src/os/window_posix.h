@@ -30,21 +30,21 @@ typedef int (*fn_XFlush)(Display *);
 typedef int (*fn_XSync)(Display *, Bool);
 typedef int (*fn_XFree)(void *);
 
-static void *pxlib;
-static Display *pxdisplay;
+extern void *pxlib;
+extern Display *pxdisplay;
 
-static fn_XOpenDisplay pXOpenDisplay;
-static fn_XCloseDisplay pXCloseDisplay;
-static fn_XDefaultRootWindow pXDefaultRootWindow;
-static fn_XQueryTree pXQueryTree;
-static fn_XFetchName pXFetchName;
-static fn_XGetGeometry pXGetGeometry;
-static fn_XMoveResizeWindow pXMoveResizeWindow;
-static fn_XTranslateCoordinates pXTranslateCoordinates;
-static fn_XSetErrorHandler pXSetErrorHandler;
-static fn_XFlush pXFlush;
-static fn_XSync pXSync;
-static fn_XFree pXFree;
+extern fn_XOpenDisplay pXOpenDisplay;
+extern fn_XCloseDisplay pXCloseDisplay;
+extern fn_XDefaultRootWindow pXDefaultRootWindow;
+extern fn_XQueryTree pXQueryTree;
+extern fn_XFetchName pXFetchName;
+extern fn_XGetGeometry pXGetGeometry;
+extern fn_XMoveResizeWindow pXMoveResizeWindow;
+extern fn_XTranslateCoordinates pXTranslateCoordinates;
+extern fn_XSetErrorHandler pXSetErrorHandler;
+extern fn_XFlush pXFlush;
+extern fn_XSync pXSync;
+extern fn_XFree pXFree;
 
 #define XLOAD(symbol)                                                      \
   do {                                                                     \
