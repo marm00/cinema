@@ -146,7 +146,7 @@ static void cmd_layout_validator(void) {
   cmd_ctx.executor = cmd_layout_executor;
 }
 
-static void cmd_reroll_executor(void) {
+static void cmd_shuffle_executor(void) {
   size_t count = 0;
   mpv_target_foreach(i, instance) {
     playlist_play(instance);
@@ -158,10 +158,10 @@ static void cmd_reroll_executor(void) {
   }
 }
 
-static void cmd_reroll_validator(void) {
+static void cmd_shuffle_validator(void) {
   if (!validate_screens()) return;
-  set_preview(true, "reroll %s", cmd_ctx.targets.items);
-  cmd_ctx.executor = cmd_reroll_executor;
+  set_preview(true, "shuffle %s", cmd_ctx.targets.items);
+  cmd_ctx.executor = cmd_shuffle_executor;
 }
 
 static cmd_validator parse_command(const char *command) {
@@ -217,7 +217,7 @@ static cmd_validator parse_command(const char *command) {
     if (number) {
       array_push(&arena_console, &cmd_ctx.numbers, number);
     }
-    return cmd_reroll_validator;
+    return cmd_shuffle_validator;
   }
   const char *start = p;
   ++p;
@@ -262,7 +262,7 @@ static void update_preview(void) {
 }
 
 static void cmd_tag_executor(void) {
-  if (cmd_ctx.tag->playlist) goto reroll;
+  if (cmd_ctx.tag->playlist) goto shuffle;
   cache_get_zero(&arena_docs, &media.playlists, cmd_ctx.tag->playlist);
   Playlist *playlist = cmd_ctx.tag->playlist;
   playlist->from_tag = true;
@@ -358,7 +358,7 @@ static void cmd_tag_executor(void) {
     playlist->empty = true;
     log_message(LOG_INFO, "Tag is empty");
   }
-reroll:
+shuffle:
   if (!cmd_ctx.tag->playlist->empty) {
     mpv_target_foreach(i, instance) {
       playlist_set(instance, cmd_ctx.tag->playlist);
@@ -1227,8 +1227,8 @@ static bool init_commands(void) {
   register_cmd("maximize", "Maximize and close others [(1) maximize]", cmd_maximize_validator);
   register_cmd("mute", "Mute screen(s) [(1 2 ..) mute]", cmd_mute_validator);
   register_cmd("quit", "Close screens and quit Cinema", cmd_quit_validator);
-  register_cmd("reroll", "Shuffle media [(1 2 ..) (reroll)]", cmd_reroll_validator);
   register_cmd("search", "Limit media to term [(1 2 ..) search (term)]", cmd_search_validator);
+  register_cmd("shuffle", "Shuffle media [(1 2 ..) (shuffle)]", cmd_shuffle_validator);
   register_cmd("store", "Store layout in cinema.conf [store (layout)]", cmd_store_validator);
   register_cmd("swap", "Swap screen contents [(1 2) swap]", cmd_swap_validator);
   register_cmd("tag", "Limit media to tag [(1 2 ..) tag (name)]", cmd_tag_validator);
@@ -1242,7 +1242,7 @@ static void execute_startup_macros(void) {
     cmd_macro_executor();
   }
   array_clear(&cmd_ctx.numbers);
-  cmd_reroll_validator();
+  cmd_shuffle_validator();
   set_preview(true, "press enter to shuffle (h for help)");
   set_preview_row(repl.home.Y + 1);
   log_preview();

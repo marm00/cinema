@@ -65,7 +65,7 @@ Commands have autocomplete and optional arguments. For example: `2 4 s foo` sets
 
 `list` Show all tags. These tags come from your cinema.conf file and can be supplied as an argument to the *tag* command.
 
-`lock` Lock/unlock screen contents [(1 2 ..) lock]. Whenever the current playlist entry would change, it does not do so when locked. I.e., autoplay stops, the entry loops indefinitely, and the *reroll* command does nothing. This is a toggle.
+`lock` Lock/unlock screen contents [(1 2 ..) lock]. Whenever the current playlist entry would change, it does not do so when locked. I.e., autoplay stops, the entry loops indefinitely, and the *shuffle* command does nothing. This is a toggle.
 
 `macro` Execute macro [macro (*name*)]. Macros are collections of predefined commands (with arguments) stored in cinema.conf that execute in the exact same way as typing them out manually. You can for example have a macro that changes the layout, adjusts the search term, and enables autoplay, and execute it all with just this one command.
 
@@ -75,7 +75,7 @@ Commands have autocomplete and optional arguments. For example: `2 4 s foo` sets
 
 `quit` Close screens and quit Cinema. See the *kill* command to close specific screens, chat, and keep Cinema alive.
 
-`reroll` Shuffle media [(1 2 ..) (*reroll*)]. This is the default autocomplete command. Each screen is associated with a playlist. When autoplay is enabled, or if this command is executed, the next entry in the playlist is loaded. Cinema uses the standard Fisher–Yates algorithm with a partial Sattolo shuffle.
+`shuffle` Shuffle media [(1 2 ..) (*shuffle*)]. This is the default autocomplete command. Each screen is associated with a playlist. When autoplay is enabled, or if this command is executed, the next entry in the playlist is loaded. Cinema uses the standard Fisher–Yates algorithm with a partial Sattolo shuffle.
 
 `search` Limit media to term [(1 2 ..) search (*term*)]. The playlists will be updated to only have media that includes the *term*. For example, searching for *C:*, *foo*, or *.mp4* will ensure that the playlist only contains files with *C:*, *foo*, or *.mp4* in their names. Cinema uses [libsais](https://github.com/IlyaGrebnov/libsais) to construct a generalized suffix array (GSA) on launch and queries it (with result deduplication) on demand.
 
