@@ -216,6 +216,10 @@ void iocp_parse(Instance *instance, const char *buf_start, size_t buf_offset) {
       break;
     case MPV_GET_PATH: {
       char *data = (char *)strstr(buf, CIN_MPVKEY_DATA);
+      if (!data) {
+        ++clipboard.supply;
+        break;
+      }
       assert(data);
       data += cin_strlen(CIN_MPVKEY_DATA);
       assert(*data == '"');
@@ -235,11 +239,11 @@ void iocp_parse(Instance *instance, const char *buf_start, size_t buf_offset) {
       }
       array_push(&arena_iocp_thread, &clipboard, CIN_CLIPBOARD_ENCLOSER);
       array_push(&arena_iocp_thread, &clipboard, CIN_CLIPBOARD_SEPARATOR);
-      if (++clipboard.supply == clipboard.demand) {
+      if (++clipboard.supply >= clipboard.demand) {
         clipboard.supply = 0;
         clipboard.demand = 0;
         if (clipboard.count) clipboard.items[clipboard.count - 1] = '\0';
-        cin_write_safe(clipboard.items, clipboard.count - 1);
+        cin_write_safe(clipboard.items, clipboard.count);
         copy_clipboard();
       }
     } break;
