@@ -83,7 +83,7 @@
 #include "third_party/libsais.h"
 
 static void cmd_help_executor(void) {
-  cin_write_safe(cmd_ctx.help.items, (uint32_t)cmd_ctx.help.count);
+  cin_write_safe(cmd_ctx.help.items, cmd_ctx.help.count);
 }
 
 static void cmd_help_validator(void) {
@@ -1159,7 +1159,7 @@ static void cmd_list_executor(void) {
     output.items[output.count - 1] = '\0';
   }
   assert(output.count);
-  cin_write_safe(output.items, (uint32_t)output.count);
+  cin_write_safe(output.items, output.count);
   array_free_items(&arena_console, &output);
 }
 
