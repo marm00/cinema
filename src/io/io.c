@@ -207,6 +207,7 @@ void iocp_parse(Instance *instance, const char *buf_start, size_t buf_offset) {
       intptr_t window_id = 0;
       for (; cin_isnum(*data); ++data) window_id = (window_id * 10) + *data - '0';
       assert(cin_iswindow((HWND)window_id));
+      // might not actually be visible yet
       assert(cin_isvisible((HWND)window_id));
       instance->window = (HWND)window_id;
       cin_getwindow(instance->window, &instance->rect);

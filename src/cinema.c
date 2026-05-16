@@ -1086,7 +1086,11 @@ static void cmd_copy_executor(void) {
 
 static void cmd_copy_validator(void) {
   if (!validate_screens()) return;
+#ifdef _WIN32
   set_preview(true, "copy to clipboard %s", cmd_ctx.targets.items);
+#else
+  set_preview(true, "print to console %s", cmd_ctx.targets.items);
+#endif
   cmd_ctx.executor = cmd_copy_executor;
 }
 
