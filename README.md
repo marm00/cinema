@@ -8,18 +8,16 @@ You can download the latest installable version of Cinema for Windows [here (Git
 
 ## Overview
 
-Cinema gives you a video wall with full control over the layout and content, powered by [mpv](https://github.com/mpv-player/mpv/). Pressing enter shuffles the content, type *help* for more information.
+Watch many streams or videos at once from the command line (with chat). Pressing enter shuffles the content, type *help* for more information.
 
-Customize your settings in [cinema.conf](./cinema.conf) or by typing commands from the [list of commands](#list-of-commands), which can also be used for things like search, autoplay, and macros.
+Settings for layouts and media are stored in your [cinema.conf](./cinema.conf) file. Type commands from the [list of commands](#list-of-commands) for things like search, autoplay, and macros.
 
 ## Features
 
-* Video wall (multiple screens) of mpv-supported media, including Twitch streams.
-* Instant search across your media library, as well as tags to group media.
-* Shuffle on demand or autoplay.
-* Save and load layouts of screens and [Chatterino](https://chatterino.com/).
+* Multiviewer for [mpv](https://github.com/mpv-player/mpv/)-supported media, including Twitch streams.
+* Instant search across your files, and tags to group media.
+* Save and load layouts (including [Chatterino](https://chatterino.com/)).
 * Macros to do many things at once, optionally on startup.
-* And a lot more: [list of commands](#list-of-commands).
 
 ## Bugs and requests
 
