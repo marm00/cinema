@@ -5,6 +5,7 @@
 #include <windows.h>
 
 #include "base/core.h"
+#include "console/console_win32.h"
 #include "console/log.h"
 #include "os.h"
 #include "os_win32.h"
@@ -64,9 +65,9 @@ void os_sleep(long millis) {
   Sleep((DWORD)millis);
 }
 
-wchar_t exe_path_mpv[CIN_MAX_PATH] = {0};
-wchar_t exe_path_ytdlp[CIN_MAX_PATH] = {0};
-wchar_t exe_path_chatterino[CIN_MAX_PATH] = {0};
+wchar_t exe_wpath_mpv[CIN_MAX_PATH] = {0};
+wchar_t exe_wpath_ytdlp[CIN_MAX_PATH] = {0};
+wchar_t exe_wpath_chatterino[CIN_MAX_PATH] = {0};
 
 bool find_exe(const wchar_t *dir, const wchar_t *exe, wchar_t *buf) {
   const wchar_t extension[] = L".exe";
@@ -123,8 +124,23 @@ bool find_exe(const wchar_t *dir, const wchar_t *exe, wchar_t *buf) {
 }
 
 bool init_executables(void) {
-  if (!find_exe(L"mpv", L"mpv", exe_path_mpv)) return false;
-  if (!find_exe(L"mpv", L"yt-dlp", exe_path_ytdlp)) return false;
-  find_exe(L"Chatterino", L"chatterino", exe_path_chatterino);
+  if (*exe_path_mpv) {
+    int32_t len = utf8_to_utf16_raw(exe_path_mpv);
+    wmemcpy(exe_wpath_mpv, utf16_buf_raw.items, (size_t)len);
+  } else if (!find_exe(L"mpv", L"mpv", exe_wpath_mpv))  {
+    return false;
+  }
+  if (*exe_path_ytdlp) {
+    int32_t len = utf8_to_utf16_raw(exe_path_ytdlp);
+    wmemcpy(exe_wpath_ytdlp, utf16_buf_raw.items, (size_t)len);
+  } else if (!find_exe(L"mpv", L"yt-dlp", exe_wpath_ytdlp))  {
+    return false;
+  }
+   if (*exe_path_chatterino) {
+    int32_t len = utf8_to_utf16_raw(exe_path_chatterino);
+    wmemcpy(exe_wpath_chatterino, utf16_buf_raw.items, (size_t)len);
+  } else  {
+    find_exe(L"Chatterino", L"chatterino", exe_wpath_chatterino);
+  }
   return true;
 }

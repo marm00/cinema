@@ -43,11 +43,18 @@ typedef struct Conf_Macro {
   Conf_Key startup;
 } Conf_Macro;
 
+typedef struct Conf_Settings {
+  Conf_Key mpv_path;
+  Conf_Key ytdlp_path;
+  Conf_Key chatterino_path;
+} Conf_Settings;
+
 typedef enum {
   CONF_SCOPE_ROOT,
   CONF_SCOPE_MEDIA,
   CONF_SCOPE_LAYOUT,
-  CONF_SCOPE_MACRO
+  CONF_SCOPE_MACRO,
+  CONF_SCOPE_SETTINGS
 } Conf_Scope_Type;
 
 typedef struct Conf_Scope {
@@ -57,6 +64,7 @@ typedef struct Conf_Scope {
     Conf_Media media;
     Conf_Layout layout;
     Conf_Macro macro;
+    Conf_Settings settings;
   };
   int32_t line;
 } Conf_Scope;
@@ -240,6 +248,7 @@ void setup_screen(const char *geometry, Cin_Layout *layout);
 void setup_layout(char *name, Cin_Layout *layout);
 void setup_macro(char *name, Cin_Macro *macro, bool startup);
 void setup_macro_command(char *command, Cin_Macro *macro);
+void setup_settings(Conf_Key *src, char *dst);
 
 bool init_config(const char *filename);
 bool reinit_documents(void);

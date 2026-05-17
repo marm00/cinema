@@ -60,6 +60,9 @@ bool conf_keycmp(const char *k, Conf_Scope_Type type, Conf_Key *out, bool unique
     case CONF_SCOPE_MACRO:
       scope_msg = "under a [macro] table";
       break;
+    case CONF_SCOPE_SETTINGS:
+      scope_msg = "under a [settings] table";
+      break;
     default:
       assert(false && "Unexpected type");
       break;
@@ -89,6 +92,9 @@ bool conf_keyget(void) {
   case 11:
     if (conf_keycmp("directories", CONF_SCOPE_MEDIA, &conf_scope()->media.directories, false)) return true;
     break;
+  case 10:
+    if (conf_keycmp("chatterino", CONF_SCOPE_SETTINGS, &conf_scope()->settings.chatterino_path, true)) return true;
+    break;
   case 8:
     if (conf_keycmp("patterns", CONF_SCOPE_MEDIA, &conf_scope()->media.patterns, false)) {
       conf_parser.has_patterns = true;
@@ -102,6 +108,9 @@ bool conf_keyget(void) {
   case 6:
     if (conf_keycmp("screen", CONF_SCOPE_LAYOUT, &conf_scope()->layout.screen, false)) return true;
     break;
+  case 5:
+    if (conf_keycmp("ytdlp", CONF_SCOPE_SETTINGS, &conf_scope()->settings.ytdlp_path, true)) return true;
+    break;
   case 4:
     if (conf_keycmp("urls", CONF_SCOPE_MEDIA, &conf_scope()->media.urls, false)) return true;
     if (conf_keycmp("tags", CONF_SCOPE_MEDIA, &conf_scope()->media.tags, false)) return true;
@@ -112,6 +121,9 @@ bool conf_keyget(void) {
       if (conf_keycmp("name", CONF_SCOPE_LAYOUT, &conf_scope()->layout.name, true)) return true;
     }
     break;
+  case 3:
+    if (conf_keycmp("mpv", CONF_SCOPE_SETTINGS, &conf_scope()->settings.mpv_path, true)) return true;
+    break;
   default:
     break;
   }
@@ -120,6 +132,9 @@ bool conf_keyget(void) {
 
 bool conf_scopeget(void) {
   switch (conf_parser.k_len) {
+  case 8:
+    if (conf_scopecmp("settings", CONF_SCOPE_SETTINGS)) return true;
+    break;
   case 6:
     if (conf_scopecmp("layout", CONF_SCOPE_LAYOUT)) return true;
     break;
@@ -761,6 +776,24 @@ void setup_macro_command(char *command, Cin_Macro *macro) {
 #endif
 }
 
+void setup_settings(Conf_Key *src, char *dst) {
+  if (!src->count) return;
+#ifdef _WIN32
+  const int32_t len_utf16 = utf8_to_utf16_norm(src->items);
+  assert(len_utf16 > 1);
+  const int32_t len = utf16_to_utf8(utf16_buf_norm.items);
+  assert(len > 1);
+  const uint32_t len_u32 = (uint32_t)len;
+  assert(len_u32 <= CIN_MAX_PATH_BYTES);
+  memcpy(dst, utf8_buf.items, len_u32);
+#else
+  const int32_t len = utf8_norm(src->items) + 1;
+  assert(len > 1);
+  assert(len <= CIN_MAX_PATH_BYTES);
+  memcpy(dst, src->items, len);
+#endif
+}
+
 #define FOREACH_PART(str, part)                                                     \
   for (char *part = (str)->items, *_right = part, *_tail = part + (str)->count - 1; \
        part && part < _tail;                                                        \
@@ -890,6 +923,14 @@ bool init_config(const char *filename) {
       array_free_items(&arena_console, &scope->macro.name);
       array_free_items(&arena_console, &scope->macro.command);
       array_free_items(&arena_console, &scope->macro.startup);
+    } break;
+    case CONF_SCOPE_SETTINGS: {
+      setup_settings(&scope->settings.mpv_path, exe_path_mpv);
+      setup_settings(&scope->settings.ytdlp_path, exe_path_ytdlp);
+      setup_settings(&scope->settings.chatterino_path, exe_path_chatterino);
+      array_free_items(&arena_console, &scope->settings.mpv_path);
+      array_free_items(&arena_console, &scope->settings.ytdlp_path);
+      array_free_items(&arena_console, &scope->settings.chatterino_path);
     } break;
     default:
       assert(false && "Unexpected scope");

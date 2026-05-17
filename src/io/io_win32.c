@@ -141,18 +141,20 @@ bool iocp_start(void) {
 }
 
 void mpv_spawn_internal(Instance *instance, char *mpv_flags[], char *socket_name) {
-  const int32_t mpv_buf_len = snprintf(NULL, 0, "%s %s %s %s %s",
-                                       mpv_flags[0], mpv_flags[1], mpv_flags[2], mpv_flags[3], mpv_flags[4]) +
+  const int32_t mpv_buf_len = snprintf(NULL, 0, "%s %s %s %s %s %s",
+                                       mpv_flags[0], mpv_flags[1], mpv_flags[2], mpv_flags[3], mpv_flags[4],
+                                       *exe_path_ytdlp ? mpv_flags[5] : "") +
                               1;
   char mpv_command[mpv_buf_len];
-  snprintf(mpv_command, (size_t)mpv_buf_len, "%s %s %s %s %s",
-           mpv_flags[0], mpv_flags[1], mpv_flags[2], mpv_flags[3], mpv_flags[4]);
+  snprintf(mpv_command, (size_t)mpv_buf_len, "%s %s %s %s %s %s",
+           mpv_flags[0], mpv_flags[1], mpv_flags[2], mpv_flags[3], mpv_flags[4],
+           *exe_path_ytdlp ? mpv_flags[5] : "");
   utf8_to_utf16_raw(mpv_command);
   wchar_t mpv_command_utf16[mpv_buf_len];
   wmemcpy(mpv_command_utf16, utf16_buf_raw.items, (size_t)mpv_buf_len);
   STARTUPINFOW si = {0};
   PROCESS_INFORMATION pi = {0};
-  if (!CreateProcessW(exe_path_mpv, mpv_command_utf16, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+  if (!CreateProcessW(exe_wpath_mpv, mpv_command_utf16, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
     if (GetLastError() == ERROR_FILE_NOT_FOUND) {
       log_last_error("Failed to find mpv executable");
     } else {
@@ -196,7 +198,7 @@ size_t chat_spawn(const Cin_Layout *layout) {
   si.dwYSize = (uint32_t)cy;
   si.cb = sizeof(si);
   // since STARTUPINFOW is ignored, manually reposition after
-  if (!CreateProcessW(exe_path_chatterino, L"chatterino", NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+  if (!CreateProcessW(exe_wpath_chatterino, L"chatterino", NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
     if (GetLastError() == ERROR_FILE_NOT_FOUND) {
       log_last_error("Failed to find chatterino executable");
     } else {

@@ -100,6 +100,7 @@ bool iocp_start(void) {
 }
 
 void mpv_spawn_internal(Instance *instance, char *mpv_flags[], char *socket_name) {
+  if (!*exe_path_ytdlp) mpv_flags[5] = NULL;
   pid_t pid = fork();
   if (pid < 0) {
     log_last_error("Failed to fork process");

@@ -29,11 +29,16 @@ void os_sleep(long millis);
 // if many/all characters need 2 code units
 // The cFileName from winapi uses a wchar_t buffer of
 // 260 (MAX_PATH) so surrogate pairs get truncated
+#include <windows.h>
 #define CIN_MAX_PATH MAX_PATH
 #define CIN_MAX_PATH_BYTES (MAX_PATH * 4)
 #else
 #define CIN_MAX_PATH PATH_MAX
 #define CIN_MAX_PATH_BYTES CIN_MAX_PATH
 #endif
+
+extern char exe_path_mpv[CIN_MAX_PATH_BYTES];
+extern char exe_path_ytdlp[CIN_MAX_PATH_BYTES];
+extern char exe_path_chatterino[CIN_MAX_PATH_BYTES];
 
 #endif

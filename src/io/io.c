@@ -328,14 +328,16 @@ bool init_mpv(void) {
 void mpv_spawn(Instance *instance, size_t index) {
   char geometry_str[CIN_MPVCALL_GEOMETRY_LEN] = {"--geometry="};
   char server_str[CIN_MPVCALL_SERVER_LEN] = {"--input-ipc-server=" CIN_MPVCALL_PIPE};
+  char ytdlp_str[CIN_MPVCALL_YTDLP_LEN] = {"--script-opts=ytdl_hook-ytdl_path="};
   char *mpv_flags[] = {
       "mpv",
       "--idle",
       "--config-dir=./",
       server_str,
       geometry_str,
+      ytdlp_str,
       NULL};
-  static_assert((sizeof(mpv_flags) / CIN_PTR) == 6, "expected 6 elements including sentinel");
+  static_assert((sizeof(mpv_flags) / CIN_PTR) == 7, "expected 7 elements including sentinel");
   const bool extra = index == SIZE_MAX;
   if (extra) index = cmd_ctx.layout->count;
   char *server_flag = mpv_flags[3];
@@ -368,8 +370,16 @@ void mpv_spawn(Instance *instance, size_t index) {
   assert(strstr(geometry_flag, "geometry") && "check flags");
   const size_t geometry_buf_len = strlen(geometry_flag);
   snprintf(geometry_flag + geometry_buf_len, (size_t)len, "%.*s", len, screen_utf8);
-  log_message(LOG_DEBUG, "Spawning instance: %s %s %s %s %s",
-              mpv_flags[0], mpv_flags[1], mpv_flags[2], mpv_flags[3], mpv_flags[4]);
+  if (*exe_path_ytdlp) {
+    char *ytdlp_flag = mpv_flags[5];
+    assert(strstr(ytdlp_flag, "ytdl_path") && "check flags");
+    const size_t ytdlp_len = strlen(ytdlp_flag);
+    const size_t exe_ytdlp_len = strlen(exe_path_ytdlp);
+    snprintf(ytdlp_flag + ytdlp_len, CIN_MPVCALL_YTDLP_LEN, "%.*s", (int32_t)exe_ytdlp_len, exe_path_ytdlp);
+  }
+  log_message(LOG_DEBUG, "Spawning instance: %s %s %s %s %s %s",
+              mpv_flags[0], mpv_flags[1], mpv_flags[2], mpv_flags[3], mpv_flags[4],
+              *exe_path_ytdlp ? mpv_flags[5] : "");
   char *socket_name = strchr(server_flag, '=');
   assert(socket_name);
   assert(socket_name + 1);
