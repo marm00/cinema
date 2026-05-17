@@ -12,6 +12,8 @@ Watch many streams or videos at once from the command line (with chat). Pressing
 
 Settings for layouts and media are stored in your [cinema.conf](./cinema.conf) file. Type commands from the [list of commands](#list-of-commands) for things like search, autoplay, and macros.
 
+Making your terminal [always on top](https://www.google.com/search?q=How+do+I+set+my+terminal+to+be+always+on+top%3F) or changing [mpv.conf *ontop* settings ](https://mpv.io/manual/stable/#options-ontop) is recommended so that mpv never takes focus.
+
 ## Features
 
 * Multiviewer for [mpv](https://github.com/mpv-player/mpv/)-supported media, including Twitch streams.
@@ -53,7 +55,7 @@ Example 2: `autoplay` enables autoplay for all screens.
 
 **`twitch`** Show channel [(1 2 ..) twitch (*channel*)]. Shortcut to watch a specific stream.
 
-**`search`** Limit media to term [(1 2 ..) search (*term*)]. Searches through all directories and urls in cinema.conf. Example searches: `C:`, `foo`, `.mp4`.
+**`search`** Limit media to term [(1 2 ..) search (*term*)]. Searches through all directories and urls in cinema.conf. Example searches: *C:*, *foo*, *.mp4*, */bar/baz/*.
 
 **`tag`** Limit media to tag [(1 2 ..) tag (*name*)]. Tags group media, stored in cinema.conf.
 
