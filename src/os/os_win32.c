@@ -71,6 +71,23 @@ wchar_t exe_path_chatterino[CIN_MAX_PATH] = {0};
 bool find_exe(const wchar_t *dir, const wchar_t *exe, wchar_t *buf) {
   const wchar_t extension[] = L".exe";
   if (SearchPathW(NULL, exe, extension, CIN_MAX_PATH, buf, NULL)) return true;
+  wchar_t reg_key[CIN_MAX_PATH];
+  swprintf_s(reg_key, CIN_MAX_PATH,
+             L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\%s%s",
+             exe, wcsstr(exe, L".exe") ? L"" : L".exe");
+  HKEY roots[] = {HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER};
+  for (size_t i = 0; i < 2; ++i) {
+    HKEY hk;
+    if (RegOpenKeyExW(roots[i], reg_key, 0, KEY_READ, &hk) == ERROR_SUCCESS) {
+      DWORD type, sz = CIN_MAX_PATH * sizeof(wchar_t);
+      LSTATUS st = RegQueryValueExW(hk, NULL, NULL, &type, (BYTE *)buf, &sz);
+      RegCloseKey(hk);
+      if (st == ERROR_SUCCESS && (type == REG_SZ || type == REG_EXPAND_SZ)) {
+        if (type == REG_EXPAND_SZ) ExpandEnvironmentStringsW(buf, buf, CIN_MAX_PATH);
+        return true;
+      }
+    }
+  }
   const wchar_t *paths[] = {
       L"C:\\Program Files\\",
       L"C:\\Program Files (x86)\\",
