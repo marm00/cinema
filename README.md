@@ -47,50 +47,50 @@ Example 2: `autoplay` enables autoplay for all screens.
 
 ### Main commands
 
-`layout` Change layout to name [layout (*name*)]. Sets up screens and chat.
+**`layout`** Change layout to name [layout (*name*)]. Sets up screens and chat.
 ___
-`store` Store layout in cinema.conf [store (*layout name*)]. Creates or updates the layout in cinema.conf.
+**`store`** Store layout in cinema.conf [store (*layout name*)]. Creates or updates the layout in cinema.conf.
 ___
-`twitch` Show channel [(1 2 ..) twitch (*channel*)]. Shortcut to watch a specific stream.
+**`twitch`** Show channel [(1 2 ..) twitch (*channel*)]. Shortcut to watch a specific stream.
 ___
-`search` Limit media to term [(1 2 ..) search (*term*)]. Searches through all directories and urls in cinema.conf. Example searches: `C:`, `foo`, `.mp4`.
+**`search`** Limit media to term [(1 2 ..) search (*term*)]. Searches through all directories and urls in cinema.conf. Example searches: `C:`, `foo`, `.mp4`.
 ___
-`tag` Limit media to tag [(1 2 ..) tag (*name*)]. Tags group media, stored in cinema.conf.
+**`tag`** Limit media to tag [(1 2 ..) tag (*name*)]. Tags group media, stored in cinema.conf.
 ___
 
 ### Other commands
 
-`autoplay` Autoplay media [(1 2 ..) autoplay (*seconds*)]. *Seconds* can be 0 (turn off autoplay), greater than 0 (shuffle every *seconds* seconds), or not provided (shuffles when video ends or image was shown for 5 seconds).
+**`autoplay`** Autoplay media [(1 2 ..) autoplay (*seconds*)]. *Seconds* can be 0 (turn off autoplay), greater than 0 (shuffle every *seconds* seconds), or not provided (shuffles when video ends or image was shown for 5 seconds).
 ___
-`chat` Show or reposition chat. You can move the window and use the *store* command to save the updated location and size.
+**`chat`** Show or reposition chat. You can move the window and use the *store* command to save the updated location and size.
 ___
-`clear` Clear the current tag or search term [(1 2 ..) clear]. This restores the default playlist.
+**`clear`** Clear the current tag or search term [(1 2 ..) clear]. This restores the default playlist.
 ___
-`copy` Copy url(s) to clipboard [(1 2 ..) copy]. The clipboard contents are formatted in support of [Everything](https://www.voidtools.com/faq/#searching). Does not copy on posix, only print.
+**`copy`** Copy url(s) to clipboard [(1 2 ..) copy]. The clipboard contents are formatted in support of [Everything](https://www.voidtools.com/faq/#searching). Does not copy on posix, only print.
 ___
-`extra` Adds an extra screen to the current layout. You can use the *store* command to update the layout beyond this session.
+**`extra`** Adds an extra screen to the current layout. You can use the *store* command to update the layout beyond this session.
 ___
-`help` Show all commands.
+**`help`** Show all commands.
 ___
-`hide` Hide media with term [hide term]. Future *search* commands will not return hidden files. This can be used to exclude specific file extensions, for example.
+**`hide`** Hide media with term [hide term]. Future *search* commands will not return hidden files. This can be used to exclude specific file extensions, for example.
 ___
-`idle` Make commands (not) play media [idle]. Toggle whether a command is allowed to play media (*idle tag art idle* would update the tag but not play a new file).
+**`idle`** Make commands (not) play media [idle]. Toggle whether a command is allowed to play media (*idle tag art idle* would update the tag but not play a new file).
 ___
-`kill` Kill screen(s) and chat [(1 2 ..) kill]. Closes the windows and Chatterino, without exiting Cinema (use the *quit* command to kill everything and exit).
+**`kill`** Kill screen(s) and chat [(1 2 ..) kill]. Closes the windows and Chatterino, without exiting Cinema (use the *quit* command to kill everything and exit).
 ___
-`list` Show all tags.
+**`list`** Show all tags.
 ___
-`lock` Lock/unlock screen contents [(1 2 ..) lock]. Toggle whether a screen is allowed to play new files. Would ignore things like *autoplay*, *shuffle*, *tag* if enabled.
+**`lock`** Lock/unlock screen contents [(1 2 ..) lock]. Toggle whether a screen is allowed to play new files. Would ignore things like *autoplay*, *shuffle*, *tag* if enabled.
 ___
-`macro` Execute macro [macro (*name*)]. Processes a macro command by command. Macros are stored in cinema.conf.
+**`macro`** Execute macro [macro (*name*)]. Processes a macro command by command. Macros are stored in cinema.conf.
 ___
-`maximize` Maximize and close others [(1) maximize]. Kills all windows except (1) and sets it to fullscreen.
+**`maximize`** Maximize and close others [(1) maximize]. Kills all windows except (1) and sets it to fullscreen.
 ___
-`mute` Mute/unmute screen(s) [(1 2 ..) mute]. This is a toggle.
+**`mute`** Mute/unmute screen(s) [(1 2 ..) mute]. This is a toggle.
 ___
-`quit` Close windows and quit Cinema.
+**`quit`** Close windows and quit Cinema.
 ___
-`shuffle` Shuffle media [(1 2 ..) (*shuffle*)]. Plays a new file. This is the default autocomplete command.
+**`shuffle`** Shuffle media [(1 2 ..) (*shuffle*)]. Plays a new file. This is the default autocomplete command.
 ___
-`swap` Swap screen contents [(1 2) swap]. Makes screen 1 play the media of screen 2 and vice versa.
+**`swap`** Swap screen contents [(1 2) swap]. Makes screen 1 play the media of screen 2 and vice versa.
 ___
