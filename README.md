@@ -4,7 +4,7 @@
 
 ## Download
 
-You can download the latest installable version of Cinema for Windows [here (GitHub releases page)](https://github.com/marm00/cinema/releases).
+You can download the latest installable version of Cinema for Windows/Linux [here (GitHub releases page)](https://github.com/marm00/cinema/releases).
 
 ## Overview
 
