@@ -77,7 +77,7 @@
         if (unlikely((a)->bytes_capacity_k >= CIN_ARENA_MAX_K)) {                 \
           printf("Cinema crashed trying to allocate excessive memory (%u bytes)", \
                  (a)->bytes_capacity << 1);                                       \
-          exit(1);                                                                \
+          cin_exit(1);                                                            \
         }                                                                         \
         Arena_Slice _tmp = {0};                                                   \
         arena_slice_reinit((arena), &_tmp, (total) * sizeof(*(a)->items),         \

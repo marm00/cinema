@@ -15,7 +15,7 @@ void table_double(Arena *arena, Robin_Hood_Table *table) {
   if (unlikely(table->bytes_capacity >= CIN_ARENA_MAX)) {
     printf("Cinema crashed trying to allocate excessive memory (%u bytes)",
            table->bytes_capacity << 1);
-    exit(1);
+    cin_exit(1);
   }
   const uint32_t prev_bytes_cap = table->bytes_capacity;
   const uint32_t prev_cap = table->capacity;

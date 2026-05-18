@@ -12,7 +12,7 @@ Watch many streams or videos at once from the command line (with chat). Pressing
 
 Settings for layouts and media are stored in your [cinema.conf](./cinema.conf) file. Type commands from the [list of commands](#list-of-commands) for things like search, autoplay, and macros.
 
-Making your terminal [always on top](https://www.google.com/search?q=How+do+I+set+my+terminal+to+be+always+on+top%3F) or changing [mpv.conf *ontop* settings ](https://mpv.io/manual/stable/#options-ontop) is recommended so that mpv never takes focus.
+Making your terminal always on top or changing mpv.conf [*ontop*](https://mpv.io/manual/stable/#options-ontop) settings is recommended so that mpv never takes focus.
 
 ## Features
 

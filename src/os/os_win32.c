@@ -25,7 +25,7 @@ void *os_alloc(size_t bytes) {
     uint32_t code = GetLastError();
     printf("Cinema crashed with code %u trying to allocate memory with VirtualAlloc", code);
     // https://learn.microsoft.com/en-us/windows/win32/debug/system-error-codes
-    exit(1);
+    cin_exit(1);
   }
   return chunk;
 }

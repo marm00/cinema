@@ -364,7 +364,7 @@ void mpv_spawn(Instance *instance, size_t index) {
            "too large (%d > %u chars): %.*s (first %u shown)",
            index + 1, layout_name, len, CIN_MPVCALL_GEOMETRY_LEN, CIN_MPVCALL_GEOMETRY_LEN,
            screen_utf8, CIN_MPVCALL_GEOMETRY_LEN);
-    exit(1);
+    cin_exit(1);
   }
   char *geometry_flag = mpv_flags[4];
   assert(strstr(geometry_flag, "geometry") && "check flags");

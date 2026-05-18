@@ -949,7 +949,7 @@ bool init_config(const char *filename) {
     // extremely rare case where we exceed INT_MAX by 1 byte,
     // instead of trying to fix it we force a crash
     cin_writef("Cinema crashed receiving too many file paths (exceeding %d bytes)", INT_MAX);
-    exit(1);
+    cin_exit(1);
   }
   docs.bytes_mul32 = array_bytes(&docs) * (uint32_t)sizeof(int32_t);
   docs.doc_mul32 = (uint32_t)docs.doc_count * sizeof(int32_t);

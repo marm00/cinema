@@ -20,7 +20,7 @@ void *os_alloc(size_t bytes) {
   if (chunk == MAP_FAILED) {
     printf("Cinema crashed trying to allocate memory with mmap: %s", strerror(errno));
     // https://kernel.googlesource.com/pub/scm/linux/kernel/git/nico/archive/+/v0.97/include/linux/errno.h
-    exit(1);
+    cin_exit(1);
   }
 #ifdef MADV_HUGEPAGE
   madvise(chunk, bytes, MADV_HUGEPAGE);

@@ -12,6 +12,7 @@
 #include <assert.h>
 #include <limits.h>
 #include <stdint.h>
+#include <stdio.h>
 
 #include "os/os.h"
 
@@ -30,6 +31,12 @@
 #define gigabytes(n) ((n) << 30)
 #define cin_ispow2(n) ((n) && ((n) & ((n) - 1)) == 0)
 #define cin_strlen(str) (sizeof((str)) / sizeof(*(str)) - 1)
+
+static inline void cin_exit(int32_t code) {
+  printf("\r\nCinema crashed. Press any key to continue...");
+  getchar();
+  exit(code);
+}
 
 static inline uint32_t log2_floor(uint32_t n) {
   assert(n > 0U && "0 is undefined behavior");

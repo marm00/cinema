@@ -114,7 +114,7 @@ void mpv_spawn_internal(Instance *instance, char *mpv_flags[], char *socket_name
     fclose(dev_null);
     if (execvp(mpv_flags[0], mpv_flags) < 0) {
       log_last_error("Failed to start mpv");
-      exit(1);
+      cin_exit(1);
     }
     assert(0);
   }
@@ -165,7 +165,7 @@ size_t chat_spawn(const Cin_Layout *layout) {
     fclose(dev_null);
     if (execlp("chatterino", "chatterino", NULL) < 0) {
       log_last_error("Failed to start chatterino");
-      exit(1);
+      cin_exit(1);
     }
     assert(false);
   }

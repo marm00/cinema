@@ -1257,19 +1257,19 @@ static void execute_startup_macros(void) {
 int main(int argc, char **argv) {
   (void)argc;
   (void)argv;
-  if (!init_os()) exit(1);
-  if (!init_repl()) exit(1);
+  if (!init_os()) cin_exit(1);
+  if (!init_repl()) cin_exit(1);
 #ifdef _WIN32
-  if (!InitializeCriticalSectionAndSpinCount(&log_lock, 0)) exit(1);
+  if (!InitializeCriticalSectionAndSpinCount(&log_lock, 0)) cin_exit(1);
 #endif
-  if (!init_config(CIN_CONF_FILENAME)) exit(1);
-  if (!init_commands()) exit(1);
+  if (!init_config(CIN_CONF_FILENAME)) cin_exit(1);
+  if (!init_commands()) cin_exit(1);
 #ifdef _WIN32
-  if (!init_executables()) exit(1);
+  if (!init_executables()) cin_exit(1);
 // on linux we run the exes without searching
 #endif
-  if (!init_documents()) exit(1);
-  if (!init_mpv()) exit(1);
+  if (!init_documents()) cin_exit(1);
+  if (!init_mpv()) cin_exit(1);
 #ifndef _WIN32
   if (!init_xlib()) pxlib = NULL;
 #endif

@@ -157,10 +157,12 @@ void mpv_spawn_internal(Instance *instance, char *mpv_flags[], char *socket_name
   if (!CreateProcessW(exe_wpath_mpv, mpv_command_utf16, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
     if (GetLastError() == ERROR_FILE_NOT_FOUND) {
       log_last_error("Failed to find mpv executable");
+    } else if (GetLastError() == ERROR_PATH_NOT_FOUND) {
+      log_last_error("Failed to find mpv path");
     } else {
       log_last_error("Failed to start mpv executable even though it was found");
     }
-    assert(false);
+    cin_exit(1);
   }
   instance->si = si;
   instance->pi = pi;
