@@ -404,6 +404,7 @@ void chat_reposition(const Cin_Layout *layout) {
       static const size_t CHAT_REPOSITION_TRIES = 50;
       static const long CHAT_REPOSITION_DELAY = 200;
       const size_t pid = chat_spawn(layout);
+      if (!pid) return;
       for (size_t i = 0; i < CHAT_REPOSITION_TRIES; ++i) {
         chat.window = chat_get_window(pid, "Chatterino");
         if (cin_isvisible(chat.window)) {

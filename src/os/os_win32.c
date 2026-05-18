@@ -117,7 +117,8 @@ bool find_exe(const wchar_t *dir, const wchar_t *exe, wchar_t *buf) {
     if (attrs != INVALID_FILE_ATTRIBUTES) return true;
   }
   log_wmessage(LOG_ERROR, L"Failed to find executable '%s'. "
-                          L"Please install it in a standard directory or add it to your environment variables.",
+                          L"Please install it in a standard directory or add it to your environment variables "
+                          L"or copy it next to cinema or specify the path in cinema.conf.",
                exe);
   wmemset(buf, L'\0', CIN_MAX_PATH);
   return false;

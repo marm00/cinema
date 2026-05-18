@@ -165,9 +165,8 @@ size_t chat_spawn(const Cin_Layout *layout) {
     fclose(dev_null);
     if (execlp("chatterino", "chatterino", NULL) < 0) {
       log_last_error("Failed to start chatterino");
-      cin_exit(1);
+      pid = 0;
     }
-    assert(false);
   }
   chat.pid = pid;
   return (size_t)pid;

@@ -203,9 +203,12 @@ size_t chat_spawn(const Cin_Layout *layout) {
   if (!CreateProcessW(exe_wpath_chatterino, L"chatterino", NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
     if (GetLastError() == ERROR_FILE_NOT_FOUND) {
       log_last_error("Failed to find chatterino executable");
+    } else if (GetLastError() == ERROR_PATH_NOT_FOUND) {
+      log_last_error("Failed to find chatterino path");
     } else {
       log_last_error("Failed to start chatterino executable even though it was found");
     }
+    pi.dwProcessId = 0;
   }
   return pi.dwProcessId;
 }
