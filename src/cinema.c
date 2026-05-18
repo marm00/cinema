@@ -1201,7 +1201,10 @@ static void cmd_quit_validator(void) {
   cmd_ctx.executor = cmd_quit_executor;
 }
 
-#define CIN_VERSION "v2.0.0"
+#define CINEMA_VERSION_MAJOR 2
+#define CINEMA_VERSION_MINOR 0
+#define CINEMA_VERSION_PATCH 0
+#define CINEMA_VERSION_STRING "v2.0.0"
 
 static bool init_commands(void) {
   radix_v layout_v = radix_query(layout_tree, (const uint8_t *)"", 0, NULL);
@@ -1213,7 +1216,7 @@ static bool init_commands(void) {
   cmd_ctx.queued_layout = cmd_ctx.layout;
   cmd_ctx.trie = patricia_node(&arena_console, NULL, 0);
   array_init(&arena_console, &cmd_ctx.numbers, COMMAND_NUMBERS_CAP);
-  const char *commands_note = CR "Cinema " CIN_VERSION " - Available commands:" CRLF "  "
+  const char *commands_note = CR "Cinema " CINEMA_VERSION_STRING " - Available commands:" CRLF "  "
                                  "Note: optional arguments before/after in brackets []" CRLF;
   const uint32_t commands_note_len = (uint32_t)strlen(commands_note);
   array_extend(&arena_console, &cmd_ctx.help, commands_note, commands_note_len);
@@ -1266,7 +1269,6 @@ int main(int argc, char **argv) {
   if (!init_commands()) cin_exit(1);
 #ifdef _WIN32
   if (!init_executables()) cin_exit(1);
-// on linux we run the exes without searching
 #endif
   if (!init_documents()) cin_exit(1);
   if (!init_mpv()) cin_exit(1);

@@ -128,19 +128,19 @@ bool init_executables(void) {
   if (*exe_path_mpv) {
     int32_t len = utf8_to_utf16_raw(exe_path_mpv);
     wmemcpy(exe_wpath_mpv, utf16_buf_raw.items, (size_t)len);
-  } else if (!find_exe(L"mpv", L"mpv", exe_wpath_mpv))  {
+  } else if (!find_exe(L"mpv", L"mpv", exe_wpath_mpv)) {
     return false;
   }
   if (*exe_path_ytdlp) {
     int32_t len = utf8_to_utf16_raw(exe_path_ytdlp);
     wmemcpy(exe_wpath_ytdlp, utf16_buf_raw.items, (size_t)len);
-  } else if (!find_exe(L"mpv", L"yt-dlp", exe_wpath_ytdlp))  {
+  } else if (!find_exe(L"mpv", L"yt-dlp", exe_wpath_ytdlp)) {
     return false;
   }
-   if (*exe_path_chatterino) {
+  if (*exe_path_chatterino) {
     int32_t len = utf8_to_utf16_raw(exe_path_chatterino);
     wmemcpy(exe_wpath_chatterino, utf16_buf_raw.items, (size_t)len);
-  } else  {
+  } else {
     find_exe(L"Chatterino", L"chatterino", exe_wpath_chatterino);
   }
   return true;
