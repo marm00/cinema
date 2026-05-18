@@ -20,10 +20,13 @@ fn_XFree pXFree = 0;
 
 bool cin_iswindow(HWND window) {
   if (!pxlib || !window) return false;
+  pXSetErrorHandler(xerror_handler);
   Window root;
   int x, y;
   unsigned int w, h, bw, d;
   Status status = pXGetGeometry(pxdisplay, window, &root, &x, &y, &w, &h, &bw, &d);
+  pXSync(pxdisplay, false);
+  pXSetErrorHandler(NULL);
   return status != 0;
 }
 
