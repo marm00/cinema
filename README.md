@@ -17,8 +17,8 @@ Drive multiple media sources (streams, videos, local files) with a single click 
 [Features](#features) •
 [Quick start](#quick-start) •
 [Using Cinema](#using-cinema) •
-[Build from source](#compilation) •
-[Contribute](#compilation)
+[Compilation](#compilation) •
+[Contributing](#Contributing)
 
 [![C][c-badge]][c]
 [![Release][release-badge]][releases]
