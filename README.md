@@ -1,6 +1,6 @@
 # Cinema
 
-![Screenshot of Cinema in action with the 7tv Cinema emote in the center.](./cinema_gif.webp)
+![Screenshot of Cinema in action with the 7tv Cinema emote in the center.](./cinema.webp)
 
 ## Download
 
