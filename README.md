@@ -49,9 +49,10 @@ Define your own layouts and startup behavior, watch many videos at once (with Ch
 
 Follow these steps to get started:
 
-1. [Download the latest release](https://github.com/marm00/cinema/releases) for Windows or Linux on the GitHub releases page.
-2. Run Cinema by double-clicking or from the command line.
-3. Type `help` for a list of commands or simply `enter` to shuffle.
+1. Make sure you have installed [mpv](https://mpv.io/installation/), [yt-dlp](https://github.com/yt-dlp/yt-dlp/releases/latest) for streams, [Chatterino](https://chatterino.com/#downloads) for chat.
+2. [Download the latest release](https://github.com/marm00/cinema/releases) for Windows or Linux on the GitHub releases page.
+3. Run Cinema by double-clicking or from the command line.
+4. Type `help` for a list of commands or simply `enter` to shuffle.
 
 ## Using Cinema
 
@@ -100,13 +101,13 @@ If you're on a single-monitor setup and/or your console gets pushed below mpv, t
 
 ## Compilation
 
-On Windows run: `.\build.bat`
+To build Cinema from source on Windows, run: `.\build.bat`
 
-On Linux run:: `./build.sh`
+On Linux, run: `./build.sh`
+
+On MacOS, please consider making a PR. Some functions are maybe not posix-compliant.
 
 **Windows:** Make sure you have installed [Build Tools for Visual Studio](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2026) (select 'Desktop development with C++' when prompted) and [LLVM](https://github.com/llvm/llvm-project/releases/latest) (recommend 'add to PATH' option). The [RAD Debugger](https://github.com/EpicGamesExt/raddebugger) is recommended for development.
-
-**MacOS**: untested, some functions are maybe not posix-compliant.
 
 It builds in debug mode with openmp enabled by default. For the release version, run `build release`. To disable openmp, run `build nomp`. To enable address sanitizer, run `build asan`. Specify the log level with `build log_[X]` where [X] is one of *trace*, *debug* (default for debug builds), *info*, *warning* (default for release builds), *error*, descending in frequency.
 
