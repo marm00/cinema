@@ -71,7 +71,7 @@ Follow these steps to get started:
 
 You have 2 options to create or change custom layouts. The first is to run `extra` to add screens, resize and move them (do the same with `chat`), and run `store <name>`. The second is to open [cinema.conf](./cinema.conf) (which has a short tutorial), find or add the layout, and manually set the expected fields (name, screen, chat).
 
-```toml
+```ini
 [macro]
 name    = popular twitch streams
 startup = yes
