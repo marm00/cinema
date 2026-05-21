@@ -13,7 +13,7 @@
 
 Cinema is a **browserless multiviewer** for Twitch streams and other media.  
 
-Define your own layouts and startup behavior, watch many videos at once (with Chatterino) using simple commands or automatically.
+Define your own layouts and startup behavior, watch many videos at once (with Chatterino) using simple commands or automatically with macros.
 
 [Features](#features) •
 [Quick start](#quick-start) •
@@ -41,9 +41,9 @@ Define your own layouts and startup behavior, watch many videos at once (with Ch
 ## Features
 
 * Multiviewer for [mpv](https://github.com/mpv-player/mpv/)-supported media, including Twitch streams.
-* Instant search across your files, and tags to group media.
-* Save and load layouts (including [Chatterino](https://chatterino.com/)).
-* Macros to do many things at once, optionally on startup.
+* Save and load custom layouts (including [Chatterino](https://chatterino.com/)).
+* Instantly search across your files or use tags to group media.
+* Macros to do everything at once, optionally on startup.
 
 ## Quick start
 
@@ -51,7 +51,7 @@ Follow these steps to get started:
 
 1. [Download the latest release](https://github.com/marm00/cinema/releases) for Windows or Linux on the GitHub releases page.
 2. Run Cinema by double-clicking or from the command line.
-3. Type `help` for a list of commands.
+3. Type `help` for a list of commands or simply `enter` to shuffle.
 
 ## Using Cinema
 
@@ -84,7 +84,7 @@ name   = my grid
 screen = 50%x100%+0+0, 50%x100%+100%+0
 ```
 
-You have 2 options to create or change custom layouts. The first is to run `extra` to add screens, resize and move them (do the same with `chat`), and run `store <name>`. The second is to open  (which has a short tutorial), find or add the layout, and manually set the expected fields (name, screen, chat).
+You have 2 options to create or change custom layouts. The first is to run `extra` to add screens, resize and move them (do the same with `chat`), and run `store <name>`. The second is to open cinema.conf, find or add the layout, and manually set the expected fields (name, screen, chat).
 
 Macros can be defined in cinema.conf, all that's needed is a name and the commands you want to run. You can use `startup = yes` to make it run when launching Cinema, and/or run it via the command `macro <name>`. Fully supported by autocomplete.
 
