@@ -71,7 +71,20 @@ Follow these steps to get started:
 
 See the full [list of commands](./commands.md) for more information.
 
-You have 2 options to create or change custom layouts. The first is to run `extra` to add screens, resize and move them (do the same with `chat`), and run `store <name>`. The second is to open [cinema.conf](./cinema.conf) (which has a short tutorial), find or add the layout, and manually set the expected fields (name, screen, chat).
+Your settings are stored in [cinema.conf](./cinema.conf) with `[media]` tables for your library, `[layout]` for custom layouts, and `[macro]` for command combinations. The default config ships with various layouts and a startup macro to watch streams with chat, alongside a short tutorial.
+
+```ini
+[media]
+tags        = space
+urls        = https://twitch.tv/NASA
+directories = D:\rockets, ~/planets/big
+
+[layout]
+name   = my grid
+screen = 50%x100%+0+0, 50%x100%+100%+0
+```
+
+You have 2 options to create or change custom layouts. The first is to run `extra` to add screens, resize and move them (do the same with `chat`), and run `store <name>`. The second is to open  (which has a short tutorial), find or add the layout, and manually set the expected fields (name, screen, chat).
 
 ```ini
 [macro]
