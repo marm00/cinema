@@ -86,6 +86,8 @@ screen = 50%x100%+0+0, 50%x100%+100%+0
 
 You have 2 options to create or change custom layouts. The first is to run `extra` to add screens, resize and move them (do the same with `chat`), and run `store <name>`. The second is to open  (which has a short tutorial), find or add the layout, and manually set the expected fields (name, screen, chat).
 
+Macros can be defined in cinema.conf, all that's needed is a name and the commands you want to run. You can use `startup = yes` to make it run when launching Cinema, and/or run it via the command `macro <name>`. Fully supported by autocomplete.
+
 ```ini
 [macro]
 name    = popular twitch streams
@@ -93,8 +95,6 @@ startup = yes
 command = layout 4, tag most popular
 command = 2 3 4 mute
 ```
-
-Macros can be defined in cinema.conf, all that's needed is a name and the commands you want to run. You can use `startup = yes` to make it run when launching Cinema, and/or run it via the command `macro <name>`. Fully supported by autocomplete.
 
 If you're on a single-monitor setup and/or your console gets pushed below mpv, try setting it to be 'always on top' or modify the ['ontop'](https://mpv.io/manual/stable/#options-ontop) setting in mpv.conf.
 
