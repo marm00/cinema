@@ -11,14 +11,15 @@
 
 # Cinema
 
-Cinema is a **browserless multiviewer** with custom layouts.  
-Drive multiple media sources (streams, videos, local files) with a single click or terminal command.
+Cinema is a **browserless multiviewer** for Twitch streams and other media.  
+
+Define your own layouts and startup behavior, watch many videos at once (with Chatterino) using simple commands or automatically.
 
 [Features](#features) •
 [Quick start](#quick-start) •
 [Using Cinema](#using-cinema) •
-[Build from source](#compilation) •
-[Contribute](#compilation)
+[Compilation](#compilation) •
+[Contributing](#contributing)
 
 [![C][c-badge]][c]
 [![Release][release-badge]][releases]
@@ -33,9 +34,9 @@ Drive multiple media sources (streams, videos, local files) with a single click 
 [license-badge]: https://img.shields.io/github/license/marm00/cinema?logo=MIT&logoColor=white&style=flat-square&color=DD4343
 [license]: ./LICENSE
 
-![Demo gif using Cinema to change layouts and shuffle media](./cinema.webp)
-
 </div>
+
+![Demo gif using Cinema to change layouts and shuffle media](./cinema.webp)
 
 ## Features
 
@@ -69,6 +70,16 @@ Follow these steps to get started:
 ```
 
 You have 2 options to create or change custom layouts. The first is to run `extra` to add screens, resize and move them (do the same with `chat`), and run `store <name>`. The second is to open [cinema.conf](./cinema.conf) (which has a short tutorial), find or add the layout, and manually set the expected fields (name, screen, chat).
+
+```toml
+[macro]
+name    = popular twitch streams
+startup = yes
+command = layout 4, tag most popular
+command = 2 3 4 mute
+```
+
+Macros can be defined in cinema.conf, all that's needed is a name and the commands you want to run. You can use `startup = yes` to make it run when launching Cinema, and/or run it via the command `macro <name>`. Fully supported by autocomplete.
 
 If you're on a single-monitor setup and/or your console gets pushed below mpv, try setting it to be 'always on top' or modify the ['ontop'](https://mpv.io/manual/stable/#options-ontop) setting in mpv.conf.
 
