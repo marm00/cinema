@@ -11,9 +11,9 @@
 
 # Cinema
 
-Cinema is a **browserless multiviewer** for Twitch streams and other media.  
+Cinema is a customizable multiviewer for Twitch streams and other media.
 
-Define your own layouts and startup behavior, watch many videos at once (with Chatterino) using simple commands or automatically with macros.
+Define your own layouts and startup behavior, watch many videos at once, and filter media with autocompleted commands.
 
 [Features](#features) •
 [Quick start](#quick-start) •
