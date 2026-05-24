@@ -33,7 +33,7 @@
 #define cin_strlen(str) (sizeof((str)) / sizeof(*(str)) - 1)
 
 static inline void cin_exit(int32_t code) {
-  printf("\r\nCinema crashed. Press any key to continue...");
+  printf("\r\nCinema crashed, see above. Press any key to continue...");
   getchar();
   exit(code);
 }

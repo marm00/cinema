@@ -153,7 +153,7 @@ bool parse_config(const char *filename) {
   FILE *file = fopen(filename, "rt");
   if (!file) {
     log_last_error("Failed to open file '%s'", filename);
-    goto end;
+    return false;
   }
   array_init(&arena_console, &conf_parser.buf, CONF_LINE_CAP);
   array_init(&arena_console, &conf_parser.scopes, CONF_SCOPES_CAP);
