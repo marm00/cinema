@@ -918,7 +918,7 @@ bool init_config(const char *filename) {
         log_message(LOG_DEBUG, "Macro: %s", part);
         setup_macro_command(part, macro);
       }
-      const bool startup = scope->macro.startup.items && strcmp("yes", scope->macro.startup.items) == 0;
+      const bool startup = scope->macro.startup.items && strncmp("yes", scope->macro.startup.items, 3) == 0;
       setup_macro(scope->macro.name.items, macro, startup);
       array_free_items(&arena_console, &scope->macro.name);
       array_free_items(&arena_console, &scope->macro.command);
