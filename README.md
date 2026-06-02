@@ -43,7 +43,7 @@ Define your own layouts and startup behavior, watch many videos at once, and fil
 * Multiviewer for [mpv](https://github.com/mpv-player/mpv/)-supported media, including Twitch streams.
 * Save and load custom layouts (including [Chatterino](https://chatterino.com/)).
 * Instantly search across your files or use tags to group media.
-* Macros to do everything at once, optionally on startup.
+* Macros to do many things at once, optionally on startup.
 
 ## Quick start
 

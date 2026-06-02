@@ -1203,9 +1203,9 @@ static void cmd_quit_validator(void) {
 }
 
 #define CINEMA_VERSION_MAJOR 2
-#define CINEMA_VERSION_MINOR 0
-#define CINEMA_VERSION_PATCH 2
-#define CINEMA_VERSION_STRING "v2.0.2"
+#define CINEMA_VERSION_MINOR 1
+#define CINEMA_VERSION_PATCH 0
+#define CINEMA_VERSION_STRING "v2.1.0"
 
 static bool init_commands(void) {
   radix_v layout_v = radix_query(layout_tree, (const uint8_t *)"", 0, NULL);
