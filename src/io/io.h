@@ -181,6 +181,7 @@ void chat_reposition(const Cin_Layout *layout);
 #define TERM_REPLACEMENT "\xEF\xBF\xBD"
 #define TERM_SEQUENCE_MAX 8
 #define TERM_READ_WAIT_MS 5
+#define TERM_FORMFEED 0xc
 
 int32_t term_read(uint8_t *buf, const int32_t n, bool peek);
 bool term_proc_sequence(const uint8_t *sequence, int32_t len);

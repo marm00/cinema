@@ -704,8 +704,15 @@ bool term_proc_char(char byte) {
       term_clear(curr, deleted, false, false);
     }
   } break;
+  case TERM_FORMFEED: {
+    // CTRL+L
+    repl.home.Y = 1;
+    cursor_home();
+    cin_writef(CSI "2J" PREFIX_STR "%s", repl.msg->items);
+    cursor_curr();
+  } break;
   default:
-    if (!byte) {
+    if (!byte || byte < 32) {
       new_preview = false;
       break;
     }
