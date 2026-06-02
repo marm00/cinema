@@ -54,17 +54,14 @@ void rewrite_post_log(void) {
   }
 #endif
   const COORD next = repl.cursor;
-  const short line_shift = next.Y - prev.Y;
-  assert(line_shift >= 0);
-  short leftover = 0;
-  if (line_shift == 0) {
-    const short tail_x = index_x_repl((uint32_t)repl.msg->count);
-    leftover = (short)preview.len - tail_x;
-  }
   if (repl.cursor.X < repl.size.X) {
-    cin_writef(CSI "0K\n> %.*s" CSI "%hdX", repl.msg->count, repl.msg->items, leftover);
+    cin_writef(CSI "0K\n> %.*s", repl.msg->count, repl.msg->items);
   } else {
-    cin_writef("\n> %.*s" CSI "%hdX", repl.msg->count, repl.msg->items, leftover);
+    cin_writef("\n> %.*s", repl.msg->count, repl.msg->items);
+  }
+  const short line_shift = next.Y - prev.Y;
+  if (line_shift == 0) {
+    cin_swrite(CSI "0K");
   }
   repl.home.Y = next.Y + 1;
   const short msg_lines = index_y(HOME_X + repl.msg->count, (uint32_t)repl.size.X) + 1;

@@ -243,9 +243,14 @@ void iocp_parse(Instance *instance, const char *buf_start, size_t buf_offset) {
       if (++clipboard.supply >= clipboard.demand) {
         clipboard.supply = 0;
         clipboard.demand = 0;
-        if (clipboard.count) clipboard.items[clipboard.count - 1] = '\0';
-        cin_write_safe(clipboard.items, clipboard.count);
-        copy_clipboard();
+        if (clipboard.count > 1) {
+          // overwrite final separator with null-terminator
+          clipboard.items[clipboard.count - 1] = '\0';
+          cin_write_safe(clipboard.items, clipboard.count);
+          copy_clipboard();
+          clipboard.items[0] = '\r';
+          clipboard.count = 1;
+        }
       }
     } break;
     default:
@@ -313,6 +318,7 @@ void iocp_process(Instance *instance, size_t bytes) {
 bool init_mpv(void) {
   arena_chunk_init(&arena_io, CIN_IO_ARENA_CAP);
   arena_chunk_init(&arena_iocp_thread, CIN_IO_ARENA_CAP);
+  array_push(&arena_iocp_thread, &clipboard, '\r');
   cache_init_core(&arena_io, &cin_io.writes, 1, true);
   cache_init_core(&arena_io, &cin_io.instances, 1, false);
   cache_init_core(&arena_docs, &media.playlists, 1, true);
