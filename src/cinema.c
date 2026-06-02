@@ -1074,11 +1074,12 @@ static void cmd_twitch_validator(void) {
 }
 
 static void cmd_copy_executor(void) {
-  array_clear(&clipboard);
   clipboard.supply = 0;
   clipboard.demand = 0;
   mpv_target_foreach(i, instance) {
     ++clipboard.demand;
+  }
+  mpv_target_foreach(i, instance) {
     overlap_write(instance, MPV_GET_PATH, "get_property", "path", NULL);
   }
   return;
@@ -1261,10 +1262,10 @@ int main(int argc, char **argv) {
   (void)argc;
   (void)argv;
   if (!init_os()) cin_exit(1);
-  if (!init_repl()) cin_exit(1);
 #ifdef _WIN32
   if (!InitializeCriticalSectionAndSpinCount(&log_lock, 0)) cin_exit(1);
 #endif
+  if (!init_repl()) cin_exit(1);
   if (!init_config(CIN_CONF_FILENAME)) cin_exit(1);
   if (!init_commands()) cin_exit(1);
 #ifdef _WIN32
@@ -1282,16 +1283,15 @@ int main(int argc, char **argv) {
     if (!term_read(&byte, 1, false)) {
       break;
     }
+    lock_logs();
     hide_cursor();
     const COORD size_change = term_get_size(&repl.size);
     if (size_change.X) {
-      lock_logs();
       term_get_cursor(&repl.cursor);
       const uint32_t curr_index = cursor_to_index(repl.cursor, (uint32_t)repl.size.X);
       const uint32_t i = curr_index > repl.msg_index ? curr_index - repl.msg_index : curr_index;
       const short new_home_y = index_y(i, (uint32_t)repl.size.X);
       repl.home.Y = new_home_y;
-      unlock_logs();
     } else if (size_change.Y < 0) {
       repl.home.Y = min(repl.home.Y, repl.size.Y - 1);
     }
@@ -1347,6 +1347,7 @@ int main(int argc, char **argv) {
       term_clear(clear_pos, leftover, true, false);
       cursor_curr();
     }
+    unlock_logs();
   }
   return 0;
 }
