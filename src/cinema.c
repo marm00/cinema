@@ -1262,9 +1262,7 @@ int main(int argc, char **argv) {
   (void)argc;
   (void)argv;
   if (!init_os()) cin_exit(1);
-#ifdef _WIN32
-  if (!InitializeCriticalSectionAndSpinCount(&log_lock, 0)) cin_exit(1);
-#endif
+  if (!init_logs()) cin_exit(1);
   if (!init_repl()) cin_exit(1);
   if (!init_config(CIN_CONF_FILENAME)) cin_exit(1);
   if (!init_commands()) cin_exit(1);

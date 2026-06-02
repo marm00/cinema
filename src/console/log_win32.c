@@ -6,6 +6,10 @@
 
 static CRITICAL_SECTION log_lock;
 
+bool init_logs(void) {
+  return InitializeCriticalSectionAndSpinCount(&log_lock, 0);
+}
+
 void lock_logs(void) {
   EnterCriticalSection(&log_lock);
 }

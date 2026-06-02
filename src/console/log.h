@@ -18,6 +18,7 @@ typedef enum {
 extern const Cin_Log_Level GLOBAL_LOG_LEVEL;
 extern const char *LOG_LEVELS[LOG_TRACE + 1];
 
+bool init_logs(void);
 void lock_logs(void);
 void unlock_logs(void);
 void log_preview(void);

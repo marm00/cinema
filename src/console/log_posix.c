@@ -7,6 +7,15 @@
 
 static pthread_mutex_t log_lock = PTHREAD_MUTEX_INITIALIZER;
 
+bool init_logs(void) {
+  pthread_mutexattr_t attr;
+  pthread_mutexattr_init(&attr);
+  pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE_NP);
+  pthread_mutex_init(&log_lock, &attr);
+  pthread_mutexattr_destroy(&attr);
+  return true;
+}
+
 void lock_logs(void) {
   pthread_mutex_lock(&log_lock);
 }
